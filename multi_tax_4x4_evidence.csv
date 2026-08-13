@@ -1,0 +1,26 @@
+population,contactId,contactName,taxType,sinceLDAmount,isDominant,contributes,reason
+A_flagged,48dda2fb-08e7-4956-8316-c99a6937db7e,Napa Auto Parts,INPUT2,12482.39,yes,no,
+A_flagged,48dda2fb-08e7-4956-8316-c99a6937db7e,Napa Auto Parts,ZERORATEDINPUT,312.62,no,yes,
+A_flagged,fc2caaae-8f04-4fae-94d2-3376e90838ed,BANOZE TYRES WHOLESALE,INPUT2,4505.61,yes,no,
+A_flagged,fc2caaae-8f04-4fae-94d2-3376e90838ed,BANOZE TYRES WHOLESALE,ZERORATEDINPUT,37.59,no,yes,
+A_flagged,9dd425a8-76ec-4649-87ee-c054b24056d0,Ian W Bentley Bulk Transport Ltd,INPUT2,18264.92,yes,no,
+A_flagged,9dd425a8-76ec-4649-87ee-c054b24056d0,Ian W Bentley Bulk Transport Ltd,ZERORATEDINPUT,124.48,no,yes,
+A_flagged,9dd425a8-76ec-4649-87ee-c054b24056d0,Ian W Bentley Bulk Transport Ltd,RRINPUT,1053.94,no,yes,
+A_flagged,1301c62f-af5d-4bc4-b1ca-f15d98077e82,AZ Motor Spares,INPUT2,302.87,yes,no,
+A_flagged,1301c62f-af5d-4bc4-b1ca-f15d98077e82,AZ Motor Spares,ZERORATEDINPUT,0.01,no,yes,
+A_flagged,e30e073d-e366-4c0a-b277-cf003cceac28,Greno Garage & Engineering Ltd,INPUT2,120.00,no,yes,
+A_flagged,e30e073d-e366-4c0a-b277-cf003cceac28,Greno Garage & Engineering Ltd,NONE,144.00,yes,no,
+A_flagged,68a687f2-8f38-4a95-b53a-8082de6632a1,Volkswagen Group United Kingdom,INPUT2,237.33,yes,no,
+A_flagged,68a687f2-8f38-4a95-b53a-8082de6632a1,Volkswagen Group United Kingdom,ZERORATEDINPUT,0.04,no,yes,
+A_flagged,18b4cfdf-1bb7-41dc-8ba3-3535934d7923,LEEDS UNIQUE,INPUT2,608.56,yes,no,
+A_flagged,f8d6eaa1-d9d7-4b17-8704-0c12929552fe,Amazon,INPUT2,843.59,yes,no,
+A_flagged,f8d6eaa1-d9d7-4b17-8704-0c12929552fe,Amazon,ZERORATEDINPUT,0.01,no,yes,
+A_flagged,041ca753-6e9f-46ce-9b3b-6d164e145187,Perrys Motor Sales,INPUT2,725.58,yes,no,
+A_flagged,041ca753-6e9f-46ce-9b3b-6d164e145187,Perrys Motor Sales,ZERORATEDINPUT,0.02,no,yes,
+A_flagged,8e41cf9e-0f50-437a-b0b3-0d23a210e5a7,BMW Service Sandal Wakefield,INPUT2,89.95,yes,no,
+A_flagged,8e41cf9e-0f50-437a-b0b3-0d23a210e5a7,BMW Service Sandal Wakefield,ZERORATEDINPUT,0.01,no,yes,
+A_flagged,00500275-e85c-4fa2-aede-c7446d505cdd,Vertu,INPUT2,12.35,yes,no,
+A_flagged,00500275-e85c-4fa2-aede-c7446d505cdd,Vertu,ZERORATEDINPUT,0.02,no,yes,
+B_excluded,69bee821-9ab0-407d-8c4b-3a72e7f570a2,TPS Huddersfield,INPUT2+NONE,,,no,zero_value_line_filtering_reduced_to_one_code
+B_excluded,75e21b44-d1c4-40ef-9859-6bb085572baf,Ray Chapman Motors,INPUT2+ZERORATEDINPUT,,,no,no_since_lock_date_activity_at_all
+B_excluded,328bb18e-773e-481c-93f7-a1ba78279fed,MANDMORELTD,INPUT2+NONE,,,no,zero_value_line_filtering_reduced_to_one_code

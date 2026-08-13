@@ -1,0 +1,9 @@
+# Adds a system Chromium (via Nix) alongside the auto-detected Node build, so
+# Puppeteer's PDF export (src/routes/client.js) has a working browser binary on
+# Railway without relying on its own bundled-Chromium download (which frequently
+# fails or is missing shared libs on minimal container images).
+[phases.setup]
+nixPkgs = ["chromium"]
+
+[start]
+cmd = "PUPPETEER_EXECUTABLE_PATH=\"$(which chromium)\" node app.js"

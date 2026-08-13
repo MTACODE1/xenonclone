@@ -1,0 +1,158 @@
+<%- include('partials/header', { currentPage: 'validation' }) %>
+
+<div class="page-header">
+  <h4>Validation &amp; Cancellation Gate</h4>
+  <p>Auditable, period-matched comparison of Xenon exports against active app runs</p>
+</div>
+
+<div class="alert <%= gate.passed ? 'alert-success' : 'validation-stop' %>">
+  <strong><%= gate.cancellationMessage %></strong>
+  <% if (!gate.passed) { %>
+    <div>Xenon remains required until every gate criterion below passes on real evidence.</div>
+  <% } %>
+</div>
+
+<% if (query && query.saved) { %><div class="alert alert-success">Validation evidence saved.</div><% } %>
+<% if (query && query.error) { %><div class="alert validation-stop"><%= query.error %></div><% } %>
+
+<div class="stats-grid" style="margin-bottom: 20px;">
+  <div class="stat-card"><div class="stat-value"><%= gate.summary.distinctClients %>/5</div><div class="stat-label">Representative clients</div></div>
+  <div class="stat-card"><div class="stat-value"><%= (gate.summary.apiParity * 100).toFixed(1) %>%</div><div class="stat-label">API count parity</div></div>
+  <div class="stat-card"><div class="stat-value"><%= gate.summary.countedSnapshots %></div><div class="stat-label">Counted snapshots</div></div>
+  <div class="stat-card <%= gate.passed ? 'stat-success' : 'stat-error' %>"><div class="stat-value"><%= gate.passed ? 'PASS' : 'BLOCKED' %></div><div class="stat-label">Cancellation gate</div></div>
+</div>
+
+<div class="card" style="margin-bottom: 20px;">
+  <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
+    <h5>Gate Criteria</h5>
+    <a class="btn btn-outlined btn-sm" href="/validation/result.json">Download JSON result</a>
+  </div>
+  <div class="card-body">
+    <% gate.criteria.forEach(item => { %>
+      <div class="validation-criterion">
+        <span class="importance-badge <%= item.passed ? 'low' : 'critical' %>"><%= item.passed ? 'PASS' : 'MISSING' %></span>
+        <div>
+          <strong><%= item.label %></strong>
+          <% item.missing.forEach(missing => { %><div class="text-muted"><%= missing %></div><% }) %>
+        </div>
+      </div>
+    <% }) %>
+  </div>
+</div>
+
+<div class="card" style="margin-bottom: 20px;">
+  <div class="card-header"><h5>Operational Test Evidence</h5></div>
+  <div class="card-body">
+    <% [
+      ['review_state_survival', 'Review-state survival test'],
+      ['no_data_loss_sync', 'No-data-loss sync test'],
+      ['workflow_readiness', 'Workflow readiness']
+    ].forEach(([type, label]) => { const assurance = assurances[type] || {}; %>
+      <form method="POST" action="/validation/assurance" class="validation-assurance">
+        <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+        <input type="hidden" name="assurance_type" value="<%= type %>">
+        <strong><%= label %></strong>
+        <select name="status" class="form-select">
+          <% ['not_tested', 'failed', 'passed'].forEach(status => { %>
+            <option value="<%= status %>" <%= assurance.status === status ? 'selected' : '' %>><%= status.replace('_', ' ') %></option>
+          <% }) %>
+        </select>
+        <input type="date" name="evidence_date" class="form-input" value="<%= assurance.evidenceDate || '' %>">
+        <input type="text" name="notes" class="form-input" value="<%= assurance.notes || '' %>" placeholder="Evidence reference and result">
+        <button class="btn btn-outlined btn-sm" type="submit">Save</button>
+      </form>
+    <% }) %>
+  </div>
+</div>
+
+<div class="card" style="margin-bottom: 20px;">
+  <div class="card-header"><h5>Import Private Xenon Evidence</h5></div>
+  <form method="POST" action="/validation/import" enctype="multipart/form-data" class="card-body">
+    <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+    <p class="text-muted" style="margin-bottom:12px;">JSON/CSV is validated strictly, hashed with SHA-256, and stored under private <code>data/validation-evidence</code>. See <a href="/validation/guide">VALIDATION_GUIDE.md</a> for the exact format.</p>
+    <div class="validation-import-grid">
+      <select name="org_id" class="form-select" required>
+        <option value="">Select organisation</option>
+        <% organisations.forEach(org => { %><option value="<%= org.id %>"><%= org.name %></option><% }) %>
+      </select>
+      <input type="file" name="validation_file" class="form-input" accept=".json,.csv,application/json,text/csv" required>
+      <button class="btn btn-primary" type="submit">Validate &amp; Import</button>
+    </div>
+  </form>
+</div>
+
+<details class="card" style="margin-bottom: 20px;">
+  <summary class="card-header" style="cursor:pointer;"><h5>Manual Evidence Entry</h5></summary>
+  <form method="POST" action="/validation/manual" class="card-body">
+    <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+    <div class="validation-form-grid">
+      <label>Organisation<select name="org_id" class="form-select" required><option value="">Select</option><% organisations.forEach(org => { %><option value="<%= org.id %>"><%= org.name %></option><% }) %></select></label>
+      <label>Period key<input name="period_key" class="form-input" required placeholder="current_fy:2026-04-01:2027-03-31"></label>
+      <label>Source date<input type="date" name="source_date" class="form-input" required></label>
+      <label>Xenon score<input type="number" min="0" max="100" step="0.01" name="xenon_score" class="form-input" required></label>
+      <label>Xenon issues<input type="number" min="0" step="1" name="xenon_issues" class="form-input" required></label>
+      <label>Xenon value £<input type="number" min="0" step="0.01" name="xenon_value_gbp" class="form-input" required></label>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Representative profile tags</label>
+      <% profileTags.forEach(tag => { %><label style="margin-right:16px;"><input type="checkbox" name="profile_tags" value="<%= tag %>"> <%= tag %></label><% }) %>
+    </div>
+    <div class="validation-form-grid">
+      <label>Headline/value notes<textarea name="notes" class="form-input" rows="2" placeholder="Explain headline or material value deltas"></textarea></label>
+      <label>Accepted score reason<textarea name="score_reason" class="form-input" rows="2" placeholder="Required only when score delta exceeds 3"></textarea></label>
+    </div>
+    <label style="display:block;margin:12px 0;"><input type="checkbox" name="counts_toward_gate" value="1"> Count as verified real-client evidence (leave clear for draft/MBX observations)</label>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Check</th><th>Support</th><th>Xenon count</th><th>Xenon value £</th><th>Mismatch explanation</th></tr></thead>
+        <tbody>
+          <% checkDefinitions.forEach(check => { %>
+            <tr>
+              <td><%= check.label %></td>
+              <td><%= checkSupport[check.type] %></td>
+              <td><input type="number" min="0" step="1" name="count_<%= check.type %>" class="form-input validation-number" required></td>
+              <td><input type="number" min="0" step="0.01" name="value_<%= check.type %>" class="form-input validation-number" required></td>
+              <td><input type="text" name="note_<%= check.type %>" class="form-input" placeholder="Required for mismatch/material delta"></td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+    <button class="btn btn-primary" type="submit" style="margin-top:12px;">Save Manual Snapshot</button>
+  </form>
+</details>
+
+<div class="card">
+  <div class="card-header"><h5>Audit Trail &amp; Comparisons</h5></div>
+  <div class="card-body">
+    <% if (!snapshots.length) { %><p class="text-muted">No validation snapshots imported. Historical narrative and synthetic fixtures are not production evidence.</p><% } %>
+    <% gate.comparisons.forEach(comparison => { %>
+      <details class="validation-snapshot">
+        <summary>
+          <strong><%= comparison.orgName %></strong> — <%= comparison.periodKey %>
+          <span class="importance-badge <%= comparison.runMatches ? 'low' : 'critical' %>"><%= comparison.runMatches ? 'RUN MATCHED' : 'NO MATCHING RUN' %></span>
+        </summary>
+        <p>Headline: score <%= comparison.xenonScore %> → <%= comparison.appScore == null ? 'N/A' : comparison.appScore %>
+          (Δ <%= comparison.scoreDelta == null ? 'N/A' : comparison.scoreDelta %>),
+          issues <%= comparison.xenonIssues %> → <%= comparison.appIssues == null ? 'N/A' : comparison.appIssues %>
+          (Δ <%= comparison.issueDelta == null ? 'N/A' : comparison.issueDelta %>),
+          value £<%= comparison.xenonValue.toFixed(2) %> → <%= comparison.appValue == null ? 'N/A' : '£' + comparison.appValue.toFixed(2) %>.</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Check</th><th>Support</th><th>Counts X/A</th><th>Count Δ</th><th>Value Δ</th><th>Explanation</th></tr></thead>
+          <tbody><% comparison.checks.forEach(check => { %><tr>
+            <td><%= check.label %></td><td><%= check.supportType %></td>
+            <td><%= check.xenonCount %> / <%= check.appCount == null ? 'N/A' : check.appCount %></td>
+            <td><%= check.countDelta == null ? 'N/A' : check.countDelta %></td>
+            <td><%= check.valueDelta == null ? 'N/A' : '£' + check.valueDelta.toFixed(2) %></td>
+            <td><%= check.mismatchNote || '—' %></td>
+          </tr><% }) %></tbody>
+        </table></div>
+      </details>
+    <% }) %>
+    <% snapshots.filter(snapshot => !snapshot.countsTowardGate).forEach(snapshot => { %>
+      <div class="validation-snapshot"><strong><%= snapshot.orgName %></strong> — draft/not counted, SHA-256 <code><%= snapshot.sourceFileSha256 %></code></div>
+    <% }) %>
+  </div>
+</div>
+
+<%- include('partials/footer') %>

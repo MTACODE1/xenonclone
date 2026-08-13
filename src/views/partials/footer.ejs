@@ -1,0 +1,78 @@
+    </div>
+    <footer class="site-footer">
+      <p>Xero Health Dashboard &copy; 2026 &mdash; MTA Workflow Design Standards</p>
+    </footer>
+  </div>
+</div>
+
+<script>
+function openSidebar() {
+  document.getElementById('sidebar').classList.add('open');
+  document.getElementById('sidebarOverlay').classList.add('open');
+}
+function closeSidebar() {
+  document.getElementById('sidebar').classList.remove('open');
+  document.getElementById('sidebarOverlay').classList.remove('open');
+}
+
+async function syncAll() {
+  const btn = document.getElementById('syncAllBtn') || event.target;
+  const originalHTML = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<svg class="spinning" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg> Syncing...';
+  try {
+    const response = await fetch('/sync-all?async=1', { method: 'POST' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Could not start sync');
+    followJob(data.jobId, btn, originalHTML);
+  } catch(e) {
+    alert('Sync failed: ' + e.message);
+    btn.disabled = false;
+    btn.innerHTML = originalHTML;
+  }
+}
+
+async function syncClient(tenantId, btn) {
+  const originalHTML = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<svg class="spinning" width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke-width="4"/></svg>';
+  try {
+    const resp = await fetch('/sync/' + tenantId + '?async=1', { method: 'POST' });
+    const data = await resp.json();
+    if (data.jobId) followJob(data.jobId, btn, originalHTML);
+    else {
+      alert('Sync failed: ' + data.error);
+      btn.disabled = false;
+      btn.innerHTML = originalHTML;
+    }
+  } catch(e) {
+    alert('Sync failed: ' + e.message);
+    btn.disabled = false;
+    btn.innerHTML = originalHTML;
+  }
+}
+
+function followJob(jobId, btn, originalHTML) {
+  const stream = new EventSource('/sync-jobs/' + encodeURIComponent(jobId) + '/events');
+  stream.onmessage = event => {
+    const job = JSON.parse(event.data);
+    btn.textContent = job.progress?.message || 'Syncing…';
+    if (job.status === 'succeeded') {
+      stream.close();
+      window.location.reload();
+    } else if (job.status === 'failed') {
+      stream.close();
+      alert('Sync failed: ' + job.error);
+      btn.disabled = false;
+      btn.innerHTML = originalHTML;
+    }
+  };
+  stream.onerror = () => {
+    stream.close();
+    btn.disabled = false;
+    btn.innerHTML = originalHTML;
+  };
+}
+</script>
+</body>
+</html>

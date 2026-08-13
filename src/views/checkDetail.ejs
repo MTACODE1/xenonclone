@@ -1,0 +1,139 @@
+<%- include('partials/header', { currentPage: 'client' }) %>
+
+<nav class="breadcrumb">
+  <a href="/">Home</a>
+  <span>/</span>
+  <a href="/client/<%= org.xero_tenant_id %>"><%= org.name %></a>
+  <span>/</span>
+  <span class="breadcrumb-current"><%= def ? def.label : checkType %></span>
+</nav>
+
+<div class="page-header">
+  <h4><%= def ? def.label : checkType %></h4>
+  <% if (issue) { %>
+    <p>
+      <span class="font-semibold text-warning"><%= issue.count %></span> issue<%= issue.count !== 1 ? 's' : '' %> found
+      <% if (issue.potential_value_gbp > 0) { %>
+        &bull; Potential value: <span class="font-semibold text-error">£<%= Number(issue.potential_value_gbp).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}) %></span>
+      <% } %>
+      <% if (issue.period_checked) { %>
+        &bull; Period: <%= issue.period_checked.replace(/_/g, ' ') %>
+      <% } %>
+    </p>
+  <% } %>
+</div>
+
+<div class="card">
+  <div class="table-filters">
+    <% [
+      ['active', 'Active', summary.active],
+      ['dismissed', 'Dismissed', summary.dismissed],
+      ['ignored', 'Ignored', summary.ignored],
+      ['ok', 'Marked OK', summary.ok],
+      ['all', 'All', summary.active + summary.dismissed + summary.ignored + summary.ok]
+    ].forEach(([key, label, count]) => { %>
+      <a class="btn btn-sm <%= status === key ? 'btn-primary' : 'btn-outlined' %>"
+         href="?status=<%= key %>"><%= label %> (<%= count %>)</a>
+    <% }) %>
+  </div>
+  <% if (!items || items.length === 0) { %>
+    <div class="empty-state">
+      <p>No <%= status === 'active' ? 'active' : status %> findings for this check.</p>
+    </div>
+  <% } else { %>
+    <form id="bulkReview" method="post" action="/client/<%= org.xero_tenant_id %>/check/<%= checkType %>/review"></form>
+    <div class="table-filters">
+      <input form="bulkReview" type="hidden" name="csrf_token" value="<%= csrfToken %>">
+      <input form="bulkReview" type="hidden" name="return_status" value="<%= status %>">
+      <input form="bulkReview" type="hidden" name="return_page" value="<%= pagination.page %>">
+      <button type="button" class="btn btn-sm btn-outlined" onclick="document.querySelectorAll('[name=&quot;finding_keys&quot;]').forEach(box => box.checked = true)">Select page</button>
+      <button form="bulkReview" class="btn btn-sm btn-outlined" name="action" value="dismissed">Dismiss</button>
+      <button form="bulkReview" class="btn btn-sm btn-outlined" name="action" value="ignored">Ignore 30 days</button>
+      <button form="bulkReview" class="btn btn-sm btn-outlined" name="action" value="ok">Mark OK this period</button>
+      <% if (status !== 'active') { %>
+        <button form="bulkReview" class="btn btn-sm btn-primary" name="action" value="restore">Restore</button>
+      <% } %>
+      <input form="bulkReview" class="form-input" name="notes" maxlength="500" placeholder="Optional note">
+    </div>
+    <% const hiddenColumns = new Set(['finding_key', 'review_state', 'ignored_until', 'notes', 'displayOnly', 'xero_links']); %>
+    <% const columns = Object.keys(items[0]).filter(key => !hiddenColumns.has(key)); %>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th><span class="sr-only">Select</span></th>
+            <% columns.forEach(key => { %>
+              <th style="text-transform: capitalize;"><%= key.replace(/_/g,' ').replace(/([A-Z])/g,' $1').trim() %></th>
+            <% }) %>
+            <th>Xero</th>
+            <th>Review</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% items.forEach(item => { %>
+            <tr>
+              <td>
+                <input form="bulkReview" type="checkbox" name="finding_keys" value="<%= item.finding_key %>" aria-label="Select finding">
+              </td>
+              <% columns.forEach(key => { const val = item[key]; %>
+                <td>
+                  <% if (typeof val === 'number' && !Number.isInteger(val)) { %>
+                    £<%= Number(val).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}) %>
+                  <% } else if (Array.isArray(val)) { %>
+                    <%= val.join(', ') %>
+                  <% } else { %>
+                    <%= val != null ? val : '—' %>
+                  <% } %>
+                </td>
+              <% }) %>
+              <td>
+                <% item.xero_links.forEach(link => { %>
+                  <a href="<%= link.url %>" target="_blank" rel="noopener noreferrer"><%= link.label %></a><br>
+                <% }) %>
+              </td>
+              <td style="min-width:180px;">
+                <span class="chip <%= item.review_state === 'active' ? 'chip-success' : 'chip-default' %>">
+                  <%= item.review_state.replace('_', ' ') %><%= item.displayOnly ? ' · display only' : '' %>
+                </span>
+                <% if (item.ignored_until) { %>
+                  <div class="text-muted">Until <%= new Date(item.ignored_until).toLocaleDateString('en-GB') %></div>
+                <% } %>
+                <% if (item.notes) { %><div class="text-muted"><%= item.notes %></div><% } %>
+                <form method="post" action="/client/<%= org.xero_tenant_id %>/check/<%= checkType %>/review" style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap;">
+                  <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+                  <input type="hidden" name="finding_key" value="<%= item.finding_key %>">
+                  <input type="hidden" name="return_status" value="<%= status %>">
+                  <input type="hidden" name="return_page" value="<%= pagination.page %>">
+                  <% if (item.review_state === 'active') { %>
+                    <button class="btn btn-sm btn-outlined" name="action" value="dismissed">Dismiss</button>
+                    <button class="btn btn-sm btn-outlined" name="action" value="ignored">Ignore</button>
+                    <button class="btn btn-sm btn-outlined" name="action" value="ok">OK</button>
+                  <% } else { %>
+                    <button class="btn btn-sm btn-primary" name="action" value="restore">Restore</button>
+                  <% } %>
+                </form>
+              </td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+    <% if (typeof pagination !== 'undefined' && pagination.totalPages > 1) { %>
+      <div style="display:flex; justify-content:space-between; align-items:center; padding:16px 20px;">
+        <span style="color:#7C8FAC; font-size:0.8rem;">
+          Page <%= pagination.page %> of <%= pagination.totalPages %> · <%= pagination.total %> findings
+        </span>
+        <div style="display:flex; gap:8px;">
+          <% if (pagination.page > 1) { %>
+            <a class="btn btn-outlined btn-sm" href="?status=<%= status %>&page=<%= pagination.page - 1 %>">Previous</a>
+          <% } %>
+          <% if (pagination.page < pagination.totalPages) { %>
+            <a class="btn btn-outlined btn-sm" href="?status=<%= status %>&page=<%= pagination.page + 1 %>">Next</a>
+          <% } %>
+        </div>
+      </div>
+    <% } %>
+  <% } %>
+</div>
+
+<%- include('partials/footer') %>

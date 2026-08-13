@@ -1,0 +1,69 @@
+<%- include('partials/header', { currentPage: 'settings' }) %>
+
+<div class="page-header">
+  <h4>Settings</h4>
+  <p>Configure your practice details and preferences</p>
+</div>
+
+<% if (query && query.saved) { %>
+  <div class="alert alert-success">Settings saved successfully.</div>
+<% } %>
+<% if (query && query.ch_key_error) { %>
+  <div class="alert alert-danger">That doesn't look like a Companies House API key — it looks like a web address. Paste the key itself from your application's "Create new key" screen. Nothing was saved.</div>
+<% } %>
+
+<div class="card" style="max-width: 600px;">
+  <div class="card-header">
+    <h5>Practice Configuration</h5>
+  </div>
+  <form method="POST" action="/settings" enctype="multipart/form-data" class="card-body">
+    <div class="form-group">
+      <label class="form-label">Practice Name</label>
+      <input type="text" name="practice_name" value="<%= settings.practiceName %>" class="form-input" style="width: 100%;">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Practice Logo</label>
+      <% if (settings.practiceLogo) { %>
+        <img src="<%= settings.practiceLogo %>" style="height: 48px; margin-bottom: 8px; border-radius: 7px; border: 1px solid var(--divider);" alt="Logo">
+      <% } %>
+      <input type="file" name="logo" accept="image/*" class="form-input" style="padding: 6px;">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Default Sync Period</label>
+      <select name="default_sync_period" class="form-select" style="width: 100%;">
+        <option value="since_lock_date" <%= settings.defaultSyncPeriod === 'since_lock_date' ? 'selected' : '' %>>Since Lock Date</option>
+        <option value="current_month" <%= settings.defaultSyncPeriod === 'current_month' ? 'selected' : '' %>>Current Month</option>
+        <option value="previous_month" <%= settings.defaultSyncPeriod === 'previous_month' ? 'selected' : '' %>>Previous Month</option>
+        <option value="rolling_12_months" <%= settings.defaultSyncPeriod === 'rolling_12_months' ? 'selected' : '' %>>Rolling 12 Months</option>
+        <option value="current_fy" <%= settings.defaultSyncPeriod === 'current_fy' ? 'selected' : '' %>>Current Financial Year</option>
+        <option value="previous_fy" <%= settings.defaultSyncPeriod === 'previous_fy' ? 'selected' : '' %>>Previous Financial Year</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Companies House API key</label>
+      <input type="password" name="companies_house_api_key" autocomplete="off"
+        placeholder="<%= settings.companiesHouseKeySet ? '•••••••• (saved — leave blank to keep)' : 'Paste your free API key' %>"
+        class="form-input" style="width: 100%;">
+      <p style="font-size: 0.72rem; color: #7C8FAC; margin-top: 6px;">
+        Free key from <a href="https://developer.company-information.service.gov.uk/" target="_blank" rel="noopener">developer.company-information.service.gov.uk</a>.
+        Enables company status and filing-deadline lookups on each client.
+        <% if (settings.companiesHouseKeySet) { %>
+          <label style="display:inline-flex;align-items:center;gap:4px;margin-top:6px;">
+            <input type="checkbox" name="clear_companies_house_api_key" value="1"> Remove saved key
+          </label>
+        <% } %>
+      </p>
+    </div>
+    <button type="submit" class="btn btn-primary">Save Settings</button>
+  </form>
+</div>
+
+<div class="card" style="max-width: 600px; margin-top: 20px;">
+  <div class="card-header"><h5>Xenon Cancellation Safety</h5></div>
+  <div class="card-body">
+    <p style="margin-bottom: 12px;">Xenon must remain active until real-client parity and workflow evidence pass the auditable validation gate.</p>
+    <a href="/validation" class="btn btn-outlined">Open Validation Gate</a>
+  </div>
+</div>
+
+<%- include('partials/footer') %>

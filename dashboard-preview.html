@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Xero Health Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <style>/* Custom styles */
+canvas { display: block; margin: 0 auto; }
+</style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+<nav class="bg-white shadow-sm border-b">
+  <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+    <div class="flex items-center space-x-6">
+      <a href="/" class="text-xl font-bold text-blue-700">Xero Dashboard</a>
+      <a href="/" class="text-gray-600 hover:text-blue-600 text-sm">Clients</a>
+      <a href="/panorama" class="text-gray-600 hover:text-blue-600 text-sm">Panorama</a>
+      <a href="/transactions" class="text-gray-600 hover:text-blue-600 text-sm">Transactions</a>
+      <a href="/settings" class="text-gray-600 hover:text-blue-600 text-sm">Settings</a>
+    </div>
+    <div class="flex items-center space-x-3">
+      <a href="/auth/connect" class="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700">+ Connect Client</a>
+      <button onclick="syncAll()" class="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg text-sm hover:bg-gray-200">Sync All</button>
+    </div>
+  </div>
+</nav>
+<main class="max-w-7xl mx-auto px-4 py-6">
+
+
+<div class="mb-6 flex items-center justify-between">
+  <div>
+    <h1 class="text-2xl font-bold text-gray-900">Client List</h1>
+    <p class="text-gray-500 text-sm mt-1">
+      <span class="font-medium text-blue-700">1</span> connected &nbsp;|&nbsp;
+      Avg health score: <span class="font-medium text-blue-700">78%</span>
+    </p>
+  </div>
+  <div class="flex space-x-3">
+    <input type="text" id="search" placeholder="Search clients..." class="border rounded-lg px-3 py-2 text-sm">
+    <select id="tagFilter" class="border rounded-lg px-3 py-2 text-sm">
+      <option value="">All Tags</option>
+      
+    </select>
+    <select id="statusFilter" class="border rounded-lg px-3 py-2 text-sm">
+      <option value="">All Statuses</option>
+      <option value="connected">Connected</option>
+      <option value="disconnected">Disconnected</option>
+    </select>
+  </div>
+</div>
+
+<div class="bg-white rounded-xl shadow-sm border overflow-hidden">
+  <table class="w-full text-sm" id="clientTable">
+    <thead class="bg-gray-50 border-b">
+      <tr>
+        <th class="text-left px-4 py-3 text-gray-600 font-medium">Ref</th>
+        <th class="text-left px-4 py-3 text-gray-600 font-medium">Business Name</th>
+        <th class="text-left px-4 py-3 text-gray-600 font-medium">Status</th>
+        <th class="text-left px-4 py-3 text-gray-600 font-medium">Tag</th>
+        <th class="text-left px-4 py-3 text-gray-600 font-medium">Health Score</th>
+        <th class="text-left px-4 py-3 text-gray-600 font-medium">Last Synced</th>
+        <th class="text-left px-4 py-3 text-gray-600 font-medium">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      
+      
+        <tr class="border-b hover:bg-gray-50 client-row" data-name="4x4&amp;more ltd" data-tag="" data-status="connected">
+          <td class="px-4 py-3 text-gray-500">—</td>
+          <td class="px-4 py-3 font-medium">
+            <a href="/client/9846e1b5-be50-42a6-abef-c50755039563" class="text-blue-700 hover:underline">4X4&amp;MORE LTD</a>
+          </td>
+          <td class="px-4 py-3">
+            
+              <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-700">&#9679; Connected</span>
+            
+          </td>
+          <td class="px-4 py-3 text-gray-500">—</td>
+          <td class="px-4 py-3">
+            
+              <span class="font-semibold text-orange-500">78%</span>
+            
+          </td>
+          <td class="px-4 py-3 text-gray-400 text-xs">
+            27/03/2026, 15:30:06
+          </td>
+          <td class="px-4 py-3 flex space-x-2">
+            <button onclick="syncClient('9846e1b5-be50-42a6-abef-c50755039563', this)" class="text-xs bg-blue-50 text-blue-700 px-3 py-1 rounded hover:bg-blue-100">Sync</button>
+            
+              <a href="/auth/disconnect/9846e1b5-be50-42a6-abef-c50755039563" onclick="return confirm('Disconnect this client?')" class="text-xs bg-red-50 text-red-700 px-3 py-1 rounded hover:bg-red-100">Disconnect</a>
+            
+          </td>
+        </tr>
+      
+    </tbody>
+  </table>
+</div>
+
+<script>
+const searchEl = document.getElementById('search');
+const tagEl = document.getElementById('tagFilter');
+const statusEl = document.getElementById('statusFilter');
+
+function filterTable() {
+  const search = searchEl.value.toLowerCase();
+  const tag = tagEl.value.toLowerCase();
+  const status = statusEl.value.toLowerCase();
+  document.querySelectorAll('.client-row').forEach(row => {
+    const name = row.dataset.name || '';
+    const rowTag = (row.dataset.tag || '').toLowerCase();
+    const rowStatus = (row.dataset.status || '').toLowerCase();
+    const visible = (!search || name.includes(search)) &&
+                    (!tag || rowTag === tag) &&
+                    (!status || rowStatus === status);
+    row.style.display = visible ? '' : 'none';
+  });
+}
+
+searchEl.addEventListener('input', filterTable);
+tagEl.addEventListener('change', filterTable);
+statusEl.addEventListener('change', filterTable);
+</script>
+
+</main>
+<script>
+async function syncAll() {
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = 'Syncing...';
+  try {
+    const resp = await fetch('/sync-all', { method: 'POST' });
+    const data = await resp.json();
+    window.location.reload();
+  } catch(e) {
+    alert('Sync failed: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Sync All';
+  }
+}
+
+async function syncClient(tenantId, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Syncing...';
+  try {
+    const resp = await fetch('/sync/' + tenantId, { method: 'POST' });
+    const data = await resp.json();
+    if (data.success) window.location.reload();
+    else { alert('Sync failed: ' + data.error); btn.disabled = false; btn.textContent = 'Sync'; }
+  } catch(e) {
+    alert('Sync failed: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Sync';
+  }
+}
+</script>
+</body>
+</html>
+

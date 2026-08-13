@@ -1,0 +1,131 @@
+<%- include('partials/header', { currentPage: 'clients' }) %>
+
+<div class="page-header">
+  <h4>Client List</h4>
+  <p>Manage your connected Xero clients and monitor bookkeeping health</p>
+</div>
+
+<div class="stats-grid">
+  <div class="card stat-card stat-primary hover-card fade-in">
+    <div class="stat-icon" style="background: var(--primary-light); color: var(--primary);">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+    </div>
+    <div class="stat-body">
+      <div class="stat-value"><%= totalConnected %></div>
+      <div class="stat-label">Connected Clients</div>
+    </div>
+  </div>
+  <div class="card stat-card hover-card fade-in <%= avgScore >= 80 ? 'stat-success' : avgScore >= 60 ? 'stat-warning' : 'stat-error' %>">
+    <div class="stat-icon" style="background: <%= avgScore >= 80 ? 'var(--success-light)' : avgScore >= 60 ? 'var(--warning-light)' : 'var(--error-light)' %>; color: <%= avgScore >= 80 ? 'var(--success)' : avgScore >= 60 ? 'var(--warning)' : 'var(--error)' %>;">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+    </div>
+    <div class="stat-body">
+      <div class="stat-value"><%= avgScore != null ? avgScore + '%' : 'N/A' %></div>
+      <div class="stat-label">Average Health Score</div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="table-filters">
+    <input type="text" id="search" placeholder="Search clients..." class="form-input" style="width: 250px;">
+    <select id="tagFilter" class="form-select">
+      <option value="">All Tags</option>
+      <% [...new Set(orgs.map(o => o.tag).filter(Boolean))].forEach(tag => { %>
+        <option value="<%= tag %>"><%= tag %></option>
+      <% }) %>
+    </select>
+    <select id="statusFilter" class="form-select">
+      <option value="">All Statuses</option>
+      <option value="connected">Connected</option>
+      <option value="disconnected">Disconnected</option>
+    </select>
+  </div>
+
+  <div class="table-wrap">
+    <table class="data-table" id="clientTable">
+      <thead>
+        <tr>
+          <th>Ref</th>
+          <th>Business Name</th>
+          <th>Status</th>
+          <th>Tag</th>
+          <th>Health Score</th>
+          <th>Last Synced</th>
+          <th class="text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% if (orgs.length === 0) { %>
+          <tr><td colspan="7">
+            <div class="empty-state">
+              <h5>No clients connected yet</h5>
+              <p>Connect your first Xero organisation to get started</p>
+              <a href="/auth/connect" class="btn btn-primary">Connect Client</a>
+            </div>
+          </td></tr>
+        <% } %>
+        <% orgs.forEach(org => { %>
+          <tr class="client-row" data-name="<%= org.name.toLowerCase() %>" data-tag="<%= org.tag || '' %>" data-status="<%= org.connection_status %>">
+            <td class="text-muted"><%= org.client_ref || '—' %></td>
+            <td class="font-medium"><a href="/client/<%= org.xero_tenant_id %>"><%= org.name %></a></td>
+            <td>
+              <% if (org.connection_status === 'connected') { %>
+                <span class="chip chip-success">Connected</span>
+              <% } else { %>
+                <span class="chip chip-error">Disconnected</span>
+              <% } %>
+            </td>
+            <td class="text-muted"><%= org.tag || '—' %></td>
+            <td>
+              <% if (org.score != null) { %>
+                <span class="font-semibold <%= org.score >= 80 ? 'text-success' : org.score >= 60 ? 'text-warning' : 'text-error' %>"><%= org.score %>%</span>
+              <% } else { %>
+                <span class="text-muted" style="font-size: 0.75rem;">Not synced</span>
+              <% } %>
+            </td>
+            <td class="text-muted" style="font-size: 0.75rem;">
+              <%= org.last_successful_sync_at ? new Date(org.last_successful_sync_at).toLocaleString('en-GB') : 'Never' %>
+              <% if (org.isStale) { %><div class="text-warning">Verified data is stale</div><% } %>
+            </td>
+            <td class="text-right">
+              <button onclick="syncClient('<%= org.xero_tenant_id %>', this)" class="btn btn-ghost-primary btn-sm">Sync</button>
+              <% if (org.connection_status === 'connected') { %>
+                <a href="/auth/disconnect/<%= org.xero_tenant_id %>" onclick="return confirm('Disconnect this client?')" class="btn btn-ghost-error btn-sm">Disconnect</a>
+              <% } else { %>
+                <a href="/auth/connect" class="btn btn-ghost-success btn-sm">Reconnect</a>
+              <% } %>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const searchEl = document.getElementById('search');
+const tagEl = document.getElementById('tagFilter');
+const statusEl = document.getElementById('statusFilter');
+
+function filterTable() {
+  const search = searchEl.value.toLowerCase();
+  const tag = tagEl.value.toLowerCase();
+  const status = statusEl.value.toLowerCase();
+  document.querySelectorAll('.client-row').forEach(row => {
+    const name = row.dataset.name || '';
+    const rowTag = (row.dataset.tag || '').toLowerCase();
+    const rowStatus = (row.dataset.status || '').toLowerCase();
+    const visible = (!search || name.includes(search)) &&
+                    (!tag || rowTag === tag) &&
+                    (!status || rowStatus === status);
+    row.style.display = visible ? '' : 'none';
+  });
+}
+
+searchEl.addEventListener('input', filterTable);
+tagEl.addEventListener('change', filterTable);
+statusEl.addEventListener('change', filterTable);
+</script>
+
+<%- include('partials/footer') %>

@@ -1,0 +1,441 @@
+{
+  "provenance": "Built from the five period-matched Xenon exports stored in validation_snapshots. Observations are Xenon's own published per-check counts and values, so the fit measures the scoring formula itself rather than this app's count accuracy. Client names are anonymized; exposure is Xenon's reported potential-error figure. Xenon publishes no dates per check, so the age component contributes zero for every client.",
+  "clients": [
+    {
+      "id": "client-a",
+      "targetScore": 78,
+      "asOf": "2026-08-06",
+      "targetEvidence": "Xenon export 2026-08-06, period since_lock_date:2025-10-31:2026-08-06",
+      "observations": [
+        {
+          "check_type": "bank_balance",
+          "importance": "critical",
+          "count": 1,
+          "exposure": 4922
+        },
+        {
+          "check_type": "capital_item_review",
+          "importance": "medium",
+          "count": 3,
+          "exposure": 979
+        },
+        {
+          "check_type": "duplicate_bills",
+          "importance": "high",
+          "count": 6,
+          "exposure": 493
+        },
+        {
+          "check_type": "duplicate_invoices",
+          "importance": "high",
+          "count": 31,
+          "exposure": 3510
+        },
+        {
+          "check_type": "multi_account_suppliers",
+          "importance": "medium",
+          "count": 5,
+          "exposure": 4399
+        },
+        {
+          "check_type": "multi_tax_suppliers",
+          "importance": "medium",
+          "count": 13,
+          "exposure": 1086
+        },
+        {
+          "check_type": "old_unpaid_bills",
+          "importance": "high",
+          "count": 96,
+          "exposure": 7829
+        },
+        {
+          "check_type": "old_unpaid_invoices",
+          "importance": "high",
+          "count": 184,
+          "exposure": 34165
+        },
+        {
+          "check_type": "purchase_tax_missing",
+          "importance": "medium",
+          "count": 116,
+          "exposure": 14112
+        },
+        {
+          "check_type": "sales_tax_missing",
+          "importance": "medium",
+          "count": 274,
+          "exposure": 18152
+        }
+      ]
+    },
+    {
+      "id": "client-b",
+      "targetScore": 88,
+      "asOf": "2026-08-06",
+      "targetEvidence": "Xenon export 2026-08-06, period since_lock_date:2025-11-30:2026-08-06",
+      "observations": [
+        {
+          "check_type": "bank_balance",
+          "importance": "critical",
+          "count": 2,
+          "exposure": 3096
+        },
+        {
+          "check_type": "multi_account_suppliers",
+          "importance": "medium",
+          "count": 4,
+          "exposure": 737
+        },
+        {
+          "check_type": "multi_tax_suppliers",
+          "importance": "medium",
+          "count": 7,
+          "exposure": 26
+        },
+        {
+          "check_type": "purchase_tax_missing",
+          "importance": "medium",
+          "count": 10,
+          "exposure": 174
+        },
+        {
+          "check_type": "purchase_tax_on_invoices",
+          "importance": "medium",
+          "count": 52,
+          "exposure": 481
+        },
+        {
+          "check_type": "sales_tax_missing",
+          "importance": "medium",
+          "count": 24,
+          "exposure": 26100
+        },
+        {
+          "check_type": "unexpected_account_used",
+          "importance": "medium",
+          "count": 12,
+          "exposure": 4149
+        },
+        {
+          "check_type": "unexpected_tax_code_used",
+          "importance": "medium",
+          "count": 30,
+          "exposure": 1308
+        }
+      ]
+    },
+    {
+      "id": "client-c",
+      "targetScore": 61,
+      "asOf": "2026-08-06",
+      "targetEvidence": "Xenon export 2026-08-06, period since_lock_date:2000-01-01:2026-08-06",
+      "observations": [
+        {
+          "check_type": "bank_balance",
+          "importance": "critical",
+          "count": 1,
+          "exposure": 78480
+        },
+        {
+          "check_type": "capital_item_review",
+          "importance": "medium",
+          "count": 17,
+          "exposure": 11177
+        },
+        {
+          "check_type": "duplicate_invoices",
+          "importance": "high",
+          "count": 1,
+          "exposure": 8880
+        },
+        {
+          "check_type": "misallocated_items",
+          "importance": "medium",
+          "count": 1,
+          "exposure": 378
+        },
+        {
+          "check_type": "multi_account_suppliers",
+          "importance": "medium",
+          "count": 66,
+          "exposure": 347707
+        },
+        {
+          "check_type": "multi_tax_suppliers",
+          "importance": "medium",
+          "count": 45,
+          "exposure": 44186
+        },
+        {
+          "check_type": "old_purchase_credits",
+          "importance": "high",
+          "count": 1,
+          "exposure": 6480
+        },
+        {
+          "check_type": "old_unpaid_bills",
+          "importance": "high",
+          "count": 24,
+          "exposure": 148437
+        },
+        {
+          "check_type": "old_unpaid_invoices",
+          "importance": "high",
+          "count": 44,
+          "exposure": 309232
+        },
+        {
+          "check_type": "purchase_tax_missing",
+          "importance": "medium",
+          "count": 309,
+          "exposure": 122632
+        },
+        {
+          "check_type": "purchase_tax_on_invoices",
+          "importance": "medium",
+          "count": 2,
+          "exposure": 7863
+        },
+        {
+          "check_type": "sales_tax_missing",
+          "importance": "medium",
+          "count": 76,
+          "exposure": 66782
+        },
+        {
+          "check_type": "unapproved_invoices",
+          "importance": "medium",
+          "count": 3,
+          "exposure": 0
+        },
+        {
+          "check_type": "unexpected_tax_code_used",
+          "importance": "medium",
+          "count": 55,
+          "exposure": 204665
+        },
+        {
+          "check_type": "unreconciled_bank_items",
+          "importance": "critical",
+          "count": 167,
+          "exposure": 177957
+        }
+      ]
+    },
+    {
+      "id": "client-d",
+      "targetScore": 77,
+      "asOf": "2026-08-06",
+      "targetEvidence": "Xenon export 2026-08-06, period since_lock_date:2025-10-31:2026-08-06",
+      "observations": [
+        {
+          "check_type": "bank_balance",
+          "importance": "critical",
+          "count": 7,
+          "exposure": 200298
+        },
+        {
+          "check_type": "capital_item_review",
+          "importance": "medium",
+          "count": 14,
+          "exposure": 63666
+        },
+        {
+          "check_type": "multi_account_suppliers",
+          "importance": "medium",
+          "count": 37,
+          "exposure": 109476
+        },
+        {
+          "check_type": "multi_tax_suppliers",
+          "importance": "medium",
+          "count": 28,
+          "exposure": 22459
+        },
+        {
+          "check_type": "old_sales_credits",
+          "importance": "high",
+          "count": 1,
+          "exposure": 944
+        },
+        {
+          "check_type": "old_unpaid_invoices",
+          "importance": "high",
+          "count": 29,
+          "exposure": 94252
+        },
+        {
+          "check_type": "purchase_tax_missing",
+          "importance": "medium",
+          "count": 2758,
+          "exposure": 619374
+        },
+        {
+          "check_type": "sales_tax_missing",
+          "importance": "medium",
+          "count": 243,
+          "exposure": 60084
+        },
+        {
+          "check_type": "unexpected_account_used",
+          "importance": "medium",
+          "count": 50,
+          "exposure": 4581
+        },
+        {
+          "check_type": "unexpected_tax_code_used",
+          "importance": "medium",
+          "count": 60,
+          "exposure": 12004
+        },
+        {
+          "check_type": "unreconciled_bank_items",
+          "importance": "critical",
+          "count": 27,
+          "exposure": 41785
+        }
+      ]
+    },
+    {
+      "id": "client-e",
+      "targetScore": 32,
+      "asOf": "2026-08-05",
+      "targetEvidence": "Xenon export 2026-08-05, period since_lock_date:2019-11-30:2026-08-05",
+      "observations": [
+        {
+          "check_type": "bank_balance",
+          "importance": "critical",
+          "count": 2,
+          "exposure": 18009
+        },
+        {
+          "check_type": "bill_or_direct",
+          "importance": "medium",
+          "count": 44,
+          "exposure": 6257
+        },
+        {
+          "check_type": "capital_item_review",
+          "importance": "medium",
+          "count": 11,
+          "exposure": 4882
+        },
+        {
+          "check_type": "duplicate_bills",
+          "importance": "high",
+          "count": 10,
+          "exposure": 944
+        },
+        {
+          "check_type": "low_cost_fixed_assets",
+          "importance": "medium",
+          "count": 12,
+          "exposure": 463
+        },
+        {
+          "check_type": "misallocated_items",
+          "importance": "medium",
+          "count": 300,
+          "exposure": 62105
+        },
+        {
+          "check_type": "multi_account_suppliers",
+          "importance": "medium",
+          "count": 81,
+          "exposure": 41601
+        },
+        {
+          "check_type": "multi_tax_suppliers",
+          "importance": "medium",
+          "count": 65,
+          "exposure": 6678
+        },
+        {
+          "check_type": "old_purchase_credits",
+          "importance": "high",
+          "count": 4,
+          "exposure": 95070
+        },
+        {
+          "check_type": "old_sales_credits",
+          "importance": "high",
+          "count": 1,
+          "exposure": 12903
+        },
+        {
+          "check_type": "old_unpaid_bills",
+          "importance": "high",
+          "count": 424,
+          "exposure": 105979
+        },
+        {
+          "check_type": "old_unpaid_invoices",
+          "importance": "high",
+          "count": 17,
+          "exposure": 4499
+        },
+        {
+          "check_type": "opening_balance_differences",
+          "importance": "high",
+          "count": 2,
+          "exposure": 114390
+        },
+        {
+          "check_type": "purchase_tax_missing",
+          "importance": "medium",
+          "count": 2416,
+          "exposure": 55712
+        },
+        {
+          "check_type": "purchase_tax_on_invoices",
+          "importance": "medium",
+          "count": 5,
+          "exposure": 4
+        },
+        {
+          "check_type": "sales_tax_missing",
+          "importance": "medium",
+          "count": 67,
+          "exposure": 26850
+        },
+        {
+          "check_type": "sales_tax_on_bills",
+          "importance": "medium",
+          "count": 6,
+          "exposure": 228
+        },
+        {
+          "check_type": "unapproved_bills",
+          "importance": "medium",
+          "count": 475,
+          "exposure": 101920
+        },
+        {
+          "check_type": "unapproved_invoices",
+          "importance": "medium",
+          "count": 4,
+          "exposure": 12957
+        },
+        {
+          "check_type": "unexpected_account_used",
+          "importance": "medium",
+          "count": 425,
+          "exposure": 58024
+        },
+        {
+          "check_type": "unexpected_tax_code_used",
+          "importance": "medium",
+          "count": 614,
+          "exposure": 4539
+        },
+        {
+          "check_type": "unreconciled_bank_items",
+          "importance": "critical",
+          "count": 120,
+          "exposure": 38338
+        }
+      ]
+    }
+  ]
+}

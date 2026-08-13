@@ -1,0 +1,7 @@
+client,filingDate,filedNetAssets,xeroNetAssets,absDifference,xenonCount,xenonValue,evidenceSource
+4X4&MORE LTD,2025-10-31,-21385,-21385.25,0.25,0,0,companies_house (live iXBRL) + Reports/BalanceSheet; Xenon: 4X4_MORE_LTD-xenon-2026-08-06.json
+ROSE AND CARAMEL LIMITED,2025-10-31,1000952,1000952.99,0.99,0,0,companies_house (live iXBRL) + Reports/BalanceSheet; Xenon: ROSE_AND_CARAMEL_LIMITED-xenon-2026-08-06.json / rose-xenon-checklist-2026-08-07.json
+JULIA KUISMA LTD,2020-10-31,7106,0,7106,NO_SNAPSHOT,NO_SNAPSHOT,"companies_house (live iXBRL); Xero side likely mis-extracted (dissolved company, xero_net_assets=0 is suspect) — NO Xenon comparison exists for this org"
+HANDYMANZ LTD,MISSING,MISSING_no_filed_accounts_row,MISSING,MISSING,0,0,Xenon only: HANDYMANZ_LTD-xenon-2026-08-06.json — our own filed/Xero comparison was never computed for this org
+Fast Track Excavations,MISSING,MISSING_no_filed_accounts_row,MISSING,MISSING,0,0,Xenon only: Fast_Track_Excavations-xenon-2026-08-06.json — our own comparison never computed
+MBX GRAFFIX LIMITED,MISSING,MISSING_no_filed_accounts_row,MISSING,MISSING,2,114390,"Xenon only: MBX_GRAFFIX_LIMITED-xenon-2026-08-07.json + mbx-xenon-checklist — real reported discrepancy, our own comparison never computed for this org"

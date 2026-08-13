@@ -1,0 +1,789 @@
+<%- include('partials/header', { currentPage: 'client' }) %>
+
+<%
+const score = org.score || 0;
+const scoreColor = score >= 80 ? '#13DEB9' : score >= 60 ? '#FFAE1F' : '#FA896B';
+const totalIssues = org.total_issues || 0;
+const totalErrors = org.total_potential_errors_gbp || 0;
+
+const importanceBadge = {
+  critical: { bg: '#dc2626', color: 'white' },
+  high: { bg: '#f97316', color: 'white' },
+  medium: { bg: '#FFAE1F', color: 'white' },
+  low: { bg: '#6b7280', color: 'white' }
+};
+const importanceLabel = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low' };
+const configuredAccounts = typeof accountConfigurations === 'undefined' ? expenseAccounts : accountConfigurations;
+
+const checkDescriptions = {
+  bank_balance: { issue: "Bank accounts where Xero's calculated balance doesn't match the bank's own closing balance. Requires external bank statement evidence — Xero supplies its own balance, only the bank can supply the bank's.", soWhat: "Bookkeeping is incomplete, reports will be inaccurate.", solution: "Import a statement CSV or enter the closing balance for each bank account, then review outstanding items." },
+  unreconciled_bank_items: { issue: "Bank transactions not yet reconciled.", soWhat: "Bank balances won't match actual statements, data is incomplete.", solution: "Review all unreconciled transactions and reconcile each item." },
+  unprocessed_bank: { issue: "Imported statement lines with no local match in cached Xero bank records.", soWhat: "Transactions may be missing from the books. This is local evidence matching, not Xero-native reconciliation.", solution: "Review unmatched lines and the corresponding records in Xero, then re-sync." },
+  duplicate_invoices: { issue: "Customer invoices that may have been entered more than once.", soWhat: "Overstates profits, may result in customers being billed twice.", solution: "Review each invoice, void any created in error, dismiss if correct." },
+  duplicate_bills: { issue: "Supplier bills that may have been entered more than once.", soWhat: "Understates profits, risk of paying supplier twice.", solution: "Review each bill, void any created in error, dismiss if correct." },
+  old_unpaid_invoices: { issue: "Customer invoices more than 60 days old still unpaid.", soWhat: "Cash flow risk, may indicate bad debt or entry error.", solution: "Chase customer, void if error, create credit note for bad debt." },
+  old_sales_credits: { issue: "Customer credit notes more than 60 days old unallocated.", soWhat: "May artificially decrease profits and reduce tax payable.", solution: "Allocate to invoices, refund, or void if created in error." },
+  old_unpaid_bills: { issue: "Supplier bills more than 60 days old still unpaid.", soWhat: "May understate profits and tax, risk of duplicate payment.", solution: "Pay, void, or write off as appropriate." },
+  old_purchase_credits: { issue: "Supplier credit notes more than 60 days old unallocated.", soWhat: "May artificially increase profits and tax payable.", solution: "Allocate to bills, request refund, or void if error." },
+  opening_balance_differences: { issue: "Net assets in the filed statutory accounts don't match Xero's balance sheet at the same date. The filed figure is read automatically from the Companies House iXBRL accounts where the filing is machine-readable, otherwise it is accountant-entered.", soWhat: "Ongoing data may be inaccurate as a result.", solution: "Check opening balance adjustments have been posted correctly." },
+  invoice_or_direct: { issue: "Bank deposits coded to income account where an unpaid invoice exists for same contact/amount.", soWhat: "Income possibly double-counted, customer may be billed again.", solution: "Review each and reallocate bank deposit against the invoice if applicable." },
+  bill_or_direct: { issue: "Bank payments coded to expense account where an unpaid bill exists for same contact/amount.", soWhat: "Expense possibly double-counted, supplier may be paid twice.", solution: "Review each and reallocate bank payment against the bill if applicable." },
+  low_cost_fixed_assets: { issue: "Items coded to Fixed Asset accounts with value under £200.", soWhat: "Low value items should usually be expensed not capitalised.", solution: "Recode to appropriate expense account or dismiss if capitalisation is correct." },
+  capital_item_review: { issue: "Items coded to expense accounts above the capital threshold set for that account.", soWhat: "High value items may need capitalising as fixed assets instead.", solution: "Review and recode to fixed asset account or dismiss if expense is correct." },
+  misallocated_items: { issue: "Items coded to vague/broad account codes above the threshold.", soWhat: "Reports become less meaningful for decision making.", solution: "Recode to a more specific account code or dismiss if appropriate." },
+  multi_account_suppliers: { issue: "One supplier has been coded to more than one account code.", soWhat: "Inconsistent coding causes misleading reports and potential tax errors.", solution: "Review recent transactions for that supplier and standardise the account code used." },
+  multi_tax_suppliers: { issue: "One supplier has been coded with more than one tax code.", soWhat: "VAT return figures may be incorrect.", solution: "Review and standardise the tax code used for that supplier." },
+  unexpected_account_used: { issue: "Transaction coded to different account than the contact default.", soWhat: "Wrong account causes incorrect reports and potential tax errors.", solution: "Review and recode or update the contact default if the new code is correct." },
+  unexpected_tax_code_used: { issue: "Transaction uses different tax code than the contact default.", soWhat: "VAT return likely incorrect, could result in unexpected VAT bills.", solution: "Review and recode or update the contact default." },
+  sales_tax_missing: { issue: "Sales transactions with no VAT/tax code applied.", soWhat: "VAT may not have been accounted for correctly on sales.", solution: "Review each and add appropriate tax code, dismiss if outside scope." },
+  purchase_tax_missing: { issue: "Purchase transactions with no VAT/tax code applied.", soWhat: "Input VAT may be missing from VAT return.", solution: "Review each and add appropriate tax code, dismiss if outside scope." },
+  unapproved_invoices: { issue: "Customer invoices still in Draft or Submitted status.", soWhat: "Not included in accounting reports until approved.", solution: "Approve or delete each invoice as appropriate." },
+  unapproved_bills: { issue: "Supplier bills still in Draft or Submitted status.", soWhat: "Not included in accounting reports until approved.", solution: "Approve or delete each bill as appropriate." },
+  duplicate_contacts: { issue: "Contacts that appear to have been created more than once.", soWhat: "Causes confusion and makes it hard to match payments to invoices.", solution: "Merge and archive duplicate contacts in Xero." },
+  contact_defaults: { issue: "Contacts missing default account code or tax code.", soWhat: "Increases risk of wrong account/tax code being selected on invoices and bills.", solution: "Set appropriate defaults for each contact in Xero." },
+  inactive_contacts: { issue: "Contacts with no transaction activity recently or ever.", soWhat: "Clutters the contact list making bookkeeping harder.", solution: "Archive contacts no longer in use." }
+};
+%>
+
+<nav class="breadcrumb">
+  <a href="/">Home</a>
+  <span>/</span>
+  <span class="breadcrumb-current"><%= org.name %></span>
+</nav>
+
+<div class="page-header">
+  <h4><%= org.name %></h4>
+  <% if (org.client_ref) { %><p>Reference: <%= org.client_ref %></p><% } %>
+  <% if (isStale) { %>
+    <p class="text-warning">This report is based on stale verified data. The last failed or queued run has not replaced it.</p>
+  <% } %>
+</div>
+
+<form method="GET" class="form-row mb-24" id="periodForm">
+  <select name="period" class="form-select" onchange="document.getElementById('customPeriod').style.display=this.value==='custom'?'flex':'none';if(this.value!=='custom')this.form.submit()">
+    <% [
+      ['since_lock_date','Since Lock Date'],['current_month','Current Month'],
+      ['previous_month','Previous Month'],['rolling_12_months','Rolling 12 Months'],
+      ['current_fy','Current Financial Year'],['previous_fy','Previous Financial Year'],
+      ['custom','Custom Date Range']
+    ].forEach(([value,label]) => { %>
+      <option value="<%= value %>" <%= selectedPeriod.type === value ? 'selected' : '' %>><%= label %></option>
+    <% }) %>
+  </select>
+  <span id="customPeriod" class="form-row" style="<%= selectedPeriod.type === 'custom' ? 'display:flex' : 'display:none' %>">
+    <input type="date" name="from" class="form-input" value="<%= selectedPeriod.type === 'custom' ? selectedPeriod.start : '' %>">
+    <span>to</span>
+    <input type="date" name="to" class="form-input" value="<%= selectedPeriod.type === 'custom' ? selectedPeriod.end : '' %>">
+    <button class="btn btn-primary btn-sm" type="submit">Apply</button>
+  </span>
+  <span class="text-muted" style="font-size:.75rem"><%= selectedPeriod.start %> to <%= selectedPeriod.end %></span>
+</form>
+<% if (org.period_key && org.period_key !== selectedPeriod.key) { %>
+  <div class="alert" style="background:#FFF4E5;color:#B45309;margin-bottom:16px;">
+    Results currently belong to <%= org.period_label || org.period_key %>. Sync or reanalyse a check to calculate the selected period.
+  </div>
+<% } %>
+
+<div class="flex-end mb-24">
+  <button onclick="syncThisClient()" id="syncBtn" class="btn btn-secondary">
+    <svg style="width: 16px; height: 16px; display: inline-block; vertical-align: middle; margin-right: 4px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+    </svg>
+    Sync
+  </button>
+  <a href="/client/<%= org.xero_tenant_id %>/report.pdf?<%= periodQuery %>" class="btn btn-outlined">
+    <svg style="width: 16px; height: 16px; margin-right: 4px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+    </svg>
+    Download Report
+  </a>
+</div>
+
+<div class="tab-bar">
+  <button onclick="showTab('health')" id="tab-health" class="tab-btn active">Health Check</button>
+  <button onclick="showTab('transactions')" id="tab-transactions" class="tab-btn">Transactions</button>
+</div>
+
+<div id="panel-health" class="client-layout">
+
+  <div class="client-sidebar">
+    <div style="display: flex; flex-direction: column; gap: 16px;">
+      
+      <div class="card" style="padding: 16px; text-align: center;">
+        <div style="position: relative; display: inline-block;">
+          <canvas id="scoreChart" width="140" height="140"></canvas>
+          <div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none;">
+            <span style="font-size: 1.5rem; font-weight: 700; color: <%= scoreColor %>;"><%= score %>%</span>
+          </div>
+        </div>
+        <div style="font-size: 0.75rem; color: #7C8FAC; margin-top: 8px; font-weight: 500;">Health Indicator</div>
+      </div>
+
+      <div class="card" style="padding: 16px;">
+        <div style="display: flex; justify-content: space-between; margin-bottom: 12px;">
+          <span style="color: #7C8FAC; font-size: 0.875rem;">Issues Identified:</span>
+          <span style="font-weight: 700;"><%= totalIssues.toLocaleString('en-GB') %></span>
+        </div>
+        <div style="border-top: 1px solid #e5eaef; padding-top: 12px; display: flex; justify-content: space-between;">
+          <span style="color: #7C8FAC; font-size: 0.875rem;">Potential Errors:</span>
+          <span style="font-weight: 700;">£<%= Math.round(totalErrors).toLocaleString('en-GB') %></span>
+        </div>
+      </div>
+
+      <div class="card" style="padding: 16px;">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+          <span style="font-size: 11px; font-weight: 700; color: #7C8FAC; text-transform: uppercase; letter-spacing: 0.5px;">Improvement Checklist</span>
+          <label style="display: flex; align-items: center; gap: 4px; font-size: 0.75rem; color: #7C8FAC; cursor: pointer;">
+            <input type="checkbox" id="showAllSidebar" checked onchange="toggleSidebarOk(this.checked)">
+            <span>Show all?</span>
+          </label>
+        </div>
+        <div style="font-size: 0.75rem;">
+          <% checkDefs.forEach(check => {
+            const hasIssues = check.count != null && check.count > 0;
+            const isContact = ['duplicate_contacts','contact_defaults','inactive_contacts'].includes(check.type);
+            const isNotConfigured = check.period_checked === 'not_configured' || check.period_checked === 'needs_sync';
+            const isUnavailable = check.period_checked === 'out_of_scope';
+            const badge = isUnavailable ? '(N/A)' : isNotConfigured ? '(?)' : check.count == null ? '' : hasIssues ? (isContact ? '(!)' : '(' + check.count.toLocaleString('en-GB') + ')') : '(0)';
+          %>
+          <div class="sidebar-item <%= !hasIssues ? 'sidebar-ok' : '' %>"
+               onclick="scrollToCheck('<%= check.type %>')"
+               style="display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f2f6fa; cursor: pointer; transition: color 0.2s;"
+               onmouseover="if(this.querySelector('.label').style.color !== '#5D87FF') this.style.color='#5D87FF'"
+               onmouseout="this.style.color=''">
+            <span class="label" style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 8px; <%= hasIssues ? 'font-weight: 500; color: #2A3547;' : 'color: #7C8FAC;' %>"><%= check.label %></span>
+            <span style="flex-shrink: 0; <%= isNotConfigured ? 'color: #7C8FAC; font-weight: 700;' : hasIssues ? 'color: #FFAE1F; font-weight: 700;' : 'color: #DFE5EF;' %>"><%= badge %></span>
+          </div>
+          <% }) %>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="client-main">
+
+    <div class="summary-grid">
+      <div class="card summary-card" style="background: var(--grey-100);">
+        <div class="summary-label">Period Checked</div>
+        <div class="summary-value" style="font-size: 0.875rem;"><%= selectedPeriod.label %></div>
+      </div>
+      <div class="card summary-card" style="background: var(--primary-light);">
+        <div class="summary-label" style="color: var(--primary-dark);">Potential Issues</div>
+        <div class="summary-value text-primary-color"><%= totalIssues.toLocaleString('en-GB') %></div>
+      </div>
+      <div class="card summary-card" style="background: var(--primary-light);">
+        <div class="summary-label" style="color: var(--primary-dark);">Health Indicator</div>
+        <div class="summary-value" style="color: <%= scoreColor %>;"><%= score %>%</div>
+      </div>
+    </div>
+
+    <% if (scoreBreakdown) {
+      const scoredRows = scoreBreakdown.observations
+        .filter(item => item.deduction > 0)
+        .sort((a, b) => b.deduction - a.deduction);
+    %>
+    <details class="card" style="margin-bottom: 24px;">
+      <summary class="card-header" style="background: var(--grey-100); cursor: pointer;">
+        <span>
+          <strong>How this score was calculated</strong>
+          <span class="chip" style="margin-left: 8px; background: #FFF4E5; color: #B45309;"><%= scoreBreakdown.profileStatus %></span>
+        </span>
+        <span style="font-size: 0.75rem; color: #7C8FAC;"><%= scoreBreakdown.profileVersion %> · −<%= Number(scoreBreakdown.totalDeduction).toFixed(1) %> points</span>
+      </summary>
+      <div style="padding: 16px 20px;">
+        <p style="font-size: 0.78rem; color: #7C8FAC; margin-bottom: 12px;">
+          Severity, active finding count, absolute exposure and finding age use bounded logarithmic transforms.
+          This provisional profile is transparent but is not claimed to reproduce Xenon's proprietary formula.
+        </p>
+        <% if (scoredRows.length) { %>
+        <div style="overflow-x: auto;">
+          <table style="width: 100%; border-collapse: collapse; font-size: 0.78rem;">
+            <thead><tr style="text-align: left; border-bottom: 1px solid #e5eaef;">
+              <th style="padding: 8px;">Check</th><th>Severity</th><th>Active findings</th>
+              <th>Exposure</th><th>Average age</th><th style="text-align: right;">Deduction</th>
+            </tr></thead>
+            <tbody>
+              <% scoredRows.forEach(item => { %>
+              <tr style="border-bottom: 1px solid #f2f6fa;">
+                <td style="padding: 8px;"><%= (checkDefs.find(check => check.type === item.checkType) || {}).label || item.checkType %></td>
+                <td><%= item.importance %></td>
+                <td><%= Number(item.count).toLocaleString('en-GB') %> <small style="color:#7C8FAC;">(<%= item.source === 'active_findings' ? 'normalized' : 'aggregate' %>)</small></td>
+                <td>£<%= Math.round(item.exposure).toLocaleString('en-GB') %></td>
+                <td><%= item.ageDays ? Math.round(item.ageDays).toLocaleString('en-GB') + ' days' : 'Unavailable' %></td>
+                <td style="text-align: right; font-weight: 600;">−<%= Number(item.deduction).toFixed(1) %></td>
+              </tr>
+              <% }) %>
+            </tbody>
+          </table>
+        </div>
+        <% } else { %>
+          <p style="font-size: 0.8rem; color: #13DEB9;">No active scored findings deducted points.</p>
+        <% } %>
+      </div>
+    </details>
+    <% } %>
+
+    <div class="card">
+      <div class="card-header" style="background: var(--grey-100); display: flex; align-items: center; justify-content: space-between;">
+        <h5>Detailed Results</h5>
+        <label style="display: flex; align-items: center; gap: 8px; font-size: 0.875rem; color: #7C8FAC; cursor: pointer;">
+          <input type="checkbox" id="showAllChecks" checked onchange="toggleOkChecks(this.checked)">
+          <span>Show all checks?</span>
+        </label>
+      </div>
+
+      <%
+      const groups = [
+        { label: 'Critical', key: 'critical', bg: '#dc2626', color: 'white' },
+        { label: 'High',     key: 'high',     bg: '#f97316', color: 'white' },
+        { label: 'Medium',   key: 'medium',   bg: '#FFAE1F', color: 'white' },
+        { label: 'Low',      key: 'low',      bg: '#6b7280', color: 'white' },
+      ];
+      groups.forEach(group => {
+        const groupChecks = checkDefs.filter(c => c.importance === group.key);
+      %>
+      <div>
+        <div class="check-group-header" style="background: <%= group.bg %>;"><%= group.label %></div>
+        <% groupChecks.forEach(check => {
+          const hasIssues = check.count != null && check.count > 0;
+          const isNotSynced = check.count == null;
+          const isNotConfigured = check.period_checked === 'not_configured' || check.period_checked === 'needs_sync';
+          const isUnavailable = check.period_checked === 'out_of_scope';
+          const desc = checkDescriptions[check.type] || {};
+        %>
+        <div class="check-card check-row <%= !hasIssues ? 'check-ok' : '' %>" id="check-<%= check.type %>">
+          <div class="check-row-inner" onclick="toggleAccordion('<%= check.type %>')">
+            <div class="check-indicator <%= isNotConfigured || isUnavailable ? '' : hasIssues ? 'issue' : 'ok' %>" style="<%= isNotConfigured || isUnavailable ? 'background: #DFE5EF;' : '' %>"></div>
+            <div class="check-row-content">
+              <div style="flex: 1; min-width: 0; margin-right: 16px;">
+                <div style="font-weight: 500; color: #2A3547; font-size: 0.875rem; line-height: 1.2;"><%= check.label %></div>
+                <span class="chip chip-<%= check.importance %>" style="margin-top: 4px;"><%= importanceLabel[check.importance] %></span>
+              </div>
+
+              <div style="text-align: right; margin-right: 20px; flex-shrink: 0; min-width: 120px;">
+                <% if (isUnavailable) { %>
+                  <span style="color: #7C8FAC; font-size: 0.875rem;">Unavailable</span>
+                  <div style="font-size: 0.7rem; color: #7C8FAC;">Required data is outside the connected APIs</div>
+                <% } else if (isNotConfigured) { %>
+                  <span style="color: #7C8FAC; font-size: 0.875rem;"><%= check.period_checked === 'needs_sync' ? 'Needs sync' : 'Not configured' %></span>
+                  <div style="font-size: 0.7rem;"><a href="<%= check.type === 'opening_balance_differences' ? '#filed-accounts' : check.type === 'unprocessed_bank' ? '#statement-evidence' : '#bank-reconciliation' %>" class="font-semibold">Configure evidence →</a></div>
+                <% } else if (isNotSynced) { %>
+                  <span style="color: #DFE5EF; font-size: 0.875rem;">Not synced</span>
+                <% } else if (hasIssues) { %>
+                  <div style="font-weight: 600; font-size: 0.875rem; color: #2A3547;"><%= check.count.toLocaleString('en-GB') %> Issues</div>
+                  <% if (check.potential_value_gbp > 0) { %>
+                    <div style="font-size: 0.75rem; color: #FFAE1F;">£<%= Math.round(check.potential_value_gbp).toLocaleString('en-GB') %></div>
+                  <% } %>
+                <% } else { %>
+                  <div style="font-weight: 600; font-size: 0.875rem; color: #13DEB9;">OK</div>
+                <% } %>
+              </div>
+
+              <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
+                <button type="button" class="btn btn-ghost-primary btn-sm"
+                  onclick="event.stopPropagation();reanalyseCheck('<%= check.type %>',this)">Reanalyse</button>
+                <% if (hasIssues) { %>
+                  <a href="/client/<%= org.xero_tenant_id %>/check/<%= check.type %>?<%= periodQuery %>"
+                     onclick="event.stopPropagation()"
+                     class="font-semibold" style="font-size: 0.75rem; white-space: nowrap;">View Issues</a>
+                <% } %>
+                <span style="color: #DFE5EF; font-size: 0.75rem;" id="arrow-<%= check.type %>">▾</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="check-accordion-body" id="body-<%= check.type %>">
+            <% if (desc.issue) { %>
+            <div class="desc-row">
+              <span class="chip" style="flex-shrink: 0; margin-top: 2px; background: var(--mta-dark-blue); color: white;">Issue</span>
+              <p><%= desc.issue %></p>
+            </div>
+            <div class="desc-row">
+              <span class="chip" style="flex-shrink: 0; margin-top: 2px; background: var(--success); color: white;">So What?</span>
+              <p><%= desc.soWhat %></p>
+            </div>
+            <div class="desc-row">
+              <span class="chip" style="flex-shrink: 0; margin-top: 2px; background: var(--mta-dark-blue); color: white;">Solution</span>
+              <p><%= desc.solution %></p>
+            </div>
+            <% } else { %>
+            <p style="font-size: 0.875rem; color: #7C8FAC; font-style: italic;">No description available for this check.</p>
+            <% } %>
+          </div>
+        </div>
+        <% }) %>
+      </div>
+      <% }) %>
+    </div>
+
+    <div class="card" id="statement-evidence" style="margin-top: 24px;">
+      <div class="card-header" style="background: var(--grey-100);">
+        <h5>Bank Statement Evidence</h5>
+        <p style="font-size: 0.75rem; color: #7C8FAC; margin-top: 4px;">
+          Upload CSV statements for local matching against cached Xero bank transactions, payments and transfers.
+          Match labels are evidence confidence only and are not Xero-native reconciliation.
+        </p>
+      </div>
+      <form method="POST" enctype="multipart/form-data" action="/client/<%= org.xero_tenant_id %>/statement-import" style="padding: 16px 20px;">
+        <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+        <div style="display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px;">
+          <label>Bank account
+            <select name="bank_account_id" class="form-input" required style="width:100%;">
+              <option value="">Select account</option>
+              <% (bankReconciliation || []).forEach(account => { %>
+                <option value="<%= account.bank_account_id %>"><%= account.bank_account_name %></option>
+              <% }) %>
+            </select>
+          </label>
+          <label>Statement start <input type="date" name="statement_start_date" class="form-input" required style="width:100%;"></label>
+          <label>Statement end <input type="date" name="statement_end_date" class="form-input" required style="width:100%;"></label>
+          <label>Opening balance <input type="number" step="0.01" name="opening_balance" class="form-input" style="width:100%;"></label>
+          <label>Closing balance <input type="number" step="0.01" name="closing_balance" class="form-input" required style="width:100%;"></label>
+          <label>CSV statement <input type="file" name="statement_csv" accept=".csv,text/csv" required style="display:block;margin-top:6px;"></label>
+        </div>
+        <details style="margin-top:12px;">
+          <summary style="cursor:pointer;color:#5D87FF;font-size:0.8rem;">Optional column mapping</summary>
+          <p style="font-size:0.72rem;color:#7C8FAC;margin:6px 0;">Leave blank to auto-detect common headers. Enter the exact CSV header to override.</p>
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;">
+            <% ['date','amount','debit','credit','reference','description'].forEach(column => { %>
+              <input class="form-input" name="<%= column %>_column" placeholder="<%= column[0].toUpperCase() + column.slice(1) %> header">
+            <% }) %>
+          </div>
+        </details>
+        <button type="submit" class="btn btn-primary btn-sm" style="margin-top:12px;">Import Statement</button>
+      </form>
+      <% if (statementImports && statementImports.length) { %>
+      <div style="overflow:auto;border-top:1px solid #e5eaef;">
+        <table style="width:100%;border-collapse:collapse;font-size:0.78rem;">
+          <thead><tr style="background:#F2F6FA;text-align:left;">
+            <th style="padding:8px 12px;">Imported statement</th><th>Period / balances</th>
+            <th>Local match confidence</th><th></th>
+          </tr></thead>
+          <tbody>
+          <% statementImports.forEach(item => { %>
+            <tr style="border-top:1px solid #f2f6fa;">
+              <td style="padding:8px 12px;"><strong><%= item.bank_account_name %></strong><div><%= item.original_filename %></div><small style="color:#7C8FAC;"><%= item.file_sha256.slice(0,12) %>… · <%= item.imported_at %></small></td>
+              <td><%= item.statement_start_date %> – <%= item.statement_end_date %>
+                <% const evidenceAgeDays = Math.floor((Date.now() - new Date(item.statement_end_date + 'T00:00:00Z')) / 86400000); %>
+                <span class="chip" style="margin-left:4px;background:<%= evidenceAgeDays > 35 ? '#FFF4E5' : '#E6FFFA' %>;color:<%= evidenceAgeDays > 35 ? '#B45309' : '#047857' %>;"><%= evidenceAgeDays > 35 ? 'Stale evidence' : 'Current evidence' %></span>
+                <div>Opening: <%= item.opening_balance == null ? '—' : '£' + Number(item.opening_balance).toFixed(2) %> · Closing: £<%= Number(item.closing_balance).toFixed(2) %></div>
+              </td>
+              <td><span style="color:#13DEB9;">Exact <%= item.exact_count || 0 %></span> · Probable <%= item.probable_count || 0 %> · Ambiguous <%= item.ambiguous_count || 0 %> · <span style="color:#FA896B;">Unmatched <%= item.unmatched_count || 0 %></span></td>
+              <td style="padding-right:12px;">
+                <form method="POST" action="/client/<%= org.xero_tenant_id %>/statement-import/<%= item.id %>/delete" onsubmit="return confirm('Delete this import and its normalized lines?')">
+                  <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+                  <button class="btn btn-sm btn-outlined" type="submit">Delete</button>
+                </form>
+              </td>
+            </tr>
+          <% }) %>
+          </tbody>
+        </table>
+      </div>
+      <% } %>
+    </div>
+
+    <div class="card" id="bank-reconciliation" style="margin-top: 24px;">
+      <div class="card-header" style="background: var(--grey-100);">
+        <h5>Bank Statement Reconciliation <span style="font-weight: 400; color: #7C8FAC; font-size: 0.8rem;">(Required for Bank Balance Check)</span></h5>
+        <p style="font-size: 0.75rem; color: #7C8FAC; margin-top: 4px;">
+          Xero's standard API does not expose the real bank statement balance.
+          Imported CSV closing balances are preferred. Enter a closing balance below only as a manual fallback.
+        </p>
+      </div>
+      <% if (!bankReconciliation || !bankReconciliation.length) { %>
+        <div style="padding: 24px 20px; color: #7C8FAC; font-size: 0.875rem;">No bank accounts found yet — sync this client first.</div>
+      <% } else { %>
+        <table style="width: 100%; border-collapse: collapse; font-size: 0.875rem;">
+          <thead>
+            <tr style="background: #F2F6FA; text-align: left;">
+              <th style="padding: 10px 16px; font-weight: 600; color: #2A3547;">Bank Account</th>
+              <th style="padding: 10px 16px; font-weight: 600; color: #2A3547;">Xero Calculated Balance</th>
+              <th style="padding: 10px 16px; font-weight: 600; color: #2A3547;">Statement Balance</th>
+              <th style="padding: 10px 16px; font-weight: 600; color: #2A3547;">Difference</th>
+              <th style="padding: 10px 16px;"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <% bankReconciliation.forEach(acc => {
+              const xeroBal = acc.xero_calculated_balance;
+              const stmtBal = acc.statement_balance;
+              const hasStatement = stmtBal !== null && stmtBal !== undefined;
+              const diff = hasStatement && xeroBal !== null ? (xeroBal - stmtBal) : null;
+              const isOk = diff !== null && Math.abs(diff) < 0.01;
+            %>
+            <tr style="border-top: 1px solid #e5eaef;">
+              <td style="padding: 10px 16px; font-weight: 500; color: #2A3547;"><%= acc.bank_account_name %></td>
+              <td style="padding: 10px 16px; color: #2A3547;">
+                <%= xeroBal !== null ? (xeroBal < 0 ? '-£' + Number(Math.abs(xeroBal)).toLocaleString('en-GB', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '£' + Number(xeroBal).toLocaleString('en-GB', {minimumFractionDigits: 2, maximumFractionDigits: 2})) : '—' %>
+                <% if (acc.xero_balance_as_of) { %><div style="font-size: 0.7rem; color: #7C8FAC;">as of <%= acc.xero_balance_as_of %></div><% } %>
+              </td>
+              <td style="padding: 10px 16px;">
+                <form method="POST" action="/client/<%= org.xero_tenant_id %>/bank-reconciliation" style="display: flex; gap: 6px; align-items: center;">
+                  <input type="hidden" name="bank_account_id" value="<%= acc.bank_account_id %>">
+                  <input type="number" step="0.01" name="statement_balance" value="<%= hasStatement ? stmtBal : '' %>"
+                         placeholder="Enter statement balance" class="form-input" style="width: 150px; padding: 4px 8px; font-size: 0.8rem;">
+                  <button type="submit" class="btn btn-ghost-primary btn-sm">Save</button>
+                </form>
+              </td>
+              <td style="padding: 10px 16px;">
+                <% if (!hasStatement) { %>
+                  <span style="color: #DFE5EF;">—</span>
+                <% } else if (isOk) { %>
+                  <span style="color: #13DEB9; font-weight: 600;">Matches</span>
+                <% } else { %>
+                  <span style="color: #FA896B; font-weight: 600;">£<%= Math.abs(diff).toLocaleString('en-GB', {minimumFractionDigits: 2, maximumFractionDigits: 2}) %></span>
+                <% } %>
+              </td>
+              <td style="padding: 10px 16px; font-size: 0.7rem; color: #7C8FAC;">
+                <% if (acc.statement_balance_updated_at) { %>entered <%= acc.statement_balance_updated_at.split(' ')[0] %><% } %>
+              </td>
+            </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      <% } %>
+    </div>
+
+    <div class="card" id="filed-accounts" style="margin-top:24px;">
+      <div class="card-header" style="background:var(--grey-100);">
+        <h5>Filed Accounts Evidence</h5>
+        <p style="font-size:0.75rem;color:#7C8FAC;margin-top:4px;">The latest filing is compared with the Xero Balance Sheet at that date on the next sync. Where the Companies House filing is iXBRL-tagged the net assets figure is read automatically; anything entered below is treated as the accountant's figure and is never overwritten by an automatic reading.</p>
+      </div>
+      <form method="POST" enctype="multipart/form-data" action="/client/<%= org.xero_tenant_id %>/filed-accounts" style="padding:16px 20px;">
+        <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+        <div style="display:grid;grid-template-columns:1fr 1fr 2fr;gap:12px;">
+          <label>Filing date <input type="date" name="filing_date" required class="form-input" style="width:100%;"></label>
+          <label>Net assets <input type="number" step="0.01" name="net_assets" required class="form-input" style="width:100%;"></label>
+          <label>Source note <input type="text" maxlength="1000" name="source_note" class="form-input" style="width:100%;" placeholder="e.g. Companies House filing"></label>
+          <label style="grid-column:1/-1;">Optional source document <input type="file" name="source_document" accept=".pdf,.csv,.png,.jpg,.jpeg,application/pdf,text/csv,image/png,image/jpeg" style="display:block;margin-top:6px;"></label>
+        </div>
+        <button class="btn btn-primary btn-sm" type="submit" style="margin-top:12px;">Save Filed Accounts</button>
+      </form>
+      <% if (filedAccounts && filedAccounts.length) { %>
+        <div style="border-top:1px solid #e5eaef;padding:12px 20px;font-size:0.8rem;">
+          <% filedAccounts.forEach(item => { %>
+            <div style="padding:6px 0;border-bottom:1px solid #f2f6fa;">
+              <strong><%= item.filing_date %></strong> · Filed net assets £<%= Number(item.net_assets).toLocaleString('en-GB',{minimumFractionDigits:2}) %> · Xero: <%= item.xero_net_assets == null ? 'Needs sync' : '£' + Number(item.xero_net_assets).toLocaleString('en-GB',{minimumFractionDigits:2}) %>
+              <span style="font-size:0.7rem;padding:1px 6px;border-radius:3px;background:<%= item.source === 'companies_house' ? '#E1F5EE' : '#F1EFE8' %>;color:<%= item.source === 'companies_house' ? '#0F6E56' : '#5F5E5A' %>;"><%= item.source === 'companies_house' ? 'Companies House (automatic)' : 'Accountant entered' %></span>
+              <% if (item.source_note) { %> · <%= item.source_note %><% } %><% if (item.source_document_path) { %> · document stored privately<% } %>
+              <% if (item.taxonomy_concept) { %>
+                <div style="color:#7C8FAC;font-size:0.7rem;margin-top:2px;">Read from <code><%= item.taxonomy_concept %></code> · context <%= item.context_ref %> at <%= item.context_date %> · <%= item.extraction_confidence %> confidence<% if (item.ch_document_id) { %> · document <%= item.ch_document_id %><% } %></div>
+              <% } %>
+            </div>
+          <% }) %>
+        </div>
+      <% } %>
+      <%
+      // A failed automatic read must explain itself, otherwise the only visible state is an empty
+      // form and the accountant cannot tell whether the tool tried.
+      const extractionReasons = {
+        no_structured_document_available: 'Companies House holds this filing as an image or PDF only, with no machine-readable figures.',
+        no_accounts_filing: 'No accounts filing found on the public register.',
+        no_accounts_filing_for_made_up_date: 'No accounts filing matches the register’s last made-up-to date.',
+        paper_filed_no_document: 'These accounts were filed on paper, so no document is available to read.',
+        no_inline_xbrl_facts: 'The filed document contains no tagged figures (typically an untagged micro-entity or dormant filing).',
+        no_net_assets_concept_found: 'The filing tags figures but none of them is a net assets or total equity line.',
+        no_fact_for_made_up_date: 'The filing’s tagged figures are for a different balance-sheet date, so the prior year was not used.',
+        conflicting_values_for_same_date: 'The filing tags more than one different net assets figure for this date, so none was trusted.',
+        not_applied_manual_entry_exists: 'A figure was read successfully but your entered figure was kept instead.',
+        no_made_up_to_date: 'Companies House has no last made-up-to date for this company yet.',
+      };
+      const failedExtractions = (filedAccountsExtractions || []).filter(item => item.failure_reason);
+      %>
+      <% if (failedExtractions.length) { %>
+        <div style="border-top:1px solid #e5eaef;padding:12px 20px;font-size:0.8rem;">
+          <div style="font-weight:500;margin-bottom:6px;">Automatic reading attempts</div>
+          <% failedExtractions.forEach(item => { %>
+            <div style="padding:6px 0;border-bottom:1px solid #f2f6fa;color:#7C8FAC;">
+              <strong style="color:var(--dark);"><%= item.made_up_to %></strong> ·
+              <%= extractionReasons[item.failure_reason] || item.failure_reason %>
+              <% if (item.extracted_value != null) { %> (read £<%= Number(item.extracted_value).toLocaleString('en-GB',{minimumFractionDigits:2}) %>)<% } %>
+              <% if (item.available_dates) { try { const dates = JSON.parse(item.available_dates); if (dates.length) { %> · dates present in the filing: <%= dates.join(', ') %><% } } catch (e) {} } %>
+            </div>
+          <% }) %>
+        </div>
+      <% } %>
+    </div>
+
+    <div class="card" id="companies-house" style="margin-top:24px;">
+      <div class="card-header" style="background:var(--grey-100);">
+        <h5>Companies House</h5>
+        <p style="font-size:0.75rem;color:#7C8FAC;margin-top:4px;">Public-register status and filing deadlines. Informational only — not part of the health score.</p>
+      </div>
+      <% if (!companiesHouseKeySet) { %>
+        <div style="padding:16px 20px;font-size:0.85rem;color:#7C8FAC;">
+          Add a free Companies House API key in <a href="/settings" class="font-semibold">Settings</a> to enable lookups.
+        </div>
+      <% } %>
+      <form method="POST" action="/client/<%= org.xero_tenant_id %>/companies-house" style="padding:16px 20px;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
+        <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+        <label style="flex:1;min-width:200px;">Company number
+          <input type="text" name="company_number" maxlength="12" required class="form-input" style="width:100%;"
+            value="<%= (companiesHouse && companiesHouse.company_number) || org.company_number || '' %>" placeholder="e.g. 12345678 or SC123456">
+        </label>
+        <button class="btn btn-primary btn-sm" type="submit" <%= companiesHouseKeySet ? '' : 'disabled' %>>Fetch / Refresh</button>
+      </form>
+      <% if (companiesHouse) { %>
+        <% if (companiesHouse.fetch_error) { %>
+          <div style="border-top:1px solid #e5eaef;padding:12px 20px;font-size:0.82rem;color:#B00020;">Last lookup failed: <%= companiesHouse.fetch_error %></div>
+        <% } else { %>
+          <% var chFmt = function(d){ return d ? new Date(d).toLocaleDateString('en-GB') : '—'; }; %>
+          <div style="border-top:1px solid #e5eaef;padding:16px 20px;font-size:0.85rem;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;">
+            <div>
+              <div style="font-size:0.7rem;color:#7C8FAC;text-transform:uppercase;">Company</div>
+              <div style="font-weight:600;"><%= companiesHouse.company_name || '—' %></div>
+              <div style="color:#7C8FAC;"><%= companiesHouse.company_number %><% if (companiesHouse.company_type) { %> · <%= companiesHouse.company_type %><% } %></div>
+            </div>
+            <div>
+              <div style="font-size:0.7rem;color:#7C8FAC;text-transform:uppercase;">Status</div>
+              <% var live = companiesHouse.company_status === 'active'; %>
+              <span style="display:inline-block;padding:2px 10px;border-radius:12px;font-weight:600;font-size:0.78rem;background:<%= live ? '#E6F4EA' : '#FDECEA' %>;color:<%= live ? '#1E7E34' : '#B00020' %>;"><%= companiesHouse.company_status || 'unknown' %></span>
+              <% if (companiesHouse.incorporation_date) { %><div style="color:#7C8FAC;margin-top:4px;">Since <%= chFmt(companiesHouse.incorporation_date) %></div><% } %>
+            </div>
+            <div>
+              <div style="font-size:0.7rem;color:#7C8FAC;text-transform:uppercase;">Accounts due</div>
+              <div style="font-weight:600;color:<%= companiesHouse.accounts_overdue ? '#B00020' : 'inherit' %>;"><%= chFmt(companiesHouse.accounts_next_due) %><%= companiesHouse.accounts_overdue ? ' · OVERDUE' : '' %></div>
+              <div style="color:#7C8FAC;">Last: <%= chFmt(companiesHouse.accounts_last_made_up_to) %></div>
+            </div>
+            <div>
+              <div style="font-size:0.7rem;color:#7C8FAC;text-transform:uppercase;">Confirmation stmt due</div>
+              <div style="font-weight:600;color:<%= companiesHouse.confirmation_overdue ? '#B00020' : 'inherit' %>;"><%= chFmt(companiesHouse.confirmation_next_due) %><%= companiesHouse.confirmation_overdue ? ' · OVERDUE' : '' %></div>
+              <div style="color:#7C8FAC;">Last: <%= chFmt(companiesHouse.confirmation_last_made_up_to) %></div>
+            </div>
+            <% if (companiesHouse.registered_office) { %>
+            <div style="grid-column:1/-1;">
+              <div style="font-size:0.7rem;color:#7C8FAC;text-transform:uppercase;">Registered office</div>
+              <div><%= companiesHouse.registered_office %></div>
+            </div>
+            <% } %>
+          </div>
+          <div style="border-top:1px solid #f2f6fa;padding:8px 20px;font-size:0.72rem;color:#7C8FAC;">
+            Fetched <%= new Date(companiesHouse.fetched_at).toLocaleString('en-GB') %> ·
+            <a href="https://find-and-update.company-information.service.gov.uk/company/<%= encodeURIComponent(companiesHouse.company_number) %>" target="_blank" rel="noopener">View on Companies House</a>
+          </div>
+        <% } %>
+      <% } %>
+    </div>
+
+    <div class="card" id="capital-review-accounts" style="margin-top: 24px;">
+      <div class="card-header" style="background: var(--grey-100);">
+        <h5>Per-account Check Settings</h5>
+        <p style="font-size: 0.75rem; color: #7C8FAC; margin-top: 4px;">
+          Configure capital review and misallocation thresholds per account. Purchase Tax Missing
+          uses its standard exemptions unless an account is ignored, or a fixed-asset/prepayment account is explicitly included.
+        </p>
+      </div>
+      <% if (!configuredAccounts || !configuredAccounts.length) { %>
+        <div style="padding: 24px 20px; color: #7C8FAC; font-size: 0.875rem;">No accounts found yet — sync this client first.</div>
+      <% } else { %>
+        <form method="POST" action="/client/<%= org.xero_tenant_id %>/account-check-configuration">
+          <div style="max-height: 440px; overflow: auto; border-bottom: 1px solid #e5eaef;">
+            <table style="width: 100%; border-collapse: collapse; font-size: 0.875rem;">
+              <thead>
+                <tr style="background: #F2F6FA; text-align: left;">
+                  <th style="padding: 8px 12px;">Account</th>
+                  <th style="padding: 8px 12px;">Capital review / threshold</th>
+                  <th style="padding: 8px 12px;">Misallocated / threshold</th>
+                  <th style="padding: 8px 12px;">Purchase tax</th>
+                </tr>
+              </thead>
+              <tbody>
+                <% configuredAccounts.forEach(acc => { %>
+                <tr style="border-top: 1px solid #f2f6fa;">
+                  <td style="padding: 8px 12px; min-width: 210px;">
+                    <strong><%= acc.account_code %></strong> <%= acc.account_name %>
+                    <div style="font-size: 0.7rem; color: #7C8FAC;"><%= acc.account_class || acc.account_type || '' %></div>
+                  </td>
+                  <td style="padding: 8px 12px; white-space: nowrap;">
+                    <label><input type="checkbox" name="capital_accounts" value="<%= acc.account_code %>" <%= acc.is_capital_candidate ? 'checked' : '' %>> Monitor</label>
+                    <input type="number" min="0.01" step="0.01" name="capital_threshold[<%= acc.account_code %>]"
+                      value="<%= acc.capital_review_threshold == null ? '' : acc.capital_review_threshold %>" placeholder="£500"
+                      class="form-input" style="width: 85px; padding: 4px 6px;">
+                  </td>
+                  <td style="padding: 8px 12px; white-space: nowrap;">
+                    <label><input type="checkbox" name="misallocated_accounts" value="<%= acc.account_code %>" <%= acc.monitor_misallocated ? 'checked' : '' %>> Monitor</label>
+                    <input type="number" min="0.01" step="0.01" name="misallocated_threshold[<%= acc.account_code %>]"
+                      value="<%= acc.misallocated_threshold == null ? '' : acc.misallocated_threshold %>" placeholder="£100"
+                      class="form-input" style="width: 85px; padding: 4px 6px;">
+                  </td>
+                  <td style="padding: 8px 12px;">
+                    <label style="display:block;"><input type="checkbox" name="purchase_tax_ignored_accounts" value="<%= acc.account_code %>" <%= acc.purchase_tax_ignore ? 'checked' : '' %>> Ignore</label>
+                    <label style="display:block;"><input type="checkbox" name="purchase_tax_asset_prepayment_accounts" value="<%= acc.account_code %>" <%= acc.purchase_tax_include_asset_prepayment ? 'checked' : '' %>> Include asset/prepayment</label>
+                  </td>
+                </tr>
+                <% }) %>
+              </tbody>
+            </table>
+          </div>
+          <div style="padding: 12px 16px;">
+            <button type="submit" class="btn btn-primary btn-sm">Save Account Settings</button>
+          </div>
+        </form>
+      <% } %>
+    </div>
+
+  </div>
+</div>
+
+<div id="panel-transactions" style="display: none;">
+  <div class="card">
+    <div style="padding: 16px 20px; border-bottom: 1px solid #e5eaef; background: #F2F6FA;">
+      <h5 style="font-weight: 600; color: #2A3547;">Transaction Counts — <%= selectedPeriod.label %></h5>
+      <p style="font-size: 0.75rem; color: #7C8FAC; margin-top: 4px;">Data from last sync. <a href="/transactions" style="color: #5D87FF; text-decoration: none;">View all clients →</a></p>
+    </div>
+    <% if (txCounts) { %>
+    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: #e5eaef;">
+      <%
+      const mth = txCounts.months_covered || 12;
+      const txItems = [
+        { label: 'Turnover', raw: txCounts.turnover || 0, isCurrency: true },
+        { label: 'Total Transactions', raw: txCounts.total_transactions || 0, isCurrency: false },
+        { label: 'Customer Invoices', raw: txCounts.customer_invoices || 0, isCurrency: false },
+        { label: 'Supplier Bills', raw: txCounts.supplier_bills || 0, isCurrency: false },
+        { label: 'Sales Credit Notes', raw: txCounts.credit_notes_sales || 0, isCurrency: false },
+        { label: 'Purchase Credit Notes', raw: txCounts.credit_notes_purchase || 0, isCurrency: false },
+        { label: 'Bank Processed', raw: txCounts.bank_processed || 0, isCurrency: false },
+        { label: 'Journals', raw: txCounts.journals || 0, isCurrency: false },
+      ];
+      txItems.forEach(item => {
+        const display = item.isCurrency ? '£' + Math.round(item.raw).toLocaleString('en-GB') : item.raw.toLocaleString('en-GB');
+        const perMthDisplay = item.isCurrency ? '£' + Math.round(item.raw / mth).toLocaleString('en-GB') + '/mth' : Math.round(item.raw / mth).toLocaleString('en-GB') + '/mth';
+      %>
+      <div style="background: white; padding: 16px; text-align: center;">
+        <div style="font-size: 0.75rem; color: #7C8FAC; margin-bottom: 4px;"><%= item.label %></div>
+        <div style="font-size: 1.25rem; font-weight: 700; color: #2A3547;"><%= display %></div>
+        <div style="font-size: 0.75rem; color: #7C8FAC; margin-top: 4px;"><%= perMthDisplay %></div>
+      </div>
+      <% }) %>
+    </div>
+    <div style="padding: 8px 20px; font-size: 0.75rem; color: #7C8FAC; border-top: 1px solid #e5eaef; background: #F2F6FA;">
+      Period: <%= txCounts.period_start || '—' %> to <%= txCounts.period_end || '—' %> (<%= mth %> months)
+    </div>
+    <% } else { %>
+    <div style="padding: 48px 20px; text-align: center; color: #7C8FAC;">No transaction data yet — sync this client first.</div>
+    <% } %>
+  </div>
+</div>
+
+<script>
+(function() {
+  const ctx = document.getElementById('scoreChart').getContext('2d');
+  new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      datasets: [{ 
+        data: [<%= score %>, <%= 100 - score %>], 
+        backgroundColor: ['<%= scoreColor %>', '#e5e7eb'], 
+        borderWidth: 0,
+        borderRadius: 8
+      }]
+    },
+    options: { 
+      cutout: '75%',
+      plugins: { 
+        legend: { display: false }, 
+        tooltip: { enabled: false }
+      },
+      animation: {
+        animateRotate: true,
+        animateScale: true,
+        duration: 1000,
+        easing: 'easeOutQuart'
+      }
+    }
+  });
+})();
+
+function showTab(name) {
+  ['health','transactions'].forEach(t => {
+    const panel = document.getElementById('panel-' + t);
+    const btn = document.getElementById('tab-' + t);
+    const active = t === name;
+    panel.style.display = active ? (t === 'health' ? 'flex' : 'block') : 'none';
+    btn.classList.toggle('active', active);
+  });
+}
+
+function toggleAccordion(type) {
+  const body = document.getElementById('body-' + type);
+  const arrow = document.getElementById('arrow-' + type);
+  const isHidden = body.style.display === 'none' || body.style.display === '';
+  body.style.display = isHidden ? 'block' : 'none';
+  if (arrow) arrow.textContent = isHidden ? '▴' : '▾';
+}
+
+function scrollToCheck(type) {
+  const el = document.getElementById('check-' + type);
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function toggleOkChecks(show) {
+  document.querySelectorAll('.check-ok').forEach(el => el.style.display = show ? 'block' : 'none');
+}
+
+function toggleSidebarOk(show) {
+  document.querySelectorAll('.sidebar-ok').forEach(el => el.style.display = show ? 'block' : 'none');
+}
+
+// Sync
+async function syncThisClient() {
+  const btn = document.getElementById('syncBtn');
+  btn.disabled = true; btn.textContent = 'Syncing...';
+  try {
+    const resp = await fetch('/client/<%= org.xero_tenant_id %>/sync?async=1&<%= periodQuery %>', { method: 'POST' });
+    const data = await resp.json();
+    if (data.jobId) watchSyncJob(data.jobId, btn);
+    else { alert('Sync failed: ' + data.error); btn.disabled = false; btn.textContent = '⟳ Sync'; }
+  } catch(e) {
+    alert('Sync error: ' + e.message); btn.disabled = false; btn.textContent = '⟳ Sync';
+  }
+}
+
+async function reanalyseCheck(checkType, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Starting…';
+  try {
+    const response = await fetch('/client/<%= org.xero_tenant_id %>/check/' + encodeURIComponent(checkType) + '/reanalyse?async=1&<%= periodQuery %>', { method: 'POST' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Could not start reanalysis');
+    watchSyncJob(data.jobId, btn);
+  } catch (error) {
+    alert(error.message);
+    btn.disabled = false;
+    btn.textContent = 'Reanalyse';
+  }
+}
+
+function watchSyncJob(jobId, btn) {
+  const stream = new EventSource('/sync-jobs/' + encodeURIComponent(jobId) + '/events');
+  stream.onmessage = event => {
+    const job = JSON.parse(event.data);
+    btn.textContent = job.progress?.message || 'Working…';
+    if (job.status === 'succeeded') {
+      stream.close();
+      window.location.reload();
+    } else if (job.status === 'failed') {
+      stream.close();
+      alert('Sync failed: ' + job.error);
+      btn.disabled = false;
+      btn.textContent = btn.id === 'syncBtn' ? 'Sync' : 'Reanalyse';
+    }
+  };
+  stream.onerror = () => {
+    stream.close();
+    btn.disabled = false;
+    btn.textContent = btn.id === 'syncBtn' ? 'Sync' : 'Reanalyse';
+  };
+}
+
+// Report dropdown
+function toggleReportMenu() {
+  document.getElementById('reportMenu').classList.toggle('hidden');
+}
+document.addEventListener('click', e => {
+  if (!e.target.closest('.relative')) document.getElementById('reportMenu')?.classList.add('hidden');
+});
+</script>
+
+<%- include('partials/footer') %>

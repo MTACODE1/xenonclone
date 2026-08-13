@@ -1,0 +1,58 @@
+{
+  "provenance": "Synthetic regression shapes derived from anonymized MBX and Fast Track audit expectations; no raw Xero records or credentials.",
+  "unreconciled": {
+    "bankTransactions": [
+      { "bankTransactionID": "bank-authorised", "status": "AUTHORISED", "isReconciled": false, "total": -125.5 },
+      { "bankTransactionID": "bank-deleted", "status": "DELETED", "isReconciled": false, "total": 999 },
+      { "bankTransactionID": "bank-reconciled", "status": "AUTHORISED", "isReconciled": true, "total": 25 }
+    ],
+    "payments": [
+      { "paymentID": "payment-authorised", "status": "AUTHORISED", "isReconciled": false, "amount": 75 },
+      { "paymentID": "payment-deleted", "status": "DELETED", "isReconciled": false, "amount": 400 }
+    ],
+    "expectedCount": 2,
+    "expectedExposure": 200.5
+  },
+  "unexpectedDefaults": {
+    "contactsById": {
+      "supplier-a": {
+        "purchasesDefaultAccountCode": "400",
+        "accountsPayableTaxType": "INPUT2"
+      }
+    },
+    "documents": [
+      {
+        "invoiceID": "bill-1",
+        "contact": { "contactID": "supplier-a", "name": "Supplier A" },
+        "lineItems": [
+          { "accountCode": "401", "taxType": "NONE", "lineAmount": 100 },
+          { "accountCode": "402", "taxType": "INPUT", "lineAmount": -40 },
+          { "accountCode": "400", "taxType": "INPUT2", "lineAmount": 15 }
+        ]
+      }
+    ],
+    "expectedAccountLines": 2,
+    "expectedTaxLines": 2,
+    "expectedExposure": 140
+  },
+  "duplicates": [
+    { "invoiceID": "inv-1", "date": "2026-01-10", "total": 120, "contact": { "contactID": "customer-a", "name": "Customer A" } },
+    { "invoiceID": "inv-2", "date": "2026-01-10", "total": 120, "contact": { "contactID": "customer-a", "name": "Customer A" } },
+    { "invoiceID": "inv-3", "date": "2026-01-10", "total": 120, "contact": { "contactID": "customer-a", "name": "Customer A" } },
+    { "invoiceID": "inv-next-day", "date": "2026-01-11", "total": 120, "contact": { "contactID": "customer-a", "name": "Customer A" } }
+  ],
+  "directMatch": {
+    "documents": [
+      { "invoiceID": "doc-before", "date": "2026-02-01", "status": "AUTHORISED", "amountDue": 250, "contact": { "contactID": "contact-a" } },
+      { "invoiceID": "doc-after", "date": "2026-03-20", "status": "AUTHORISED", "amountDue": 250, "contact": { "contactID": "contact-a" } }
+    ],
+    "transactions": [
+      { "bankTransactionID": "txn-30-days", "date": "2026-03-03", "total": 250, "contact": { "contactID": "contact-a" }, "lineItems": [{ "accountCode": "200" }] }
+    ]
+  },
+  "contactNames": [
+    { "contactID": "contact-1", "name": "North Star Supplies Ltd" },
+    { "contactID": "contact-2", "name": "Northstar Supply Limited" },
+    { "contactID": "contact-3", "name": "Completely Different Co" }
+  ]
+}

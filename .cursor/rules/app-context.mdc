@@ -1,0 +1,30 @@
+---
+description: Xero Bookkeeping Health Dashboard — architecture and conventions
+alwaysApply: true
+---
+
+# Xero Health Dashboard
+
+Local Node.js + Express app connecting to Xero via OAuth. Runs 25 bookkeeping health checks, stores results in SQLite, renders EJS views with MTA design CSS.
+
+## Read first
+- `APP_CONTEXT.md` — how this app actually works (routes, checks, scoring, data flow)
+- `DESIGN_STANDARDS.md` — MTA colors, typography, layout (use for UI; app is EJS not React)
+- `CLAUDE.md` — original build spec (may differ from implementation)
+
+## Stack
+Express + EJS + `better-sqlite3` + `xero-node`. DB: `data/xero_dashboard.db`. Entry: `app.js`.
+
+## Key files
+- `src/services/xeroSync.js` — all health checks, `CHECK_DEFINITIONS`, `syncOrganisation()`
+- `src/services/xeroClient.js` — `apiCall()` with token refresh and 429 retry
+- `src/db/queries.js` — all SQLite operations
+- `public/style.css` — MTA design tokens (`#01406A`, `#5D87FF`, 270px sidebar)
+
+## Rules
+- All Xero calls via `apiCall()` in xeroClient.js — never raw HTTP
+- Paginate large fetches; 1s delay between pages for rate limits
+- Health score: 100 minus 1 per check with issues; contact checks excluded from score
+- 7 checks are placeholders (count 0): opening_balance_differences, invoice_or_direct, bill_or_direct, low_cost_fixed_assets, misallocated_items, unexpected_account_used, unexpected_tax_code_used
+- Issue details stored as JSON in `issues.detail_json`
+- No user auth — single-practice local tool

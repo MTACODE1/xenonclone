@@ -1,0 +1,153 @@
+<%- include('partials/header', { currentPage: 'panorama' }) %>
+
+<div class="page-header">
+  <h4>Data Quality Panorama</h4>
+  <p>Overview of bookkeeping health across all clients</p>
+</div>
+
+<div class="stats-grid">
+  <div class="card stat-card hover-card fade-in <%= avgScore >= 80 ? 'stat-success' : avgScore >= 60 ? 'stat-warning' : 'stat-error' %>">
+    <div class="stat-icon" style="background: <%= avgScore >= 80 ? 'var(--success-light)' : avgScore >= 60 ? 'var(--warning-light)' : 'var(--error-light)' %>; color: <%= avgScore >= 80 ? 'var(--success)' : avgScore >= 60 ? 'var(--warning)' : 'var(--error)' %>;">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+    </div>
+    <div class="stat-body">
+      <div class="stat-value"><%= avgScore != null ? avgScore + '%' : 'N/A' %></div>
+      <div class="stat-label">Avg Health Score</div>
+    </div>
+  </div>
+  <div class="card stat-card stat-warning hover-card fade-in">
+    <div class="stat-icon" style="background: var(--warning-light); color: var(--warning);">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+    </div>
+    <div class="stat-body">
+      <div class="stat-value"><%= totalIssues.toLocaleString() %></div>
+      <div class="stat-label">Total Issues</div>
+    </div>
+  </div>
+  <div class="card stat-card stat-error hover-card fade-in">
+    <div class="stat-icon" style="background: var(--error-light); color: var(--error);">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+    </div>
+    <div class="stat-body">
+      <div class="stat-value">£<%= totalErrors.toLocaleString('en-GB', {minimumFractionDigits:0,maximumFractionDigits:0}) %></div>
+      <div class="stat-label">Potential Errors</div>
+    </div>
+  </div>
+  <div class="card stat-card stat-primary hover-card fade-in">
+    <div class="stat-icon" style="background: var(--primary-light); color: var(--primary);">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+    </div>
+    <div class="stat-body">
+      <div class="stat-value"><%= totalUnreconciled.toLocaleString() %></div>
+      <div class="stat-label">Unreconciled Items</div>
+    </div>
+  </div>
+  <div class="card stat-card stat-primary hover-card fade-in">
+    <div class="stat-icon" style="background: var(--info-light); color: var(--info);">
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>
+    </div>
+    <div class="stat-body">
+      <div class="stat-value"><%= orgs.length %></div>
+      <div class="stat-label">Organisations</div>
+    </div>
+  </div>
+</div>
+
+<form class="form-row mb-24">
+  <input type="search" name="search" value="<%= query.search || '' %>" placeholder="Search clients…" class="form-input">
+  <select name="sort" class="form-select" onchange="this.form.submit()">
+    <option value="name" <%= query.sort === 'name' ? 'selected' : '' %>>Name A-Z</option>
+    <option value="score_asc" <%= query.sort === 'score_asc' ? 'selected' : '' %>>Health Score (Lowest)</option>
+    <option value="score_desc" <%= query.sort === 'score_desc' ? 'selected' : '' %>>Health Score (Highest)</option>
+    <option value="issues" <%= query.sort === 'issues' ? 'selected' : '' %>>Most Issues</option>
+    <option value="recent_transaction" <%= query.sort === 'recent_transaction' ? 'selected' : '' %>>Most Recent Transaction</option>
+    <option value="lock_date" <%= query.sort === 'lock_date' ? 'selected' : '' %>>Lock Date</option>
+  </select>
+  <select name="tag" class="form-select" onchange="this.form.submit()">
+    <option value="">All Tags</option>
+    <% allTags.forEach(t => { %><option value="<%= t %>" <%= query.tag === t ? 'selected' : '' %>><%= t %></option><% }) %>
+  </select>
+  <select name="status" class="form-select" onchange="this.form.submit()">
+    <option value="">All Statuses</option>
+    <option value="connected" <%= query.status === 'connected' ? 'selected' : '' %>>Connected</option>
+    <option value="disconnected" <%= query.status === 'disconnected' ? 'selected' : '' %>>Disconnected</option>
+  </select>
+</form>
+
+<div class="card">
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Client</th>
+          <th class="text-center">Health Score</th>
+          <th class="text-center">Issues</th>
+          <th class="text-right">Potential £</th>
+          <th class="text-center">Last Transaction</th>
+          <th class="text-center">Last Reconciled</th>
+          <th class="text-center">Unreconciled</th>
+          <th class="text-center">Lock Date</th>
+          <th class="text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% if (orgs.length === 0) { %>
+          <tr><td colspan="9" class="text-center text-muted" style="padding: 48px;">No clients found.</td></tr>
+        <% } %>
+        <% orgs.forEach(org => { %>
+          <tr>
+            <td>
+              <a href="/client/<%= org.xero_tenant_id %>" class="font-medium"><%= org.name %></a>
+              <% if (org.client_ref) { %><div class="text-muted" style="font-size: 0.75rem;"><%= org.client_ref %></div><% } %>
+              <% if (org.connection_status === 'disconnected') { %>
+                <div class="text-error" style="font-size: 0.75rem;">Disconnected</div>
+              <% } %>
+              <% if (org.isStale) { %>
+                <div class="text-warning" style="font-size: 0.75rem;">Verified sync stale<%= org.last_successful_sync_at ? ' · ' + org.last_successful_sync_at.slice(0,10) : '' %></div>
+              <% } %>
+            </td>
+            <td class="text-center">
+              <% if (org.score != null) { %>
+                <div style="display: flex; flex-direction: column; align-items: center; gap: 4px;">
+                  <span class="font-semibold <%= org.score >= 80 ? 'text-success' : org.score >= 60 ? 'text-warning' : 'text-error' %>"><%= org.score %>%</span>
+                  <div class="score-bar">
+                    <div class="score-bar-fill" style="width: <%= org.score %>%; background: <%= org.score >= 80 ? 'var(--success)' : org.score >= 60 ? 'var(--warning)' : 'var(--error)' %>;"></div>
+                  </div>
+                </div>
+              <% } else { %><span class="text-muted" style="font-size: 0.75rem;">—</span><% } %>
+            </td>
+            <td class="text-center font-medium">
+              <% if (org.total_issues > 0) { %>
+                <details>
+                  <summary style="cursor:pointer;color:var(--primary)"><%= org.total_issues %></summary>
+                  <div style="position:absolute;background:white;border:1px solid var(--divider);padding:8px 12px;z-index:5;text-align:left;box-shadow:var(--shadow-md);min-width:220px">
+                    <% org.issueBreakdown.forEach(issue => { %>
+                      <a style="display:flex;justify-content:space-between;gap:12px;padding:4px 0" href="/client/<%= org.xero_tenant_id %>/check/<%= issue.checkType %>">
+                        <span><%= issue.checkType.replaceAll('_',' ') %></span><strong><%= issue.count %></strong>
+                      </a>
+                    <% }) %>
+                  </div>
+                </details>
+              <% } else { %><%= org.total_issues != null ? org.total_issues : '—' %><% } %>
+            </td>
+            <td class="text-right text-muted">
+              <%= org.total_potential_errors_gbp ? '£' + Number(org.total_potential_errors_gbp).toLocaleString('en-GB', {minimumFractionDigits:2,maximumFractionDigits:2}) : '—' %>
+            </td>
+            <td class="text-center text-muted" style="font-size: 0.75rem;"><%= org.most_recent_transaction || '—' %></td>
+            <td class="text-center text-muted" style="font-size: 0.75rem;"><%= org.last_bank_reconciled || '—' %></td>
+            <td class="text-center <%= (org.unreconciled_bank_items || 0) > 0 ? 'text-error font-medium' : 'text-muted' %>">
+              <%= org.unreconciled_bank_items != null ? org.unreconciled_bank_items : '—' %>
+            </td>
+            <td class="text-center text-muted" style="font-size: 0.75rem;"><%= org.lock_date || '—' %></td>
+            <td class="text-right">
+              <a href="/client/<%= org.xero_tenant_id %>" class="btn btn-ghost-primary btn-sm">Open</a>
+              <button onclick="syncClient('<%= org.xero_tenant_id %>', this)" class="btn btn-ghost-primary btn-sm">Sync</button>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<%- include('partials/footer') %>

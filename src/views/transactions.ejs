@@ -1,0 +1,189 @@
+<%- include('partials/header', { currentPage: 'transactions' }) %>
+
+<div class="page-header page-header-flex">
+  <div>
+    <h4>Transaction Counts</h4>
+    <p><%= (query.period || 'since_lock_date').replaceAll('_',' ') %> — data from the latest matching sync</p>
+  </div>
+  <button onclick="exportCSV()" class="btn btn-outlined">
+    <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+    </svg>
+    Export CSV
+  </button>
+</div>
+
+<form method="GET" action="/transactions" class="form-row mb-24">
+  <input type="text" name="search" value="<%= query.search || '' %>" placeholder="Search clients..." class="form-input" style="width: 250px;" oninput="this.form.submit()">
+
+  <select name="period" class="form-select" onchange="handlePeriodChange(this)">
+    <option value="since_lock_date" <%= query.period==='since_lock_date'?'selected':'' %>>Since Lock Date</option>
+    <option value="rolling_12_months" <%= (query.period||'rolling_12_months')==='rolling_12_months'?'selected':'' %>>Rolling 12 Months</option>
+    <option value="current_month" <%= query.period==='current_month'?'selected':'' %>>Current Month</option>
+    <option value="previous_month" <%= query.period==='previous_month'?'selected':'' %>>Previous Month</option>
+    <option value="current_fy" <%= query.period==='current_fy'?'selected':'' %>>Current Financial Year</option>
+    <option value="previous_fy" <%= query.period==='previous_fy'?'selected':'' %>>Previous Financial Year</option>
+    <option value="custom" <%= query.period==='custom'?'selected':'' %>>Custom Date Range</option>
+  </select>
+
+  <div id="customDates" class="form-row" style="<%= query.period==='custom' ? 'display: flex;' : 'display: none;' %>">
+    <input type="date" name="from" value="<%= query.from||'' %>" class="form-input">
+    <span class="text-muted">to</span>
+    <input type="date" name="to" value="<%= query.to||'' %>" class="form-input">
+  </div>
+
+  <select name="sort" class="form-select" onchange="this.form.submit()">
+    <option value="name" <%= (query.sort||'name')==='name'?'selected':'' %>>Business Name A–Z</option>
+    <option value="turnover" <%= query.sort==='turnover'?'selected':'' %>>Turnover High–Low</option>
+    <option value="transactions" <%= query.sort==='transactions'?'selected':'' %>>Total Transactions High–Low</option>
+  </select>
+  <button type="submit" class="btn btn-primary">Apply</button>
+</form>
+
+<div class="card">
+  <div class="table-wrap">
+    <table class="data-table" id="txTable">
+      <thead>
+        <tr>
+          <th>Business Name</th>
+          <th class="text-right">Turnover</th>
+          <th class="text-right">Total Txns</th>
+          <th class="text-right">Customer Invoices</th>
+          <th class="text-right">Supplier Bills</th>
+          <th class="text-right"><span style="cursor: pointer;" onclick="toggleCreditSplit()">Credit Notes ▾</span></th>
+          <th class="credit-split text-right" style="display: none; background: var(--primary-light);">└ Sales</th>
+          <th class="credit-split text-right" style="display: none; background: var(--primary-light);">└ Purchase</th>
+          <th class="text-right">Bank Processed</th>
+          <th class="text-right">Journals</th>
+        </tr>
+      </thead>
+      <tbody id="txBody">
+        <% rows.forEach(row => {
+          const mth = row.months_covered || 12;
+          const fmtGbp = v => v != null ? '£' + Math.round(v).toLocaleString('en-GB') : '—';
+          const fmtN = v => v != null ? Number(v).toLocaleString('en-GB') : '—';
+          const perMth = (v, m) => v != null ? '(' + Math.round(v/m).toLocaleString('en-GB') + '/mth)' : '';
+          const perMthGbp = (v, m) => v != null ? '(£' + Math.round(v/m).toLocaleString('en-GB') + '/mth)' : '';
+        %>
+        <tr data-name="<%= row.name.toLowerCase() %>">
+          <td>
+            <a href="/client/<%= row.xero_tenant_id %>" class="font-medium"><%= row.name %></a>
+            <% if (row.client_ref) { %><div class="text-muted" style="font-size: 0.75rem;"><%= row.client_ref %></div><% } %>
+            <% if (row.connection_status === 'disconnected') { %><div class="text-error" style="font-size: 0.75rem;">Disconnected</div><% } %>
+          </td>
+          <td class="text-right">
+            <% if (row.turnover != null) { %>
+              <div class="font-medium"><%= fmtGbp(row.turnover) %></div>
+              <div class="text-muted" style="font-size: 0.75rem;"><%= perMthGbp(row.turnover, mth) %></div>
+            <% } else { %><span class="text-muted">Not synced</span><% } %>
+          </td>
+          <td class="text-right">
+            <% if (row.total_transactions != null) { %>
+              <div class="font-medium"><%= fmtN(row.total_transactions) %></div>
+              <div class="text-muted" style="font-size: 0.75rem;"><%= perMth(row.total_transactions, mth) %></div>
+            <% } else { %>—<% } %>
+          </td>
+          <td class="text-right">
+            <% if (row.customer_invoices != null) { %>
+              <div><%= fmtN(row.customer_invoices) %></div>
+              <div class="text-muted" style="font-size: 0.75rem;"><%= perMth(row.customer_invoices, mth) %></div>
+            <% } else { %>—<% } %>
+          </td>
+          <td class="text-right">
+            <% if (row.supplier_bills != null) { %>
+              <div><%= fmtN(row.supplier_bills) %></div>
+              <div class="text-muted" style="font-size: 0.75rem;"><%= perMth(row.supplier_bills, mth) %></div>
+            <% } else { %>—<% } %>
+          </td>
+          <td class="text-right">
+            <% const totalCN = (row.credit_notes_sales||0) + (row.credit_notes_purchase||0); %>
+            <% if (row.credit_notes_sales != null) { %>
+              <div><%= fmtN(totalCN) %></div>
+              <div class="text-muted" style="font-size: 0.75rem;"><%= perMth(totalCN, mth) %></div>
+            <% } else { %>—<% } %>
+          </td>
+          <td class="credit-split text-right" style="display: none; background: var(--primary-light); font-size: 0.75rem;">
+            <div><%= fmtN(row.credit_notes_sales) %></div>
+            <div class="text-muted"><%= perMth(row.credit_notes_sales, mth) %></div>
+          </td>
+          <td class="credit-split text-right" style="display: none; background: var(--primary-light); font-size: 0.75rem;">
+            <div><%= fmtN(row.credit_notes_purchase) %></div>
+            <div class="text-muted"><%= perMth(row.credit_notes_purchase, mth) %></div>
+          </td>
+          <td class="text-right">
+            <% if (row.bank_processed != null) { %>
+              <div><%= fmtN(row.bank_processed) %></div>
+              <div class="text-muted" style="font-size: 0.75rem;"><%= perMth(row.bank_processed, mth) %></div>
+            <% } else { %>—<% } %>
+          </td>
+          <td class="text-right">
+            <% if (row.journals != null) { %>
+              <div><%= fmtN(row.journals) %></div>
+              <div class="text-muted" style="font-size: 0.75rem;"><%= perMth(row.journals, mth) %></div>
+            <% } else { %>—<% } %>
+          </td>
+        </tr>
+        <% }) %>
+        <% if (rows.length === 0) { %>
+        <tr><td colspan="10" class="text-center text-muted" style="padding: 48px;">No data — connect and sync clients first.</td></tr>
+        <% } %>
+      </tbody>
+      <% if (rows.length > 0) { %>
+      <tfoot style="background: var(--grey-100); border-top: 2px solid var(--divider); font-weight: 600;">
+        <tr>
+          <td>Totals (<%= rows.length %> clients)</td>
+          <td class="text-right">£<%= Math.round(totals.turnover).toLocaleString('en-GB') %></td>
+          <td class="text-right"><%= totals.total_transactions.toLocaleString('en-GB') %></td>
+          <td class="text-right"><%= totals.customer_invoices.toLocaleString('en-GB') %></td>
+          <td class="text-right"><%= totals.supplier_bills.toLocaleString('en-GB') %></td>
+          <td class="text-right"><%= (totals.credit_notes_sales + totals.credit_notes_purchase).toLocaleString('en-GB') %></td>
+          <td class="credit-split text-right" style="display: none; background: var(--primary-light);"><%= totals.credit_notes_sales.toLocaleString('en-GB') %></td>
+          <td class="credit-split text-right" style="display: none; background: var(--primary-light);"><%= totals.credit_notes_purchase.toLocaleString('en-GB') %></td>
+          <td class="text-right"><%= totals.bank_processed.toLocaleString('en-GB') %></td>
+          <td class="text-right"><%= totals.journals.toLocaleString('en-GB') %></td>
+        </tr>
+      </tfoot>
+      <% } %>
+    </table>
+  </div>
+</div>
+
+<script>
+function handlePeriodChange(sel) {
+  document.getElementById('customDates').style.display = sel.value === 'custom' ? 'flex' : 'none';
+}
+
+let creditSplitVisible = false;
+function toggleCreditSplit() {
+  creditSplitVisible = !creditSplitVisible;
+  document.querySelectorAll('.credit-split').forEach(el => {
+    el.style.display = creditSplitVisible ? 'table-cell' : 'none';
+  });
+}
+
+function exportCSV() {
+  const rows = [['Business Name','Ref','Turnover','Total Transactions','Customer Invoices','Supplier Bills','Credit Notes (Sales)','Credit Notes (Purchase)','Bank Processed','Journals']];
+  <% rows.forEach(row => { %>
+  rows.push([
+    '<%= (row.name||'').replace(/'/g,"\'") %>',
+    '<%= row.client_ref||'' %>',
+    '<%= row.turnover||0 %>',
+    '<%= row.total_transactions||0 %>',
+    '<%= row.customer_invoices||0 %>',
+    '<%= row.supplier_bills||0 %>',
+    '<%= row.credit_notes_sales||0 %>',
+    '<%= row.credit_notes_purchase||0 %>',
+    '<%= row.bank_processed||0 %>',
+    '<%= row.journals||0 %>'
+  ]);
+  <% }) %>
+  const csv = rows.map(r => r.map(v => '"' + String(v).replace(/"/g,'""') + '"').join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'transaction-counts.csv';
+  a.click();
+}
+</script>
+
+<%- include('partials/footer') %>

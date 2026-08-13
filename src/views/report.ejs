@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title><%= org.name %> — Bookkeeping Health Report</title>
+  <style>
+    *{box-sizing:border-box} body{font-family:Arial,sans-serif;color:#2A3547;font-size:10px;line-height:1.45;margin:0}
+    h1,h2,h3{color:#01406A;margin:0 0 8px} h1{font-size:24px} h2{font-size:16px;border-bottom:2px solid #01406A;padding-bottom:5px;margin-top:22px}
+    h3{font-size:12px;margin-top:14px}.header{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:4px solid #01406A;padding-bottom:14px}
+    .brand{display:flex;gap:12px;align-items:center}.logo{max-height:52px;max-width:150px}.muted{color:#7C8FAC}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:14px 0}
+    .card{border:1px solid #DFE5EF;border-radius:7px;padding:10px}.value{font-size:18px;font-weight:700;color:#01406A}
+    table{width:100%;border-collapse:collapse;page-break-inside:auto}th{background:#F2F6FA;color:#01406A;text-align:left}th,td{border:1px solid #DFE5EF;padding:6px;vertical-align:top}
+    tr{page-break-inside:avoid}.badge{display:inline-block;border-radius:10px;color:#fff;padding:2px 7px;font-size:8px;text-transform:uppercase}
+    .critical{background:#dc2626}.high{background:#f97316}.medium{background:#FFAE1F}.low{background:#6b7280}.ok{color:#047857}.issue{color:#b45309}
+    .section{page-break-before:auto}.finding{margin-top:10px;page-break-inside:avoid}.finding table{font-size:8px}
+    .note{margin-top:18px;padding:9px;background:#FFF4E5;border-left:3px solid #FFAE1F}.footer{margin-top:20px;color:#7C8FAC;text-align:center}
+  </style>
+</head>
+<body>
+  <header class="header">
+    <div class="brand">
+      <% if (practiceLogo) { %><img class="logo" src="<%= practiceLogo %>" alt=""><% } %>
+      <div><strong><%= practiceName %></strong><div class="muted">Bookkeeping health report</div></div>
+    </div>
+    <div style="text-align:right"><strong>Generated</strong><br><%= generatedAt.slice(0,10) %><br><span class="muted">Evidence synced <%= org.last_synced_at || 'Not synced' %></span></div>
+  </header>
+
+  <h1 style="margin-top:18px"><%= org.name %></h1>
+  <div class="muted"><%= org.client_ref ? `Client reference ${org.client_ref} · ` : '' %><%= selectedPeriod.label %></div>
+  <% if (org.period_key && org.period_key !== selectedPeriod.key) { %>
+    <div class="note">The selected period has not been synced. The score and findings below are from <%= org.period_label || org.period_key %>.</div>
+  <% } %>
+
+  <div class="grid">
+    <div class="card"><div class="muted">Health score</div><div class="value"><%= org.score == null ? 'N/A' : `${org.score}%` %></div></div>
+    <div class="card"><div class="muted">Active scored issues</div><div class="value"><%= Number(org.total_issues || 0).toLocaleString('en-GB') %></div></div>
+    <div class="card"><div class="muted">Potential exposure</div><div class="value">£<%= Number(org.total_potential_errors_gbp || 0).toLocaleString('en-GB',{maximumFractionDigits:0}) %></div></div>
+    <div class="card"><div class="muted">Score profile</div><div class="value" style="font-size:12px"><%= scoreBreakdown?.profileStatus || 'Unavailable' %></div><div class="muted"><%= scoreBreakdown?.profileVersion || '' %></div></div>
+  </div>
+
+  <h2>Basis and evidence</h2>
+  <table>
+    <tr><th>Selected period</th><td><%= selectedPeriod.start %> to <%= selectedPeriod.end %></td><th>Period key</th><td><%= selectedPeriod.key %></td></tr>
+    <tr><th>Last sync</th><td><%= org.last_synced_at || 'Not synced' %></td><th>Score calculated</th><td><%= org.calculated_at || 'Not calculated' %></td></tr>
+    <tr><th>Most recent transaction</th><td><%= org.most_recent_transaction || 'Unavailable' %></td><th>Lock date</th><td><%= org.lock_date || 'Not set' %></td></tr>
+    <tr><th>Statement evidence</th><td colspan="3"><%= statementImports.length ? statementImports.map(item => `${item.bank_account_name}: ${item.statement_end_date}`).join(' · ') : 'No imported statement evidence' %></td></tr>
+  </table>
+
+  <h2>All checks</h2>
+  <table>
+    <thead><tr><th>Check</th><th>Importance</th><th>Status</th><th>Active count</th><th>Potential value</th></tr></thead>
+    <tbody>
+      <% checkDefs.forEach(check => { const unavailable = check.count == null; %>
+      <tr>
+        <td><%= check.label %></td>
+        <td><span class="badge <%= check.importance %>"><%= check.importance %></span></td>
+        <td class="<%= unavailable ? 'muted' : check.count > 0 ? 'issue' : 'ok' %>"><%= unavailable ? 'Not synced/configured' : check.count > 0 ? 'Review' : 'OK' %></td>
+        <td><%= unavailable ? '—' : Number(check.count).toLocaleString('en-GB') %></td>
+        <td><%= check.potential_value_gbp ? `£${Number(check.potential_value_gbp).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2})}` : '—' %></td>
+      </tr>
+      <% }) %>
+    </tbody>
+  </table>
+
+  <h2>Issue details</h2>
+  <% const issueChecks = checkDefs.filter(check => check.count > 0); %>
+  <% if (!issueChecks.length) { %><p class="ok">No active issues were identified.</p><% } %>
+  <% issueChecks.forEach(check => { const rows = reportFindings[check.type] || []; %>
+    <section class="finding">
+      <h3><%= check.label %> — <%= check.count %> active</h3>
+      <% if (!rows.length) { %><p class="muted">Detailed rows are unavailable for this legacy result.</p><% } else { %>
+        <table>
+          <thead><tr><th>Review state</th><th>Finding detail</th></tr></thead>
+          <tbody>
+          <% rows.forEach(row => { %>
+            <tr>
+              <td><%= row.review_state %><%= row.displayOnly ? ' (display only)' : '' %></td>
+              <td><%= Object.entries(row).filter(([key]) => !['finding_key','review_state','displayOnly'].includes(key)).map(([key,value]) => `${key}: ${Array.isArray(value) ? value.join(', ') : value ?? '—'}`).join(' · ') %></td>
+            </tr>
+          <% }) %>
+          </tbody>
+        </table>
+        <% if (check.count > rows.length) { %><p class="muted">Showing the first <%= rows.length %> of <%= check.count %> active findings. Use the dashboard drilldown for the paginated full list.</p><% } %>
+      <% } %>
+    </section>
+  <% }) %>
+
+  <div class="note">
+    Dismissed findings, currently ignored findings, findings marked OK for this exact period, and display-only observations are excluded from headline totals and scoring. Detail sections are bounded to 50 rows per check.
+  </div>
+  <div class="footer"><%= practiceName %> · <%= org.name %> · <%= selectedPeriod.key %></div>
+</body>
+</html>
