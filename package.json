@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Xero bookkeeping health dashboard for accounting practices",
   "main": "app.js",
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "start": "node app.js",
     "dev": "node --watch app.js",

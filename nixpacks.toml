@@ -1,9 +1,12 @@
-# Adds a system Chromium (via Nix) alongside the auto-detected Node build, so
-# Puppeteer's PDF export (src/routes/client.js) has a working browser binary on
-# Railway without relying on its own bundled-Chromium download (which frequently
-# fails or is missing shared libs on minimal container images).
+# Pins Node to the same major version used in local dev (22) — better-sqlite3@9.6.0's
+# native bindings fail to compile against Node 24's V8 API (Railway's unpinned default),
+# so leaving this to autodetection breaks the build.
+# Also adds a system Chromium (via Nix) alongside it, so Puppeteer's PDF export
+# (src/routes/client.js) has a working browser binary without relying on its own
+# bundled-Chromium download (which frequently fails or is missing shared libs on
+# minimal container images).
 [phases.setup]
-nixPkgs = ["chromium"]
+nixPkgs = ["nodejs_22", "chromium"]
 
 [start]
 cmd = "PUPPETEER_EXECUTABLE_PATH=\"$(which chromium)\" node app.js"
