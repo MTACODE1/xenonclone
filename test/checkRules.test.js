@@ -18,6 +18,8 @@ const {
   selectAuthorisedUnreconciled,
   selectOldCredits,
   sumAbsoluteExposure,
+  grossLineAmount,
+  netLineAmount,
   withDisplayOnlyBankFindings,
 } = require('../src/services/checkRules');
 
@@ -327,4 +329,46 @@ test('RESERVED_PERIOD_LABELS contains exactly the four semantic states, nothing 
   assert.deepEqual([...RESERVED_PERIOD_LABELS].sort(), [
     'needs_sync', 'not_configured', 'out_of_scope', 'unavailable',
   ]);
+});
+
+// grossLineAmount/netLineAmount — shared so every check reading line.lineAmount for a total or
+// threshold comparison can use a consistent VAT basis instead of trusting Xero's mixed
+// Inclusive/Exclusive convention directly. Fixed a real Multi-Account/Multi-Tax Suppliers value
+// bug on Fast Track Excavations (see xeroSync.js); locked here so it can't silently regress.
+
+test('grossLineAmount: Inclusive lines are already gross, Exclusive/NoTax lines need taxAmount added', () => {
+  assert.equal(grossLineAmount('Inclusive', { lineAmount: 100, taxAmount: 20 }), 100);
+  assert.equal(grossLineAmount('Exclusive', { lineAmount: 100, taxAmount: 20 }), 120);
+  assert.equal(grossLineAmount('NoTax', { lineAmount: 100, taxAmount: 0 }), 100);
+});
+
+test('netLineAmount: Exclusive lines are already net, Inclusive lines need taxAmount subtracted', () => {
+  assert.equal(netLineAmount('Exclusive', { lineAmount: 100, taxAmount: 20 }), 100);
+  assert.equal(netLineAmount('Inclusive', { lineAmount: 120, taxAmount: 20 }), 100);
+  assert.equal(netLineAmount('NoTax', { lineAmount: 100, taxAmount: 0 }), 100);
+});
+
+test('gross and net always differ by exactly taxAmount, regardless of lineAmountTypes', () => {
+  for (const lineAmountTypes of ['Inclusive', 'Exclusive', 'NoTax', undefined]) {
+    const line = { lineAmount: 87.5, taxAmount: 17.5 };
+    assert.equal(
+      grossLineAmount(lineAmountTypes, line) - netLineAmount(lineAmountTypes, line),
+      line.taxAmount
+    );
+  }
+});
+
+test('grossLineAmount/netLineAmount default missing lineAmount/taxAmount to zero rather than throwing', () => {
+  assert.equal(grossLineAmount('Exclusive', {}), 0);
+  assert.equal(netLineAmount('Inclusive', {}), 0);
+});
+
+test('a VAT-only Inclusive line nets to zero while remaining a real, non-zero gross amount', () => {
+  // Regression guard for the bug this shape caused: a line that is entirely VAT (e.g. an
+  // import-VAT adjustment) has net=0 but must not be mistaken for a genuinely empty £0.00 line —
+  // callers must gate "does this line have real value" on the raw lineAmount, not on
+  // netLineAmount's output, or a real transaction silently disappears from detection.
+  const vatOnlyLine = { lineAmount: 24, taxAmount: 24 };
+  assert.equal(netLineAmount('Inclusive', vatOnlyLine), 0);
+  assert.notEqual(vatOnlyLine.lineAmount, 0);
 });

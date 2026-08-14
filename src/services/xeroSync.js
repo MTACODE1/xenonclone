@@ -18,7 +18,8 @@ const {
   CHECK_DEFAULTS, CHECK_DEFINITIONS, NON_SCORED_CHECKS, calculateHealthScore, findDirectMatches,
   findDuplicateContacts, findDuplicates, findUnexpectedDefaultLines,
   isOldDocument, isPurchaseTaxExemptAccount, resolvePeriodChecked,
-  selectAuthorisedUnreconciled, selectOldCredits, sumAbsoluteExposure, toDateString,
+  selectAuthorisedUnreconciled, selectOldCredits, sumAbsoluteExposure,
+  grossLineAmount, netLineAmount, toDateString,
   withDisplayOnlyBankFindings
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
@@ -889,20 +890,12 @@ async function runSync(tenantId, progressCallback, options = {}) {
     item.type === 'SPEND' && item.status === 'AUTHORISED'
   ));
 
-  // Xero's line.lineAmount is net or gross depending on the parent transaction's own
-  // lineAmountTypes — bills here are overwhelmingly Exclusive (net) while bank spend is
-  // overwhelmingly Inclusive (gross). Every line carries its own taxAmount, so either basis can
-  // be reconstructed exactly per line rather than mixing the two conventions. Verified against
-  // Fast Track Excavations: summing raw (mixed) lineAmount understated Xenon's Multi-Account
-  // Suppliers value by 6.6%; summing gross consistently closes it to within 0.75%.
-  const grossLineAmount = (lineAmountTypes, line) => {
-    const amount = line.lineAmount || 0;
-    return lineAmountTypes === 'Inclusive' ? amount : amount + (line.taxAmount || 0);
-  };
-  const netLineAmount = (lineAmountTypes, line) => {
-    const amount = line.lineAmount || 0;
-    return lineAmountTypes === 'Inclusive' ? amount - (line.taxAmount || 0) : amount;
-  };
+  // grossLineAmount/netLineAmount (shared, from checkRules.js): bills here are overwhelmingly
+  // Exclusive (net) while bank spend is overwhelmingly Inclusive (gross); reconstructing a
+  // consistent basis per line via each transaction's own lineAmountTypes rather than trusting
+  // raw lineAmount avoids mixing the two conventions together. Verified against Fast Track
+  // Excavations: summing raw (mixed) lineAmount understated Xenon's Multi-Account Suppliers
+  // value by 6.6%; summing gross consistently closes it to within 0.75%.
 
   // --- MEDIUM: Multi-Account Suppliers ---
   // Detection uses the supplier-pattern window above. The £ value stays scoped to since-lock-date
@@ -972,16 +965,20 @@ async function runSync(tenantId, progressCallback, options = {}) {
       if (!allTimeTax[contactId]) allTimeTax[contactId] = { name: contactName, taxAmounts: {} };
       for (const line of lines) {
         const tax = line.taxType || 'NONE';
+        // A £0.00 line does not "use" a tax code — checked on the RAW line amount, before net
+        // conversion below. Xenon's View Issues confirms the check itself: suppliers whose only
+        // second code sits on a zero-value line (TPS Huddersfield, MANDMORELTD in 4X4) are NOT
+        // flagged, while suppliers with a £0.01+ rounding line (Volkswagen) ARE. It has to run on
+        // the raw amount specifically: a genuine VAT-only line (e.g. an Inclusive line with
+        // lineAmount=24, taxAmount=24) nets to exactly £0 below despite being a real £24
+        // transaction on a real tax code, and gating on the post-conversion net value would wrongly
+        // treat that as a phantom line and silently drop the tax code it uses.
+        if ((line.lineAmount || 0) === 0) continue;
         // Net (ex-VAT), not raw/mixed: a tax-code inconsistency is about the taxable base, and
         // reconstructing net per-line (via the transaction's own lineAmountTypes) rather than
         // trusting lineAmount's mixed inclusive/exclusive convention closed Fast Track Excavations
         // from +132% over Xenon's value to +2.6%.
         const amt = Math.abs(netLineAmount(lineAmountTypes, line));
-        // A £0.00 line does not "use" a tax code. Xenon's View Issues confirms this: suppliers
-        // whose only second code sits on a zero-value line (TPS Huddersfield, MANDMORELTD in 4X4)
-        // are NOT flagged, while suppliers with a £0.01+ rounding line (Volkswagen) ARE. Skipping
-        // exactly-zero lines removes phantom tax codes without touching monetary totals.
-        if (amt === 0) continue;
         allTimeTax[contactId].taxAmounts[tax] = (allTimeTax[contactId].taxAmounts[tax] || 0) + amt;
         if (isSinceLD) {
           if (!sinceLDTaxByContact[contactId]) sinceLDTaxByContact[contactId] = {};

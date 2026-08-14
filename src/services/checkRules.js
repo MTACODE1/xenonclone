@@ -115,6 +115,22 @@ function sumAbsoluteExposure(items, value = item => item.amount) {
   return items.reduce((sum, item) => sum + Math.abs(Number(value(item)) || 0), 0);
 }
 
+// Xero's line.lineAmount is net or gross depending on the parent transaction's own
+// lineAmountTypes ('Inclusive' vs 'Exclusive'/'NoTax') — bills and bank spend commonly disagree
+// on which convention they use, so any check summing/comparing line.lineAmount across mixed
+// sources without normalising first will silently mix net and gross. Every line carries its own
+// taxAmount, so either basis can be reconstructed exactly per line. Shared here (rather than
+// duplicated per check) so every check that reads line.lineAmount for a total or a threshold
+// comparison can opt into a consistent basis instead of re-deriving this independently.
+function grossLineAmount(lineAmountTypes, line) {
+  const amount = line.lineAmount || 0;
+  return lineAmountTypes === 'Inclusive' ? amount : amount + (line.taxAmount || 0);
+}
+
+function netLineAmount(lineAmountTypes, line) {
+  return grossLineAmount(lineAmountTypes, line) - (line.taxAmount || 0);
+}
+
 // Xero reports isReconciled=false on every payment posted to a non-bank ledger account
 // (Suspense, Sales Control, Directors' Loan and the like) because there is no bank feed to
 // reconcile it against. Those are not bank reconciliation items, and counting them buries the
@@ -444,6 +460,8 @@ module.exports = {
   selectOldCredits,
   selectAuthorisedUnreconciled,
   sumAbsoluteExposure,
+  grossLineAmount,
+  netLineAmount,
   toDateString,
   withDisplayOnlyBankFindings,
 };
