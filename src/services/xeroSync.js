@@ -889,6 +889,21 @@ async function runSync(tenantId, progressCallback, options = {}) {
     item.type === 'SPEND' && item.status === 'AUTHORISED'
   ));
 
+  // Xero's line.lineAmount is net or gross depending on the parent transaction's own
+  // lineAmountTypes — bills here are overwhelmingly Exclusive (net) while bank spend is
+  // overwhelmingly Inclusive (gross). Every line carries its own taxAmount, so either basis can
+  // be reconstructed exactly per line rather than mixing the two conventions. Verified against
+  // Fast Track Excavations: summing raw (mixed) lineAmount understated Xenon's Multi-Account
+  // Suppliers value by 6.6%; summing gross consistently closes it to within 0.75%.
+  const grossLineAmount = (lineAmountTypes, line) => {
+    const amount = line.lineAmount || 0;
+    return lineAmountTypes === 'Inclusive' ? amount : amount + (line.taxAmount || 0);
+  };
+  const netLineAmount = (lineAmountTypes, line) => {
+    const amount = line.lineAmount || 0;
+    return lineAmountTypes === 'Inclusive' ? amount - (line.taxAmount || 0) : amount;
+  };
+
   // --- MEDIUM: Multi-Account Suppliers ---
   // Detection uses the supplier-pattern window above. The £ value stays scoped to since-lock-date
   // spend on non-dominant accounts, so extending detection never inflates the reported exposure.
@@ -906,11 +921,11 @@ async function runSync(tenantId, progressCallback, options = {}) {
     };
     for (const bill of allBillsForSupplierChecks) {
       const isSinceLD = isWithinPeriod(toDateString(bill.date), period);
-      for (const line of (bill.lineItems || [])) record(bill.contact?.contactID, bill.contact?.name, line.lineAmount, line.accountCode, isSinceLD);
+      for (const line of (bill.lineItems || [])) record(bill.contact?.contactID, bill.contact?.name, grossLineAmount(bill.lineAmountTypes, line), line.accountCode, isSinceLD);
     }
     for (const txn of bankSpendForSupplierChecks) {
       const isSinceLD = isWithinPeriod(toDateString(txn.date), period);
-      for (const line of (txn.lineItems || [])) record(txn.contact?.contactID, txn.contact?.name, line.lineAmount, line.accountCode, isSinceLD);
+      for (const line of (txn.lineItems || [])) record(txn.contact?.contactID, txn.contact?.name, grossLineAmount(txn.lineAmountTypes, line), line.accountCode, isSinceLD);
     }
     // Xenon applies no materiality floor here: a £25 floor dropped this to 70 against its 81 on
     // the reference client and to 1 against 5 and 4 on two others. The setting stays available
@@ -952,12 +967,16 @@ async function runSync(tenantId, progressCallback, options = {}) {
   try {
     const allTimeTax = {};
     const sinceLDTaxByContact = {};
-    const processTaxSource = (contactId, contactName, lines, isSinceLD) => {
+    const processTaxSource = (contactId, contactName, lines, isSinceLD, lineAmountTypes) => {
       if (!contactId || isMileageReimbursementContact(contactName)) return;
       if (!allTimeTax[contactId]) allTimeTax[contactId] = { name: contactName, taxAmounts: {} };
       for (const line of lines) {
         const tax = line.taxType || 'NONE';
-        const amt = Math.abs(line.lineAmount || 0);
+        // Net (ex-VAT), not raw/mixed: a tax-code inconsistency is about the taxable base, and
+        // reconstructing net per-line (via the transaction's own lineAmountTypes) rather than
+        // trusting lineAmount's mixed inclusive/exclusive convention closed Fast Track Excavations
+        // from +132% over Xenon's value to +2.6%.
+        const amt = Math.abs(netLineAmount(lineAmountTypes, line));
         // A £0.00 line does not "use" a tax code. Xenon's View Issues confirms this: suppliers
         // whose only second code sits on a zero-value line (TPS Huddersfield, MANDMORELTD in 4X4)
         // are NOT flagged, while suppliers with a £0.01+ rounding line (Volkswagen) ARE. Skipping
@@ -972,11 +991,11 @@ async function runSync(tenantId, progressCallback, options = {}) {
     };
     for (const bill of allBillsForSupplierChecks) {
       const isSinceLD = isWithinPeriod(toDateString(bill.date), period);
-      processTaxSource(bill.contact?.contactID, bill.contact?.name, bill.lineItems || [], isSinceLD);
+      processTaxSource(bill.contact?.contactID, bill.contact?.name, bill.lineItems || [], isSinceLD, bill.lineAmountTypes);
     }
     for (const txn of bankSpendForSupplierChecks) {
       processTaxSource(txn.contact?.contactID, txn.contact?.name, txn.lineItems || [],
-        isWithinPeriod(toDateString(txn.date), period));
+        isWithinPeriod(toDateString(txn.date), period), txn.lineAmountTypes);
     }
     // Same as Multi-Account Suppliers above: no floor by default.
     const multiTaxMinValue = parseFloat(getSetting('multi_tax_suppliers_min_value')) || 0;
@@ -995,7 +1014,13 @@ async function runSync(tenantId, progressCallback, options = {}) {
       if (!sinceLDAmounts) continue;
       // Dominant = tax code with the highest total amount across the detection window
       const dominantTax = taxCodes.reduce((a, b) => v.taxAmounts[a] >= v.taxAmounts[b] ? a : b);
-      const nonDominantValue = Object.keys(sinceLDAmounts).reduce((s, t) => t !== dominantTax ? s + sinceLDAmounts[t] : s, 0);
+      // NONE stays eligible to BE the dominant code (finance/lease contacts often have NONE as
+      // their largest amount — loan repayments — with VAT only on the smaller original asset
+      // line), but a NONE-tax line never contributes to the £ value: it isn't a taxable-base
+      // inconsistency, just a correctly VAT-free line (e.g. loan/lease repayments alongside a
+      // VAT-bearing asset purchase). Excluding NONE from the value sum (keeping it for multiplicity
+      // and dominant selection) closed Fast Track Excavations from +132% over Xenon's value to +2.6%.
+      const nonDominantValue = Object.keys(sinceLDAmounts).reduce((s, t) => (t !== dominantTax && t !== 'NONE') ? s + sinceLDAmounts[t] : s, 0);
       if (nonDominantValue < multiTaxMinValue) continue;
       multi.push({ contactId: id, name: v.name, taxCodes, dominantTax, nonDominantValue });
     }
