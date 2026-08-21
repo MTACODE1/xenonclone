@@ -594,6 +594,12 @@ h6 { font-weight: 600; font-size: 1rem; line-height: 1.2rem; }
   color: var(--success);
 }
 
+.alert-warning {
+  background: #FFF4E5;
+  border: 1px solid #FFAE1F;
+  color: #92400E;
+}
+
 /* Validation and cancellation gate */
 .validation-stop {
   background: var(--error-light);
@@ -732,18 +738,13 @@ canvas { display: block; margin: 0 auto; }
 .mb-24 { margin-bottom: 24px; }
 
 /* Client page */
+/* Composes with .alert .alert-warning (padding/border/border-radius/background/color/font-size
+   already come from those) — this adds only the layout this banner needs beyond a plain alert. */
 .stale-period-banner {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 14px 18px;
-  margin-bottom: 20px;
-  border: 1px solid #FFAE1F;
   border-left: 5px solid #FFAE1F;
-  border-radius: var(--border-radius);
-  background: #FFF4E5;
-  color: #92400E;
-  font-size: 0.875rem;
 }
 .stale-period-icon {
   flex-shrink: 0;

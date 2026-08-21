@@ -333,7 +333,7 @@ function parseBalanceSheetNumber(raw) {
   return negative ? -Math.abs(value) : value;
 }
 
-function extractNetAssetsFromBalanceSheet(report) {
+function getBalanceSheetRows(report) {
   const rows = [];
   const visit = value => {
     if (!value) return;
@@ -343,19 +343,31 @@ function extractNetAssetsFromBalanceSheet(report) {
     visit(value.rows);
   };
   visit(report?.rows || []);
-  const row = rows.find(candidate =>
-    NET_ASSETS_ROW_LABEL.test(normaliseBalanceSheetLabel(candidate.cells?.[0]?.value)));
-  if (!row) return null;
-  // Asked for a date the organisation has no bookkeeping at, Xero answers with a balance sheet
-  // carrying a single zero "Net Assets" line and no sections at all. That zero means "nothing is
-  // recorded here", not "net assets are nil", so treating it as a figure invents an opening-balance
-  // difference equal to the entire filed net assets. A balance sheet holding real bookkeeping
-  // always carries a non-zero figure somewhere, even when net assets themselves net to zero.
-  const holdsBookkeeping = rows.some(candidate => (candidate.cells || []).slice(1).some(cell => {
+  return rows;
+}
+
+// Asked for a date the organisation has no bookkeeping at, Xero answers with a balance sheet
+// carrying a single zero "Net Assets" line and no sections at all. That zero means "nothing is
+// recorded here", not "net assets are nil", so treating it as a figure invents an opening-balance
+// difference equal to the entire filed net assets. A balance sheet holding real bookkeeping
+// always carries a non-zero figure somewhere, even when net assets themselves net to zero.
+// Exported separately (not just inlined in extractNetAssetsFromBalanceSheet below) so a caller can
+// tell "confirmed no bookkeeping here" apart from "couldn't find/parse a figure for some other
+// reason" — the two must not be treated the same way when deciding whether it's safe to overwrite
+// a previously-stored value.
+function balanceSheetHoldsBookkeeping(report) {
+  return getBalanceSheetRows(report).some(candidate => (candidate.cells || []).slice(1).some(cell => {
     const value = parseBalanceSheetNumber(cell.value);
     return value != null && value !== 0;
   }));
-  if (!holdsBookkeeping) return null;
+}
+
+function extractNetAssetsFromBalanceSheet(report) {
+  const rows = getBalanceSheetRows(report);
+  const row = rows.find(candidate =>
+    NET_ASSETS_ROW_LABEL.test(normaliseBalanceSheetLabel(candidate.cells?.[0]?.value)));
+  if (!row) return null;
+  if (!balanceSheetHoldsBookkeeping(report)) return null;
   const values = row.cells.slice(1)
     .map(cell => parseBalanceSheetNumber(cell.value))
     .filter(value => value != null);
@@ -473,6 +485,7 @@ function recomputeEvidenceIssues(orgId, periodKey = null, onlyCheck = null, opti
 module.exports = {
   allocateStatementMatches, balanceDiscrepancy, detectColumnMapping,
   extractNetAssetsFromBalanceSheet,
+  balanceSheetHoldsBookkeeping,
   filedAccountsComparison, matchStatementLine, matchStatementLines,
   normalizeStatementLines, parseCsv, recomputeEvidenceIssues, sha256,
 };

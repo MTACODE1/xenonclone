@@ -79,12 +79,13 @@ const checkDescriptions = {
   <span class="text-muted" style="font-size:.75rem"><%= selectedPeriod.start %> to <%= selectedPeriod.end %></span>
 </form>
 <% const periodStale = !!(org.period_key && org.period_key !== selectedPeriod.key); %>
+<% const stalePeriodLabel = org.period_label || org.period_key; %>
 <% if (periodStale) { %>
-  <div class="stale-period-banner">
+  <div class="alert alert-warning stale-period-banner">
     <span class="stale-period-icon">!</span>
     <div class="stale-period-text">
       <strong>The figures below are not for <%= selectedPeriod.label %>.</strong>
-      They were calculated for <%= org.period_label || org.period_key %> and are greyed out until you recalculate.
+      They were calculated for <%= stalePeriodLabel %> and are greyed out until you recalculate.
     </div>
     <button type="button" class="btn btn-primary btn-sm" onclick="syncThisClient()">Sync <%= selectedPeriod.label %></button>
   </div>
@@ -171,7 +172,7 @@ const checkDescriptions = {
     <div class="summary-grid">
       <div class="card summary-card" style="background: var(--grey-100);">
         <div class="summary-label">Period Checked</div>
-        <div class="summary-value" style="font-size: 0.875rem;"><%= periodStale ? (org.period_label || org.period_key) : selectedPeriod.label %></div>
+        <div class="summary-value" style="font-size: 0.875rem;"><%= periodStale ? stalePeriodLabel : selectedPeriod.label %></div>
         <% if (periodStale) { %>
           <div style="font-size: 0.7rem; color: #B45309; margin-top: 4px;"><%= selectedPeriod.label %> not yet calculated</div>
         <% } %>
@@ -662,7 +663,7 @@ const checkDescriptions = {
 <div id="panel-transactions" class="<%= periodStale ? 'period-stale' : '' %>" style="display: none;">
   <div class="card period-data">
     <div style="padding: 16px 20px; border-bottom: 1px solid #e5eaef; background: #F2F6FA;">
-      <h5 style="font-weight: 600; color: #2A3547;">Transaction Counts — <%= periodStale ? (org.period_label || org.period_key) : selectedPeriod.label %></h5>
+      <h5 style="font-weight: 600; color: #2A3547;">Transaction Counts — <%= periodStale ? stalePeriodLabel : selectedPeriod.label %></h5>
       <p style="font-size: 0.75rem; color: #7C8FAC; margin-top: 4px;">Data from last sync. <a href="/transactions" style="color: #5D87FF; text-decoration: none;">View all clients →</a></p>
     </div>
     <% if (txCounts) { %>

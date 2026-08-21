@@ -207,6 +207,19 @@ function refreshLatestHealthScore(orgId) {
   );
 }
 
+// Shared by both branches of refreshIssueAggregations' UPDATE below — a live (non-reviewed)
+// finding is one that isn't display-only and isn't dismissed/currently-ignored/marked-ok-for-this-
+// period. Kept as one string so a future change to what counts as "reviewed" can't be applied to
+// count but not potential_value_gbp (or vice versa) by editing one copy and missing the other.
+const LIVE_FINDING_FILTER_SQL = `
+  f.issue_id = issues.id AND f.display_only = 0
+  AND NOT COALESCE((
+    r.state = 'dismissed'
+    OR (r.state = 'ignored' AND datetime(r.ignored_until) > datetime('now'))
+    OR (r.state = 'ok' AND r.period_key = issues.period_checked)
+  ), 0)
+`;
+
 function refreshIssueAggregations(orgId, issueId = null) {
   const db = getDb();
   db.prepare(`
@@ -219,12 +232,7 @@ function refreshIssueAggregations(orgId, issueId = null) {
         SELECT COUNT(*) FROM issue_findings f
         LEFT JOIN finding_review_states r
           ON r.org_id = f.org_id AND r.check_type = f.check_type AND r.finding_key = f.finding_key
-        WHERE f.issue_id = issues.id AND f.display_only = 0
-          AND NOT COALESCE((
-            r.state = 'dismissed'
-            OR (r.state = 'ignored' AND datetime(r.ignored_until) > datetime('now'))
-            OR (r.state = 'ok' AND r.period_key = issues.period_checked)
-          ), 0)
+        WHERE ${LIVE_FINDING_FILTER_SQL}
       ) END,
       potential_value_gbp = CASE
         WHEN count IS NULL THEN potential_value_gbp
@@ -234,12 +242,7 @@ function refreshIssueAggregations(orgId, issueId = null) {
         SELECT COALESCE(SUM(f.potential_value_gbp), 0) FROM issue_findings f
         LEFT JOIN finding_review_states r
           ON r.org_id = f.org_id AND r.check_type = f.check_type AND r.finding_key = f.finding_key
-        WHERE f.issue_id = issues.id AND f.display_only = 0
-          AND NOT COALESCE((
-            r.state = 'dismissed'
-            OR (r.state = 'ignored' AND datetime(r.ignored_until) > datetime('now'))
-            OR (r.state = 'ok' AND r.period_key = issues.period_checked)
-          ), 0)
+        WHERE ${LIVE_FINDING_FILTER_SQL}
       ) END
     WHERE org_id = ? AND is_active = 1 AND (? IS NULL OR id = ?)
   `).run(orgId, issueId, issueId);

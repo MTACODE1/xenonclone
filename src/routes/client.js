@@ -409,21 +409,28 @@ router.post('/:tenantId/check/:checkType/reanalyse', async (req, res) => {
   if (!CHECK_DEFINITIONS.some(check => check.type === checkType)) {
     return res.status(404).json({ error: 'Unknown check type' });
   }
-  let period;
+  let period, resolvedPeriod;
   try {
     period = periodInput(req.query, org.period_type || getSetting('default_sync_period') || 'since_lock_date');
-    selectedPeriodFor(org, req.query);
+    resolvedPeriod = selectedPeriodFor(org, req.query);
   } catch (error) {
     return res.status(400).json({ error: error.message });
   }
+  // Only skip the live Xero fetch when reanalysing for a genuinely different period than the one
+  // currently active for this client — that's the "preview this one check under a different
+  // period using what's already cached" case the stale-period banner exists for. Reanalysing the
+  // SAME period this dashboard already shows is this button's original, more common use — e.g.
+  // after fixing a mis-coded transaction in Xero, or changing a threshold setting — and must still
+  // do a real fetch, or it silently keeps showing the pre-fix result with no way to force a retry.
+  const cacheOnly = Boolean(org.period_key) && resolvedPeriod.key === org.period_key;
   const started = startJob(
     `${tenantId}:${checkType}:${period.type}:${period.from || ''}:${period.to || ''}`,
     progress => syncOrganisation(tenantId, progress, {
-      period, checkType, cacheOnly: true, asOf: org.period_end || undefined,
+      period, checkType, cacheOnly, asOf: org.period_end || undefined,
     }),
     {
       tenantId, orgId: org.id, mode: `check:${checkType}`,
-      payload: { period, checkType, cacheOnly: true, asOf: org.period_end || undefined },
+      payload: { period, checkType, cacheOnly, asOf: org.period_end || undefined },
     }
   );
   return res.status(started.existing ? 200 : 202).json({

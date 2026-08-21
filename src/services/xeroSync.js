@@ -24,7 +24,8 @@ const {
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
 const {
-  allocateStatementMatches, extractNetAssetsFromBalanceSheet, recomputeEvidenceIssues
+  allocateStatementMatches, extractNetAssetsFromBalanceSheet, balanceSheetHoldsBookkeeping,
+  recomputeEvidenceIssues
 } = require('./statementEvidence');
 const { isWithinPeriod, resolvePeriod } = require('./periodResolver');
 
@@ -1057,7 +1058,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             taxMissingLines.push({
               invoiceId: bill.invoiceID, contact: bill.contact?.name,
               date: toDateString(bill.date), accountCode: line.accountCode,
-              description: line.description, amount: line.lineAmount, source: 'bill'
+              description: line.description, amount: netLineAmount(bill.lineAmountTypes, line), source: 'bill'
             });
           }
         }
@@ -1072,7 +1073,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             taxMissingLines.push({
               invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
               date: toDateString(txn.date), accountCode: line.accountCode,
-              description: line.description, amount: line.lineAmount, source: 'bank_spend'
+              description: line.description, amount: netLineAmount(txn.lineAmountTypes, line), source: 'bank_spend'
             });
           }
         }
@@ -1115,7 +1116,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             taxMissingLines.push({
               invoiceId: inv.invoiceID, number: inv.invoiceNumber, contact: inv.contact?.name,
               date: toDateString(inv.date), accountCode: line.accountCode,
-              description: line.description, amount: line.lineAmount, source: 'invoice'
+              description: line.description, amount: netLineAmount(inv.lineAmountTypes, line), source: 'invoice'
             });
           }
         }
@@ -1124,7 +1125,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       // the same check purchase_tax_missing already runs against bank spend transactions — without
       // this, a client whose income mostly arrives as direct deposits (not invoices) would show as
       // clean here while genuinely missing sales tax on the bulk of its revenue.
-      for (const txn of inPeriod(bankReceiveTxns || [])) {
+      for (const txn of bankReceiveTxns) {
         for (const line of (txn.lineItems || [])) {
           if (
             (!line.taxType || line.taxType === 'NONE') &&
@@ -1134,7 +1135,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             taxMissingLines.push({
               invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
               date: toDateString(txn.date), accountCode: line.accountCode,
-              description: line.description, amount: line.lineAmount, source: 'bank_receive'
+              description: line.description, amount: netLineAmount(txn.lineAmountTypes, line), source: 'bank_receive'
             });
           }
         }
@@ -1194,7 +1195,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       }
       // Rose Capital Item Review lists expense-coded RECEIVE lines too (e.g. ABI overpayment
       // refunded onto 473). Net basis and the same per-account threshold still apply.
-      for (const txn of inPeriod(bankReceiveTxns || [])) {
+      for (const txn of bankReceiveTxns) {
         for (const line of (txn.lineItems || [])) {
           const amount = Math.abs(netLineAmount(txn.lineAmountTypes, line));
           const threshold = accountConfigByCode.get(line.accountCode)?.capital_review_threshold || defaultCapitalReviewThreshold;
@@ -1392,7 +1393,10 @@ async function runSync(tenantId, progressCallback, options = {}) {
     const billsSinceLD = inPeriod(accpayAuthorised);
     for (const bill of billsSinceLD) {
       for (const line of (bill.lineItems || [])) {
-        const amount = line.lineAmount || 0;
+        // Net (ex-VAT), consistent with the other threshold-based checks (capital_item_review,
+        // low_cost_fixed_assets) — raw lineAmount mixes gross (bank spend, usually Inclusive) and
+        // net (bills, usually Exclusive), so a fixed £ threshold would compare like against unlike.
+        const amount = Math.abs(netLineAmount(bill.lineAmountTypes, line));
         const threshold = accountConfigByCode.get(line.accountCode)?.misallocated_threshold || defaultMisallocatedThreshold;
         if (amount >= threshold && line.accountCode && monitoredAccountCodes.has(line.accountCode)) {
           misallocated.push({
@@ -1405,7 +1409,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     }
     for (const txn of inPeriod(bankSpendTxns || [])) {
       for (const line of (txn.lineItems || [])) {
-        const amount = line.lineAmount || 0;
+        const amount = Math.abs(netLineAmount(txn.lineAmountTypes, line));
         const threshold = accountConfigByCode.get(line.accountCode)?.misallocated_threshold || defaultMisallocatedThreshold;
         if (amount >= threshold && line.accountCode && monitoredAccountCodes.has(line.accountCode)) {
           misallocated.push({
@@ -1475,7 +1479,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
         }
       }
     }
-    for (const txn of inPeriod(bankReceiveTxns || [])) {
+    for (const txn of bankReceiveTxns) {
       const contact = contactsById[txn.contact?.contactID];
       if (!contact?.salesDefaultAccountCode) continue;
       for (const line of (txn.lineItems || [])) {
@@ -1544,7 +1548,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
         }
       }
     }
-    for (const txn of inPeriod(bankReceiveTxns || [])) {
+    for (const txn of bankReceiveTxns) {
       const contact = contactsById[txn.contact?.contactID];
       if (!contact?.accountsReceivableTaxType) continue;
       for (const line of (txn.lineItems || [])) {
@@ -1762,10 +1766,16 @@ async function runSync(tenantId, progressCallback, options = {}) {
         const response = await xero.accountingApi.getReportBalanceSheet(tid, filed.filing_date);
         return response.body.reports?.[0];
       });
-      // Written even when null: recording that the balance sheet was read and held no bookkeeping
-      // is what separates "nothing to compare" from "not synced yet", and it clears any figure a
-      // previous sync stored before that distinction existed.
-      updateFiledAccountsXeroBalance(orgId, filed.filing_date, extractNetAssetsFromBalanceSheet(report));
+      const netAssets = extractNetAssetsFromBalanceSheet(report);
+      // Written even when null IF we're confident there's genuinely no bookkeeping at this date —
+      // that's what separates "nothing to compare" from "not synced yet". But null can also mean
+      // extraction just failed this one time (no Net Assets row found, an unparseable value, an
+      // occasional different report shape) — that case must NOT overwrite a previously-good
+      // figure, or a single transient miss permanently breaks a working comparison with no way to
+      // self-heal (the per-check Reanalyse button intentionally can't re-run this fetch).
+      if (netAssets != null || !balanceSheetHoldsBookkeeping(report)) {
+        updateFiledAccountsXeroBalance(orgId, filed.filing_date, netAssets);
+      }
     } catch (error) {
       console.error(`Filed-account Balance Sheet failed for ${filed.filing_date}:`, error.message);
     }
@@ -1793,17 +1803,29 @@ async function runSync(tenantId, progressCallback, options = {}) {
     .filter(i => !NON_SCORED_CHECKS.includes(i.check_type))
     .reduce((s, i) => s + (i.potential_value_gbp || 0), 0);
 
+  // A checkType-scoped run recomputes only ONE check; the health_scores row's period fields
+  // describe what period the dashboard AS A WHOLE currently reflects, and only a full sync
+  // actually brings every check current for a new period. Persisting the reanalysed check's own
+  // period here would mark the whole dashboard "current" for a period only one check actually
+  // reflects — the stale-period banner (org.period_key !== selectedPeriod.key) would then read
+  // false, and every other still-stale check would look up to date. Preserve the previously
+  // active period instead; only a full sync (no checkType) is allowed to move it forward. Falls
+  // back to this run's own period if there is no previous health score yet (first-ever sync).
+  const persistedPeriod = options.checkType && org.period_key
+    ? { key: org.period_key, type: org.period_type, start: org.period_start, end: org.period_end, label: org.period_label }
+    : { key: period.key, type: period.type, start: period.start, end: period.end, label: period.label };
+
   upsertHealthScore(orgId, {
     score, total_issues: totalIssues, total_potential_errors_gbp: totalPotentialErrors,
     last_bank_reconciled: lastBankReconciled,
     most_recent_transaction: mostRecentTransaction,
     unreconciled_bank_items: reviewedIssues.find(i => i.check_type === 'unreconciled_bank_items')?.count || 0,
     lock_date: actualLockDate,
-    period_key: period.key,
-    period_type: period.type,
-    period_start: period.start,
-    period_end: period.end,
-    period_label: period.label,
+    period_key: persistedPeriod.key,
+    period_type: persistedPeriod.type,
+    period_start: persistedPeriod.start,
+    period_end: persistedPeriod.end,
+    period_label: persistedPeriod.label,
     score_profile_version: scoreBreakdown.profileVersion,
     score_breakdown_json: JSON.stringify(scoreBreakdown),
     run_id: runId,

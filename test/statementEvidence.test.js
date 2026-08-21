@@ -207,7 +207,7 @@ test('allocation is deterministic across runs so re-syncs do not churn results',
 
 // --- Xero side of the opening-balance comparison ---
 
-const { extractNetAssetsFromBalanceSheet } = require('../src/services/statementEvidence');
+const { extractNetAssetsFromBalanceSheet, balanceSheetHoldsBookkeeping } = require('../src/services/statementEvidence');
 
 function balanceSheet(rows) {
   return { rows: [{ rowType: 'Section', rows: rows.map(([label, value]) => ({
@@ -257,6 +257,32 @@ test('an empty balance sheet is not a zero net-assets figure', () => {
   assert.equal(extractNetAssetsFromBalanceSheet(balanceSheet([
     ['Total Assets', '5000.00'], ['Total Liabilities', '5000.00'], ['Net Assets', '0.00'],
   ])), 0);
+});
+
+// balanceSheetHoldsBookkeeping — exported separately from extractNetAssetsFromBalanceSheet so a
+// caller (xeroSync.js) can tell "confirmed no bookkeeping here" apart from "couldn't find/parse a
+// figure for some other reason", and only treat the former as safe to persist as a real null —
+// a transient extraction miss must never overwrite a previously-good stored value.
+
+test('balanceSheetHoldsBookkeeping is false only for the bare no-bookkeeping stub', () => {
+  assert.equal(balanceSheetHoldsBookkeeping({ rows: [{ rowType: 'Section', rows: [
+    { rowType: 'Row', cells: [{ value: '' }, { value: '31 Oct 2020' }, { value: '31 Oct 2019' }] },
+    { rowType: 'Row', cells: [{ value: 'Net Assets' }, { value: '0.00' }, { value: '0.00' }] },
+  ] }] }), false);
+  assert.equal(balanceSheetHoldsBookkeeping({ rows: [] }), false);
+  assert.equal(balanceSheetHoldsBookkeeping(null), false);
+});
+
+test('balanceSheetHoldsBookkeeping is true whenever any real bookkeeping value exists', () => {
+  assert.equal(balanceSheetHoldsBookkeeping(balanceSheet([
+    ['Total Assets', '5000.00'], ['Total Liabilities', '5000.00'], ['Net Assets', '0.00'],
+  ])), true);
+  // Even a report where extractNetAssetsFromBalanceSheet can't find/parse a Net Assets row at all
+  // still "holds bookkeeping" if other rows carry real values — this is the case the write-guard
+  // in xeroSync.js relies on to avoid overwriting a good stored value on an unrelated parsing miss.
+  assert.equal(balanceSheetHoldsBookkeeping(balanceSheet([
+    ['Total Assets', '5000.00'], ['Total Liabilities', '5000.00'],
+  ])), true);
 });
 
 test('net assets is found however deeply the report nests its sections', () => {

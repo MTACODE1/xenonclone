@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const {
-  getAllOrganisations, getSetting, getAllTransactionCounts, getPanoramaOrganisations,
+  getAllOrganisations, getOrganisationByTenantId, getSetting, getAllTransactionCounts,
+  getPanoramaOrganisations,
 } = require('../db/queries');
 const { syncOrganisation } = require('../services/xeroSync');
 const { periodInput, PERIOD_TYPES, resolvePeriod } = require('../services/periodResolver');
@@ -11,12 +12,28 @@ function requestedPeriod(query) {
   return periodInput(query, getSetting('default_sync_period') || 'since_lock_date');
 }
 
+// No current caller passes checkType here (this route only ever does full syncs today), but this
+// mirrors src/routes/client.js's per-check reanalyse route exactly so that if per-check reanalysis
+// is ever wired up from the dashboard, it inherits the same fix rather than the bug that fix was
+// written for: cacheOnly must only skip the live Xero fetch when reanalysing a genuinely different
+// period than the one currently active, not unconditionally.
 function startOrganisationJob(tenantId, query = {}, checkType = null) {
   const period = requestedPeriod(query);
   const key = `${tenantId}:${checkType || 'all'}:${period.type}:${period.from || ''}:${period.to || ''}`;
+  let cacheOnly, asOf;
+  if (checkType) {
+    const org = getOrganisationByTenantId(tenantId);
+    const resolvedPeriod = resolvePeriod(period, {
+      lockDate: org?.lock_date,
+      financialYearEndDay: org?.financial_year_end_day,
+      financialYearEndMonth: org?.financial_year_end_month,
+    });
+    cacheOnly = Boolean(org?.period_key) && resolvedPeriod.key === org.period_key;
+    asOf = org?.period_end || undefined;
+  }
   return startJob(key, progress =>
-    syncOrganisation(tenantId, progress, { period, checkType }),
-    { tenantId, mode: checkType ? `check:${checkType}` : 'full', payload: { period, checkType } }
+    syncOrganisation(tenantId, progress, { period, checkType, cacheOnly, asOf }),
+    { tenantId, mode: checkType ? `check:${checkType}` : 'full', payload: { period, checkType, cacheOnly, asOf } }
   );
 }
 
