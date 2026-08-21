@@ -78,9 +78,15 @@ const checkDescriptions = {
   </span>
   <span class="text-muted" style="font-size:.75rem"><%= selectedPeriod.start %> to <%= selectedPeriod.end %></span>
 </form>
-<% if (org.period_key && org.period_key !== selectedPeriod.key) { %>
-  <div class="alert" style="background:#FFF4E5;color:#B45309;margin-bottom:16px;">
-    Results currently belong to <%= org.period_label || org.period_key %>. Sync or reanalyse a check to calculate the selected period.
+<% const periodStale = !!(org.period_key && org.period_key !== selectedPeriod.key); %>
+<% if (periodStale) { %>
+  <div class="stale-period-banner">
+    <span class="stale-period-icon">!</span>
+    <div class="stale-period-text">
+      <strong>The figures below are not for <%= selectedPeriod.label %>.</strong>
+      They were calculated for <%= org.period_label || org.period_key %> and are greyed out until you recalculate.
+    </div>
+    <button type="button" class="btn btn-primary btn-sm" onclick="syncThisClient()">Sync <%= selectedPeriod.label %></button>
   </div>
 <% } %>
 
@@ -104,12 +110,12 @@ const checkDescriptions = {
   <button onclick="showTab('transactions')" id="tab-transactions" class="tab-btn">Transactions</button>
 </div>
 
-<div id="panel-health" class="client-layout">
+<div id="panel-health" class="client-layout <%= periodStale ? 'period-stale' : '' %>">
 
   <div class="client-sidebar">
     <div style="display: flex; flex-direction: column; gap: 16px;">
       
-      <div class="card" style="padding: 16px; text-align: center;">
+      <div class="card period-data" style="padding: 16px; text-align: center;">
         <div style="position: relative; display: inline-block;">
           <canvas id="scoreChart" width="140" height="140"></canvas>
           <div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none;">
@@ -119,7 +125,7 @@ const checkDescriptions = {
         <div style="font-size: 0.75rem; color: #7C8FAC; margin-top: 8px; font-weight: 500;">Health Indicator</div>
       </div>
 
-      <div class="card" style="padding: 16px;">
+      <div class="card period-data" style="padding: 16px;">
         <div style="display: flex; justify-content: space-between; margin-bottom: 12px;">
           <span style="color: #7C8FAC; font-size: 0.875rem;">Issues Identified:</span>
           <span style="font-weight: 700;"><%= totalIssues.toLocaleString('en-GB') %></span>
@@ -130,7 +136,7 @@ const checkDescriptions = {
         </div>
       </div>
 
-      <div class="card" style="padding: 16px;">
+      <div class="card period-data" style="padding: 16px;">
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
           <span style="font-size: 11px; font-weight: 700; color: #7C8FAC; text-transform: uppercase; letter-spacing: 0.5px;">Improvement Checklist</span>
           <label style="display: flex; align-items: center; gap: 4px; font-size: 0.75rem; color: #7C8FAC; cursor: pointer;">
@@ -143,7 +149,7 @@ const checkDescriptions = {
             const hasIssues = check.count != null && check.count > 0;
             const isContact = ['duplicate_contacts','contact_defaults','inactive_contacts'].includes(check.type);
             const isNotConfigured = check.period_checked === 'not_configured' || check.period_checked === 'needs_sync';
-            const isUnavailable = check.period_checked === 'out_of_scope';
+            const isUnavailable = check.period_checked === 'out_of_scope' || check.period_checked === 'unavailable';
             const badge = isUnavailable ? '(N/A)' : isNotConfigured ? '(?)' : check.count == null ? '' : hasIssues ? (isContact ? '(!)' : '(' + check.count.toLocaleString('en-GB') + ')') : '(0)';
           %>
           <div class="sidebar-item <%= !hasIssues ? 'sidebar-ok' : '' %>"
@@ -165,13 +171,16 @@ const checkDescriptions = {
     <div class="summary-grid">
       <div class="card summary-card" style="background: var(--grey-100);">
         <div class="summary-label">Period Checked</div>
-        <div class="summary-value" style="font-size: 0.875rem;"><%= selectedPeriod.label %></div>
+        <div class="summary-value" style="font-size: 0.875rem;"><%= periodStale ? (org.period_label || org.period_key) : selectedPeriod.label %></div>
+        <% if (periodStale) { %>
+          <div style="font-size: 0.7rem; color: #B45309; margin-top: 4px;"><%= selectedPeriod.label %> not yet calculated</div>
+        <% } %>
       </div>
-      <div class="card summary-card" style="background: var(--primary-light);">
+      <div class="card summary-card period-data" style="background: var(--primary-light);">
         <div class="summary-label" style="color: var(--primary-dark);">Potential Issues</div>
         <div class="summary-value text-primary-color"><%= totalIssues.toLocaleString('en-GB') %></div>
       </div>
-      <div class="card summary-card" style="background: var(--primary-light);">
+      <div class="card summary-card period-data" style="background: var(--primary-light);">
         <div class="summary-label" style="color: var(--primary-dark);">Health Indicator</div>
         <div class="summary-value" style="color: <%= scoreColor %>;"><%= score %>%</div>
       </div>
@@ -223,7 +232,7 @@ const checkDescriptions = {
     </details>
     <% } %>
 
-    <div class="card">
+    <div class="card period-data">
       <div class="card-header" style="background: var(--grey-100); display: flex; align-items: center; justify-content: space-between;">
         <h5>Detailed Results</h5>
         <label style="display: flex; align-items: center; gap: 8px; font-size: 0.875rem; color: #7C8FAC; cursor: pointer;">
@@ -248,7 +257,10 @@ const checkDescriptions = {
           const hasIssues = check.count != null && check.count > 0;
           const isNotSynced = check.count == null;
           const isNotConfigured = check.period_checked === 'not_configured' || check.period_checked === 'needs_sync';
-          const isUnavailable = check.period_checked === 'out_of_scope';
+          const isUnavailable = check.period_checked === 'out_of_scope' || check.period_checked === 'unavailable';
+          const unavailableReason = check.period_checked === 'unavailable'
+            ? 'Xero holds no bookkeeping at the filed accounts date, so there is nothing to compare'
+            : 'Required data is outside the connected APIs';
           const desc = checkDescriptions[check.type] || {};
         %>
         <div class="check-card check-row <%= !hasIssues ? 'check-ok' : '' %>" id="check-<%= check.type %>">
@@ -263,7 +275,7 @@ const checkDescriptions = {
               <div style="text-align: right; margin-right: 20px; flex-shrink: 0; min-width: 120px;">
                 <% if (isUnavailable) { %>
                   <span style="color: #7C8FAC; font-size: 0.875rem;">Unavailable</span>
-                  <div style="font-size: 0.7rem; color: #7C8FAC;">Required data is outside the connected APIs</div>
+                  <div style="font-size: 0.7rem; color: #7C8FAC;"><%= unavailableReason %></div>
                 <% } else if (isNotConfigured) { %>
                   <span style="color: #7C8FAC; font-size: 0.875rem;"><%= check.period_checked === 'needs_sync' ? 'Needs sync' : 'Not configured' %></span>
                   <div style="font-size: 0.7rem;"><a href="<%= check.type === 'opening_balance_differences' ? '#filed-accounts' : check.type === 'unprocessed_bank' ? '#statement-evidence' : '#bank-reconciliation' %>" class="font-semibold">Configure evidence →</a></div>
@@ -566,6 +578,27 @@ const checkDescriptions = {
       <% } %>
     </div>
 
+    <div class="card" id="supplier-pattern-lookback" style="margin-top: 24px;">
+      <div class="card-header" style="background: var(--grey-100);">
+        <h5>Multi-Account / Multi-Tax Code Suppliers — Detection Window</h5>
+        <p style="font-size: 0.75rem; color: #7C8FAC; margin-top: 4px;">
+          Xenon looks back this many months before the checked period to spot a supplier's usual account/tax
+          code — 3 months by default in Xenon, adjustable per client there too. Leave blank to use this app's
+          own 12-month default, already matched against existing clients.
+        </p>
+      </div>
+      <form method="POST" action="/client/<%= org.xero_tenant_id %>/supplier-pattern-lookback" style="padding: 16px 20px; display: flex; align-items: center; gap: 12px;">
+        <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+        <label style="font-size: 0.875rem; display: flex; align-items: center; gap: 8px;">
+          Lookback months
+          <input type="number" min="1" step="1" name="supplier_pattern_lookback_months"
+            value="<%= org.supplier_pattern_lookback_months == null ? '' : org.supplier_pattern_lookback_months %>"
+            placeholder="12" class="form-input" style="width: 80px; padding: 4px 6px;">
+        </label>
+        <button type="submit" class="btn btn-primary btn-sm">Save</button>
+      </form>
+    </div>
+
     <div class="card" id="capital-review-accounts" style="margin-top: 24px;">
       <div class="card-header" style="background: var(--grey-100);">
         <h5>Per-account Check Settings</h5>
@@ -626,10 +659,10 @@ const checkDescriptions = {
   </div>
 </div>
 
-<div id="panel-transactions" style="display: none;">
-  <div class="card">
+<div id="panel-transactions" class="<%= periodStale ? 'period-stale' : '' %>" style="display: none;">
+  <div class="card period-data">
     <div style="padding: 16px 20px; border-bottom: 1px solid #e5eaef; background: #F2F6FA;">
-      <h5 style="font-weight: 600; color: #2A3547;">Transaction Counts — <%= selectedPeriod.label %></h5>
+      <h5 style="font-weight: 600; color: #2A3547;">Transaction Counts — <%= periodStale ? (org.period_label || org.period_key) : selectedPeriod.label %></h5>
       <p style="font-size: 0.75rem; color: #7C8FAC; margin-top: 4px;">Data from last sync. <a href="/transactions" style="color: #5D87FF; text-decoration: none;">View all clients →</a></p>
     </div>
     <% if (txCounts) { %>

@@ -285,11 +285,20 @@ function balanceDiscrepancy(statementBalance, xeroBalance) {
   return Math.abs(Number(statementBalance) - Number(xeroBalance));
 }
 
-function filedAccountsComparison(filedNetAssets, xeroNetAssets, tolerance = 0.01) {
+// Statutory accounts are filed to the nearest pound, so a filed figure carrying no pence cannot be
+// held to penny precision against Xero: 4X4 (£0.25), Handymanz (£0.12) and Rose (£0.99) were each
+// reported as an opening-balance difference that is purely the filing's own rounding, and Xenon
+// reports all three as clean. MBX's genuine £114,390 difference is unaffected by a £1 tolerance.
+function filedRoundingTolerance(filedNetAssets) {
+  return Number.isInteger(Number(filedNetAssets)) ? 1 : 0.01;
+}
+
+function filedAccountsComparison(filedNetAssets, xeroNetAssets, tolerance = null) {
   if (xeroNetAssets == null) return { configured: false, difference: null, hasIssue: null };
   if (!Number.isFinite(Number(xeroNetAssets))) return { configured: false, difference: null, hasIssue: null };
   const difference = Math.abs(Number(filedNetAssets) - Number(xeroNetAssets));
-  return { configured: true, difference, hasIssue: difference > tolerance };
+  const limit = tolerance == null ? filedRoundingTolerance(filedNetAssets) : tolerance;
+  return { configured: true, difference, hasIssue: difference > limit };
 }
 
 // The balance-sheet row label is normalised before matching so that the common
@@ -337,6 +346,16 @@ function extractNetAssetsFromBalanceSheet(report) {
   const row = rows.find(candidate =>
     NET_ASSETS_ROW_LABEL.test(normaliseBalanceSheetLabel(candidate.cells?.[0]?.value)));
   if (!row) return null;
+  // Asked for a date the organisation has no bookkeeping at, Xero answers with a balance sheet
+  // carrying a single zero "Net Assets" line and no sections at all. That zero means "nothing is
+  // recorded here", not "net assets are nil", so treating it as a figure invents an opening-balance
+  // difference equal to the entire filed net assets. A balance sheet holding real bookkeeping
+  // always carries a non-zero figure somewhere, even when net assets themselves net to zero.
+  const holdsBookkeeping = rows.some(candidate => (candidate.cells || []).slice(1).some(cell => {
+    const value = parseBalanceSheetNumber(cell.value);
+    return value != null && value !== 0;
+  }));
+  if (!holdsBookkeeping) return null;
   const values = row.cells.slice(1)
     .map(cell => parseBalanceSheetNumber(cell.value))
     .filter(value => value != null);
@@ -442,8 +461,11 @@ function recomputeEvidenceIssues(orgId, periodKey = null, onlyCheck = null, opti
     count: !filed || !comparison.configured ? null : filedDetails.length,
     potential_value_gbp: filedDetails.reduce((sum, item) => sum + item.difference, 0),
     detail_json: JSON.stringify(filedDetails),
+    // A sync that ran and found no bookkeeping at the filing date is a permanent answer, not a
+    // pending one: telling the practice to "sync" again would never change it.
     period_checked: !filed ? 'not_configured'
-      : !comparison.configured ? 'needs_sync' : `filed_accounts_${filed.filing_date}`,
+      : comparison.configured ? `filed_accounts_${filed.filing_date}`
+        : filed.xero_synced_at ? 'unavailable' : 'needs_sync',
   });
   if (!options.deferScoreRefresh) refreshLatestHealthScore(orgId);
 }

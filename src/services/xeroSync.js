@@ -17,7 +17,7 @@ const { getDb: getDatabase } = require('../db/schema');
 const {
   CHECK_DEFAULTS, CHECK_DEFINITIONS, NON_SCORED_CHECKS, calculateHealthScore, findDirectMatches,
   findDuplicateContacts, findDuplicates, findUnexpectedDefaultLines,
-  isOldDocument, isPurchaseTaxExemptAccount, resolvePeriodChecked,
+  isOldDocument, isPurchaseTaxExemptAccount, resolvePeriodChecked, resolveSupplierPatternLookbackMonths,
   selectAuthorisedUnreconciled, selectOldCredits, sumAbsoluteExposure,
   grossLineAmount, netLineAmount, toDateString,
   withDisplayOnlyBankFindings
@@ -870,15 +870,19 @@ async function runSync(tenantId, progressCallback, options = {}) {
   }
 
   // Shared by Multi-Account Suppliers and Multi-Tax Code Suppliers below. Xenon detects these
-  // patterns over the reporting period OR the trailing twelve months, whichever reaches further
-  // back — its own wording is "review the recent supplier bill and spend activity". Measured
-  // against five clients: the period alone undercounts every short-period client (Rose 24 v 37,
-  // 4X4 2 v 5, Handymanz 3 v 4) while all-time wildly overcounts them (Rose 79, 4X4 17); the
-  // twelve-month floor reproduces four of the five multi-account counts exactly. Long-period
-  // clients are unaffected because their period already exceeds a year.
-  const twelveMonthsBeforePeriodEnd = new Date(`${period.end}T00:00:00Z`);
-  twelveMonthsBeforePeriodEnd.setUTCFullYear(twelveMonthsBeforePeriodEnd.getUTCFullYear() - 1);
-  const supplierPatternStart = [period.start, twelveMonthsBeforePeriodEnd.toISOString().slice(0, 10)]
+  // patterns over the reporting period OR a trailing lookback, whichever reaches further back —
+  // Xenon's own published documentation for both checks states this lookback is "3 months prior to
+  // the period selected" by DEFAULT and is changeable PER CLIENT on Xenon's settings page, not a
+  // fixed value. 12 months is this app's own fallback, empirically tuned against five real clients
+  // before this setting existed (period alone undercounts every short-period client — Rose 24 v 37,
+  // 4X4 2 v 5, Handymanz 3 v 4 — while all-time wildly overcounts them — Rose 79, 4X4 17); it
+  // remains the default for any client without an explicit value so nothing already-validated
+  // changes, but `supplier_pattern_lookback_months` lets a new client be set to match its own real
+  // Xenon configuration instead of assuming this one guess fits everyone.
+  const supplierPatternLookbackMonths = resolveSupplierPatternLookbackMonths(org);
+  const lookbackFloorDate = new Date(`${period.end}T00:00:00Z`);
+  lookbackFloorDate.setUTCMonth(lookbackFloorDate.getUTCMonth() - supplierPatternLookbackMonths);
+  const supplierPatternStart = [period.start, lookbackFloorDate.toISOString().slice(0, 10)]
     .filter(Boolean).sort()[0];
   const withinPatternWindow = items => items.filter(item => {
     const date = toDateString(item.date);
@@ -1162,7 +1166,9 @@ async function runSync(tenantId, progressCallback, options = {}) {
       const billsSinceLD = inPeriod(accpayAuthorised);
       for (const bill of billsSinceLD) {
         for (const line of (bill.lineItems || [])) {
-          const amount = line.lineAmount || 0;
+          // Xenon Capital Item Review compares net (ex-VAT). Bank SPEND lines are usually
+          // Inclusive, so raw lineAmount would overstate and inflate the count.
+          const amount = Math.abs(netLineAmount(bill.lineAmountTypes, line));
           const threshold = accountConfigByCode.get(line.accountCode)?.capital_review_threshold || defaultCapitalReviewThreshold;
           if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)) {
             capitalItems.push({
@@ -1175,13 +1181,28 @@ async function runSync(tenantId, progressCallback, options = {}) {
       }
       for (const txn of inPeriod(bankSpendTxns || [])) {
         for (const line of (txn.lineItems || [])) {
-          const amount = line.lineAmount || 0;
+          const amount = Math.abs(netLineAmount(txn.lineAmountTypes, line));
           const threshold = accountConfigByCode.get(line.accountCode)?.capital_review_threshold || defaultCapitalReviewThreshold;
           if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)) {
             capitalItems.push({
               invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
               date: toDateString(txn.date), accountCode: line.accountCode,
               description: line.description, amount, source: 'bank_spend'
+            });
+          }
+        }
+      }
+      // Rose Capital Item Review lists expense-coded RECEIVE lines too (e.g. ABI overpayment
+      // refunded onto 473). Net basis and the same per-account threshold still apply.
+      for (const txn of inPeriod(bankReceiveTxns || [])) {
+        for (const line of (txn.lineItems || [])) {
+          const amount = Math.abs(netLineAmount(txn.lineAmountTypes, line));
+          const threshold = accountConfigByCode.get(line.accountCode)?.capital_review_threshold || defaultCapitalReviewThreshold;
+          if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)) {
+            capitalItems.push({
+              invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
+              date: toDateString(txn.date), accountCode: line.accountCode,
+              description: line.description, amount, source: 'bank_receive'
             });
           }
         }
@@ -1320,7 +1341,9 @@ async function runSync(tenantId, progressCallback, options = {}) {
     const billsSinceLD = inPeriod(accpayAuthorised);
     for (const bill of billsSinceLD) {
       for (const line of (bill.lineItems || [])) {
-        const amount = line.lineAmount || 0;
+        // Xenon describes and reports this threshold on net (ex-VAT) value. Xero's lineAmount is
+        // mixed: Inclusive documents carry gross here, while Exclusive documents carry net.
+        const amount = Math.abs(netLineAmount(bill.lineAmountTypes, line));
         if (amount > 0 && amount <= LOW_COST_THRESHOLD && line.accountCode && fixedAssetAccountCodes.has(line.accountCode)) {
           lowCostItems.push({
             invoiceId: bill.invoiceID, contact: bill.contact?.name,
@@ -1332,7 +1355,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     }
     for (const txn of inPeriod(bankSpendTxns || [])) {
       for (const line of (txn.lineItems || [])) {
-        const amount = line.lineAmount || 0;
+        const amount = Math.abs(netLineAmount(txn.lineAmountTypes, line));
         if (amount > 0 && amount <= LOW_COST_THRESHOLD && line.accountCode && fixedAssetAccountCodes.has(line.accountCode)) {
           lowCostItems.push({
             invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
@@ -1420,7 +1443,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
         contactId: bill.contact?.contactID, contact: bill.contact?.name,
         date: toDateString(bill.date), accountCode: line.accountCode,
         expectedAccountCode: expected,
-        description: line.description, amount: line.lineAmount, source: 'bill'
+        description: line.description, amount: Math.abs(netLineAmount(bill.lineAmountTypes, line)), source: 'bill'
       });
     }
     const invoicesSinceLD = sinceLD(accrecAuthorised);
@@ -1433,7 +1456,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             contactId: inv.contact?.contactID, contact: inv.contact?.name,
             date: toDateString(inv.date), accountCode: line.accountCode,
             expectedAccountCode: contact.salesDefaultAccountCode,
-            description: line.description, amount: line.lineAmount, source: 'invoice'
+            description: line.description, amount: Math.abs(netLineAmount(inv.lineAmountTypes, line)), source: 'invoice'
           });
         }
       }
@@ -1447,7 +1470,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             contactId: txn.contact?.contactID, contact: txn.contact?.name,
             date: toDateString(txn.date), accountCode: line.accountCode,
             expectedAccountCode: contact.purchasesDefaultAccountCode,
-            description: line.description, amount: line.lineAmount, source: 'bank_spend'
+            description: line.description, amount: Math.abs(netLineAmount(txn.lineAmountTypes, line)), source: 'bank_spend'
           });
         }
       }
@@ -1461,7 +1484,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             contactId: txn.contact?.contactID, contact: txn.contact?.name,
             date: toDateString(txn.date), accountCode: line.accountCode,
             expectedAccountCode: contact.salesDefaultAccountCode,
-            description: line.description, amount: line.lineAmount, source: 'bank_receive'
+            description: line.description, amount: Math.abs(netLineAmount(txn.lineAmountTypes, line)), source: 'bank_receive'
           });
         }
       }
@@ -1489,7 +1512,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
         contactId: bill.contact?.contactID, contact: bill.contact?.name,
         date: toDateString(bill.date), taxType: line.taxType,
         expectedTaxType: expected,
-        description: line.description, amount: line.lineAmount, source: 'bill'
+        description: line.description, amount: Math.abs(netLineAmount(bill.lineAmountTypes, line)), source: 'bill'
       });
     }
     const invoicesSinceLD = sinceLD(accrecAuthorised);
@@ -1502,7 +1525,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             contactId: inv.contact?.contactID, contact: inv.contact?.name,
             date: toDateString(inv.date), taxType: line.taxType,
             expectedTaxType: contact.accountsReceivableTaxType,
-            description: line.description, amount: line.lineAmount, source: 'invoice'
+            description: line.description, amount: Math.abs(netLineAmount(inv.lineAmountTypes, line)), source: 'invoice'
           });
         }
       }
@@ -1516,7 +1539,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             contactId: txn.contact?.contactID, contact: txn.contact?.name,
             date: toDateString(txn.date), taxType: line.taxType,
             expectedTaxType: contact.accountsPayableTaxType,
-            description: line.description, amount: line.lineAmount, source: 'bank_spend'
+            description: line.description, amount: Math.abs(netLineAmount(txn.lineAmountTypes, line)), source: 'bank_spend'
           });
         }
       }
@@ -1530,7 +1553,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             contactId: txn.contact?.contactID, contact: txn.contact?.name,
             date: toDateString(txn.date), taxType: line.taxType,
             expectedTaxType: contact.accountsReceivableTaxType,
-            description: line.description, amount: line.lineAmount, source: 'bank_receive'
+            description: line.description, amount: Math.abs(netLineAmount(txn.lineAmountTypes, line)), source: 'bank_receive'
           });
         }
       }
@@ -1739,8 +1762,10 @@ async function runSync(tenantId, progressCallback, options = {}) {
         const response = await xero.accountingApi.getReportBalanceSheet(tid, filed.filing_date);
         return response.body.reports?.[0];
       });
-      const netAssets = extractNetAssetsFromBalanceSheet(report);
-      if (netAssets != null) updateFiledAccountsXeroBalance(orgId, filed.filing_date, netAssets);
+      // Written even when null: recording that the balance sheet was read and held no bookkeeping
+      // is what separates "nothing to compare" from "not synced yet", and it clears any figure a
+      // previous sync stored before that distinction existed.
+      updateFiledAccountsXeroBalance(orgId, filed.filing_date, extractNetAssetsFromBalanceSheet(report));
     } catch (error) {
       console.error(`Filed-account Balance Sheet failed for ${filed.filing_date}:`, error.message);
     }
@@ -1756,8 +1781,9 @@ async function runSync(tenantId, progressCallback, options = {}) {
   const reviewedIssues = getIssuesForRun(orgId, runId, options.checkType || null);
   const scoreBreakdown = calculateScoreBreakdown(
     getScoringObservationsForRun(orgId, runId, options.checkType || null), {
-    nonScoredChecks: NON_SCORED_CHECKS,
-  });
+      nonScoredChecks: NON_SCORED_CHECKS,
+      asOf: new Date(`${period.end}T00:00:00.000Z`),
+    });
   const score = scoreBreakdown.score;
   // Exclude non-scored checks from totals (Xenon shows these separately with N/A count)
   const totalIssues = reviewedIssues

@@ -86,6 +86,19 @@ test('filed-account comparison never reports clean without a Xero balance', () =
   assert.equal(filedAccountsComparison(1000, 990).hasIssue, true);
 });
 
+test('a whole-pound filing is not held to penny precision it was never filed at', () => {
+  // Every client whose accounts were filed to the nearest £1 was reporting the filing's own
+  // rounding as an opening-balance difference. Xenon reports all three of these as clean.
+  assert.equal(filedAccountsComparison(-21385, -21385.25).hasIssue, false, '4X4&MORE £0.25');
+  assert.equal(filedAccountsComparison(-2268, -2267.88).hasIssue, false, 'Handymanz £0.12');
+  assert.equal(filedAccountsComparison(1000952, 1000952.99).hasIssue, false, 'Rose £0.99');
+  // The tolerance is rounding-sized only: a real difference still reports, as Xenon does for MBX.
+  assert.equal(filedAccountsComparison(1000952, 886562).hasIssue, true, 'MBX £114,390');
+  assert.equal(filedAccountsComparison(1000, 998.5).hasIssue, true, '£1.50 exceeds rounding');
+  // A filing that does carry pence was filed at that precision, so it keeps the penny tolerance.
+  assert.equal(filedAccountsComparison(1000.5, 1000.25).hasIssue, true);
+});
+
 // --- Global one-to-one allocation ---
 
 const { allocateStatementMatches } = require('../src/services/statementEvidence');
@@ -230,6 +243,20 @@ test('label normalisation does not widen into a different balance-sheet total', 
   assert.equal(extractNetAssetsFromBalanceSheet(balanceSheet([['Net Assets', 'n/a']])), null);
   assert.equal(extractNetAssetsFromBalanceSheet({ rows: [] }), null);
   assert.equal(extractNetAssetsFromBalanceSheet(null), null);
+});
+
+test('an empty balance sheet is not a zero net-assets figure', () => {
+  // Julia Kuisma: asked for 31/10/2020, a date its Xero holds no bookkeeping at, Xero returns this
+  // exact report — a bare zero Net Assets line with no sections. Reading 0 from it manufactured a
+  // £7,106 opening-balance difference against the filed accounts, which Xenon reports as clean.
+  assert.equal(extractNetAssetsFromBalanceSheet({ rows: [{ rowType: 'Section', rows: [
+    { rowType: 'Row', cells: [{ value: '' }, { value: '31 Oct 2020' }, { value: '31 Oct 2019' }] },
+    { rowType: 'Row', cells: [{ value: 'Net Assets' }, { value: '0.00' }, { value: '0.00' }] },
+  ] }] }), null);
+  // Net assets of zero on a balance sheet that does hold bookkeeping is a real figure and stays.
+  assert.equal(extractNetAssetsFromBalanceSheet(balanceSheet([
+    ['Total Assets', '5000.00'], ['Total Liabilities', '5000.00'], ['Net Assets', '0.00'],
+  ])), 0);
 });
 
 test('net assets is found however deeply the report nests its sections', () => {

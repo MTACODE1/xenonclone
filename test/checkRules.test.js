@@ -15,6 +15,7 @@ const {
   isOldDocument,
   isPurchaseTaxExemptAccount,
   resolvePeriodChecked,
+  resolveSupplierPatternLookbackMonths,
   selectAuthorisedUnreconciled,
   selectOldCredits,
   sumAbsoluteExposure,
@@ -361,6 +362,24 @@ test('gross and net always differ by exactly taxAmount, regardless of lineAmount
 test('grossLineAmount/netLineAmount default missing lineAmount/taxAmount to zero rather than throwing', () => {
   assert.equal(grossLineAmount('Exclusive', {}), 0);
   assert.equal(netLineAmount('Inclusive', {}), 0);
+});
+
+// resolveSupplierPatternLookbackMonths — Xenon's own docs for Multi-Account/Multi-Tax Code
+// Suppliers state the lookback is 3 months by default and changeable per client; this app's
+// 12-month value is its own fallback, tuned before this setting existed, and must stay the
+// default for any client without an explicit override so already-validated clients don't change.
+
+test('resolveSupplierPatternLookbackMonths defaults to 12 when unset, null, or invalid', () => {
+  assert.equal(resolveSupplierPatternLookbackMonths({}), 12);
+  assert.equal(resolveSupplierPatternLookbackMonths({ supplier_pattern_lookback_months: null }), 12);
+  assert.equal(resolveSupplierPatternLookbackMonths({ supplier_pattern_lookback_months: 0 }), 12);
+  assert.equal(resolveSupplierPatternLookbackMonths({ supplier_pattern_lookback_months: -3 }), 12);
+  assert.equal(resolveSupplierPatternLookbackMonths(undefined), 12);
+});
+
+test('resolveSupplierPatternLookbackMonths uses a configured positive value, matching Xenon\'s own per-client setting', () => {
+  assert.equal(resolveSupplierPatternLookbackMonths({ supplier_pattern_lookback_months: 3 }), 3);
+  assert.equal(resolveSupplierPatternLookbackMonths({ supplier_pattern_lookback_months: 6 }), 6);
 });
 
 test('a VAT-only Inclusive line nets to zero while remaining a real, non-zero gross amount', () => {

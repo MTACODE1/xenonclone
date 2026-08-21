@@ -732,6 +732,40 @@ canvas { display: block; margin: 0 auto; }
 .mb-24 { margin-bottom: 24px; }
 
 /* Client page */
+.stale-period-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  margin-bottom: 20px;
+  border: 1px solid #FFAE1F;
+  border-left: 5px solid #FFAE1F;
+  border-radius: var(--border-radius);
+  background: #FFF4E5;
+  color: #92400E;
+  font-size: 0.875rem;
+}
+.stale-period-icon {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #FFAE1F;
+  color: white;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.stale-period-text { flex: 1; }
+.stale-period-banner .btn { flex-shrink: 0; }
+
+/* Figures belonging to a different period than the one selected */
+.period-stale .period-data {
+  opacity: 0.4;
+  filter: grayscale(1);
+}
+
 .client-layout { display: flex; gap: 20px; }
 .client-sidebar { width: 240px; flex-shrink: 0; }
 .client-main { flex: 1; min-width: 0; }

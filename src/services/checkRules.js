@@ -21,6 +21,19 @@ function resolvePeriodChecked(intendedLabel, activePeriodKey) {
   return activePeriodKey || intendedLabel;
 }
 
+// Xenon's own Multi-Account/Multi-Tax Code Suppliers documentation states the pattern-detection
+// lookback is "3 months prior to the period selected" by default, and is changeable per client on
+// Xenon's settings page — it is not a fixed value shared by every client. 12 months is this app's
+// own empirically-tuned fallback (measured against five real clients before this setting existed);
+// it stays the default for any client that hasn't been given a specific value, so nothing already
+// validated changes, but a new client whose real Xenon lookback differs can now be configured to
+// match instead of silently guessing.
+const DEFAULT_SUPPLIER_PATTERN_LOOKBACK_MONTHS = 12;
+function resolveSupplierPatternLookbackMonths(org) {
+  const configured = Number(org?.supplier_pattern_lookback_months);
+  return Number.isInteger(configured) && configured > 0 ? configured : DEFAULT_SUPPLIER_PATTERN_LOOKBACK_MONTHS;
+}
+
 const CHECK_DEFAULTS = Object.freeze({
   // Three days for both sales invoices and purchase bills, grouped as described on findDuplicates.
   // Row-exact against Xenon's 4X4 View Issues: 31 groups / £3,509.90 for invoices and 6 / £492.63
@@ -446,6 +459,7 @@ module.exports = {
   NON_SCORED_CHECKS,
   RESERVED_PERIOD_LABELS,
   resolvePeriodChecked,
+  resolveSupplierPatternLookbackMonths,
   calculateHealthScore,
   contactNameSimilarity,
   findDirectMatches,

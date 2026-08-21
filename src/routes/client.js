@@ -6,6 +6,7 @@ const path = require('path');
 const multer = require('multer');
 const {
   getOrganisationByTenantId, getIssuesForOrg, getIssueByCheckType, updateOrganisationMeta,
+  updateOrganisationSupplierPatternLookback,
   getTransactionCountsForOrg, getBankReconciliationForOrg, updateStatementBalance,
   getExpenseAccountsForOrg, getAccountCheckConfigurationForOrg,
   setAccountCheckConfiguration, getIssueFindings, getIssueFindingSummary, setFindingReviewStates,
@@ -202,6 +203,18 @@ router.post('/:tenantId/account-check-configuration', express.urlencoded({ exten
   }));
   setAccountCheckConfiguration(org.id, configurations);
   res.redirect(`/client/${tenantId}#capital-review-accounts`);
+});
+
+router.post('/:tenantId/supplier-pattern-lookback', express.urlencoded({ extended: true }), (req, res) => {
+  const { tenantId } = req.params;
+  const org = getOrganisationByTenantId(tenantId);
+  if (!org) return res.status(404).send('Organisation not found');
+  if (!req.session.csrfToken || req.body.csrf_token !== req.session.csrfToken) {
+    return res.status(403).send('Invalid form token');
+  }
+  const months = parseInt(req.body.supplier_pattern_lookback_months, 10);
+  updateOrganisationSupplierPatternLookback(org.id, Number.isFinite(months) ? months : null);
+  res.redirect(`/client/${tenantId}#supplier-pattern-lookback`);
 });
 
 router.post('/:tenantId/bank-reconciliation', express.urlencoded({ extended: true }), (req, res) => {
@@ -405,10 +418,12 @@ router.post('/:tenantId/check/:checkType/reanalyse', async (req, res) => {
   }
   const started = startJob(
     `${tenantId}:${checkType}:${period.type}:${period.from || ''}:${period.to || ''}`,
-    progress => syncOrganisation(tenantId, progress, { period, checkType }),
+    progress => syncOrganisation(tenantId, progress, {
+      period, checkType, cacheOnly: true, asOf: org.period_end || undefined,
+    }),
     {
       tenantId, orgId: org.id, mode: `check:${checkType}`,
-      payload: { period, checkType },
+      payload: { period, checkType, cacheOnly: true, asOf: org.period_end || undefined },
     }
   );
   return res.status(started.existing ? 200 : 202).json({

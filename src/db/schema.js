@@ -444,6 +444,14 @@ function initSchema() {
   if (!organisationColumns.has('company_number')) {
     db.exec(`ALTER TABLE organisations ADD COLUMN company_number TEXT`);
   }
+  // Xenon's own Multi-Account/Multi-Tax Code Suppliers documentation states the pattern-detection
+  // lookback is "3 months prior to the period selected" by default, adjustable per client on
+  // Xenon's settings page — not a fixed value. NULL here means "not yet configured for this
+  // client"; xeroSync.js falls back to the empirically-tuned 12-month default that already
+  // matches every currently-validated client, so leaving this unset changes nothing for them.
+  if (!organisationColumns.has('supplier_pattern_lookback_months')) {
+    db.exec(`ALTER TABLE organisations ADD COLUMN supplier_pattern_lookback_months INTEGER`);
+  }
 
   // filed_accounts predates automatic extraction, so existing rows are accountant-entered. The
   // default of 'manual' is what protects them: an auto-extracted figure must never overwrite a

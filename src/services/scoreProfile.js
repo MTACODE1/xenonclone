@@ -35,7 +35,7 @@ const SCORE_PROFILE = Object.freeze({
   }),
 });
 
-const NON_SCORED_PERIODS = new Set(['out_of_scope', 'not_configured', 'needs_sync']);
+const NON_SCORED_PERIODS = new Set(['out_of_scope', 'not_configured', 'needs_sync', 'unavailable']);
 const DATE_FIELDS = [
   'date', 'date1', 'date2', 'transactionDate', 'documentDate', 'dueDate',
   'evidenceDate', 'filingDate', 'xeroBalanceAsOf',

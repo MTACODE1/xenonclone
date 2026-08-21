@@ -58,4 +58,8 @@ test('legacy report rows migrate into an active synthetic run', () => {
   assert.equal(run.status, 'succeeded');
   assert.equal(migrated.prepare(`SELECT is_active FROM issues WHERE id = 1`).get().is_active, 1);
   assert.equal(migrated.prepare(`SELECT run_id FROM health_scores WHERE id = 1`).get().run_id, run.id);
+  // Legacy aggregate rows have no normalized issue_findings. Reading the report must preserve
+  // their stored count instead of replacing it with COUNT(issue_findings) = 0.
+  const { getIssuesForOrg } = require('../src/db/queries');
+  assert.equal(getIssuesForOrg(1)[0].count, 2);
 });

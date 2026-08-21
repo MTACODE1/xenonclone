@@ -69,6 +69,14 @@ function updateOrganisationAccountingSettings(orgId, data) {
   `).run(data.financialYearEndDay || null, data.financialYearEndMonth || null, orgId);
 }
 
+// NULL (the default) means "use the 12-month fallback tuned against already-validated clients" —
+// see checkRules.js's resolveSupplierPatternLookbackMonths. A positive integer here overrides that
+// per-client, matching Xenon's own "3 months by default, changeable per client" setting.
+function updateOrganisationSupplierPatternLookback(orgId, months) {
+  getDb().prepare(`UPDATE organisations SET supplier_pattern_lookback_months = ? WHERE id = ?`)
+    .run(Number.isInteger(months) && months > 0 ? months : null, orgId);
+}
+
 function markOrganisationDisconnected(tenantId) {
   const db = getDb();
   db.prepare(`UPDATE organisations SET connection_status = 'disconnected' WHERE xero_tenant_id = ?`).run(tenantId);
@@ -203,7 +211,11 @@ function refreshIssueAggregations(orgId, issueId = null) {
   const db = getDb();
   db.prepare(`
     UPDATE issues SET
-      count = CASE WHEN count IS NULL THEN NULL ELSE (
+      count = CASE
+        WHEN count IS NULL THEN NULL
+        WHEN NOT EXISTS (SELECT 1 FROM issue_findings source WHERE source.issue_id = issues.id)
+          THEN count
+        ELSE (
         SELECT COUNT(*) FROM issue_findings f
         LEFT JOIN finding_review_states r
           ON r.org_id = f.org_id AND r.check_type = f.check_type AND r.finding_key = f.finding_key
@@ -214,7 +226,11 @@ function refreshIssueAggregations(orgId, issueId = null) {
             OR (r.state = 'ok' AND r.period_key = issues.period_checked)
           ), 0)
       ) END,
-      potential_value_gbp = CASE WHEN count IS NULL THEN potential_value_gbp ELSE (
+      potential_value_gbp = CASE
+        WHEN count IS NULL THEN potential_value_gbp
+        WHEN NOT EXISTS (SELECT 1 FROM issue_findings source WHERE source.issue_id = issues.id)
+          THEN potential_value_gbp
+        ELSE (
         SELECT COALESCE(SUM(f.potential_value_gbp), 0) FROM issue_findings f
         LEFT JOIN finding_review_states r
           ON r.org_id = f.org_id AND r.check_type = f.check_type AND r.finding_key = f.finding_key
@@ -1386,7 +1402,8 @@ function getPanoramaOrganisations() {
 
 module.exports = {
   upsertOrganisation, getAllOrganisations, getOrganisationByTenantId,
-  updateOrganisationMeta, updateOrganisationAccountingSettings, markOrganisationDisconnected,
+  updateOrganisationMeta, updateOrganisationAccountingSettings, updateOrganisationSupplierPatternLookback,
+  markOrganisationDisconnected,
   upsertHealthScore, deleteIssuesForOrg, insertIssue, replaceIssueForCheck, refreshLatestHealthScore,
   getIssuesForOrg, getScoringObservations, getIssueByCheckType,
   getIssuesForRun, getScoringObservationsForRun,

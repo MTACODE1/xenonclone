@@ -60,13 +60,13 @@ null count and must never be presented or scored as clean.
 | 10 | `opening_balance_differences` | high | Compare filed net assets at the last filed balance-sheet date with Xero's `Reports/BalanceSheet` net assets at the same date. The filed figure is read automatically from the Companies House accounts document when it is iXBRL-tagged (concept tiers: net assets, then total equity; GBP, undimensioned, instant context matching the made-up date exactly); otherwise accountant-entered. | Difference over £0.01 / absolute difference. Not configured when no filed figure is available from either source. | Automated where the filing is machine-readable; manual fallback otherwise |
 | 11 | `invoice_or_direct` | medium | Revenue-coded RECEIVE has same contact and exact amount as an unpaid/draft sales invoice dated 0–30 days earlier. | Direct transaction / absolute direct amount. | Confirmed default |
 | 12 | `bill_or_direct` | medium | Expense-coded SPEND has same contact and exact amount as an unpaid AUTHORISED or DRAFT (not SUBMITTED) purchase bill dated 0–30 days earlier; one-to-one consumption, nearest bill wins. | Direct transaction / absolute direct amount. | Row-level confirmed (MBX 44/44) |
-| 13 | `low_cost_fixed_assets` | medium | Positive bill or SPEND line on a FIXED account, at or below £200, since lock date. | Line / absolute line amount. | Provisional threshold |
-| 14 | `capital_item_review` | medium | Bill or SPEND line on an accountant-selected capital-candidate account, at or above configured threshold (default £500), since lock date. | Line / absolute line amount. Not configured if no accounts selected. | Confirmed configuration model |
+| 13 | `low_cost_fixed_assets` | medium | Positive bill or SPEND line on a FIXED account whose **net (ex-VAT)** value is at or below £200, since lock date. Xero's mixed Inclusive/Exclusive `lineAmount` is normalized before comparison. | Line / absolute net line amount. | MBX exact: 12 / £462.94 versus Xenon 12 / £463 |
+| 14 | `capital_item_review` | medium | Bill, SPEND or expense-coded RECEIVE line on an accountant-selected capital-candidate account, at or above configured **net** threshold (default £500), since lock date. | Line / absolute net amount. Not configured if no accounts selected. | Rose exact: 473 @ £2,100 → 14 / £63,665.50 (includes RECEIVE overpayment). MBX exact: 461+473 @ £200 → 11 / £4,881.71 |
 | 15 | `misallocated_items` | medium | Bill or SPEND line on a vague expense account name, at or above configured threshold (default £100), since lock date. | Line / absolute line amount. | Provisional heuristic |
 | 16 | `multi_account_suppliers` | medium | Detection over the period or the trailing twelve months, whichever reaches further back; supplier must have activity inside the checked period to be listed. Dominant account is highest absolute volume; the configurable non-dominant floor defaults to £0. | Supplier / absolute non-dominant period value. | Exact on 4X4/MBX/Handymanz/Rose after in-period listing filter (Rose dropped Aldi) |
 | 17 | `multi_tax_suppliers` | medium | Detection over the period or the trailing twelve months, whichever reaches further back; NONE counts as a tax code; £0.00 lines ignored; supplier must have activity inside the checked period to be listed. Dominant tax is highest absolute volume; the configurable non-dominant floor defaults to £0. | Supplier / absolute non-dominant period value. | Fast Track exact. Rose 29 v 28 (Canva only residual). Handymanz SET-correct at 5 of Xenon's 7 (2 missing Zero-Rated lines not in cache). 4X4 / MBX still short. See "Multi-tax lookback evidence" below |
-| 18 | `unexpected_account_used` | medium | Period-scoped AUTHORISED bill/invoice/SPEND/RECEIVE line account differs from that contact role's configured default; contacts without a default are skipped. DELETED bank txns excluded. | Offending line / absolute line amount. | Confirmed on Handymanz/MBX/4X4 |
-| 19 | `unexpected_tax_code_used` | medium | Period-scoped AUTHORISED bill/invoice/SPEND/RECEIVE line tax type differs from that contact role's configured default; contacts without a default are skipped. DELETED bank txns excluded. | Offending line / absolute line amount. | Confirmed on Handymanz/MBX/4X4 |
+| 18 | `unexpected_account_used` | medium | Period-scoped AUTHORISED bill/invoice/SPEND/RECEIVE line account differs from that contact role's configured default; contacts without a default are skipped. DELETED bank txns excluded. | Offending line / absolute **net (ex-VAT)** line amount. | Count confirmed on Handymanz/MBX/4X4; MBX value exact at £58,023.83 versus Xenon £58,024 |
+| 19 | `unexpected_tax_code_used` | medium | Period-scoped AUTHORISED bill/invoice/SPEND/RECEIVE line tax type differs from that contact role's configured default; contacts without a default are skipped. DELETED bank txns excluded. | Offending line / absolute **net (ex-VAT)** line amount. | Handymanz exact at 30 / £1,308.21 versus Xenon 30 / £1,308 |
 | 20 | `sales_tax_missing` | medium | VAT-registered client; positive sales-invoice or revenue-coded RECEIVE line since lock date has no tax type or NONE. | Offending line / absolute line amount. | Confirmed line and bank coverage |
 | 21 | `purchase_tax_missing` | medium | VAT-registered client; positive purchase-bill or expense-coded SPEND line since lock date has no tax type or NONE and account is not exempt. Processor fees are included; payroll/statutory/bank fees are exempt. | Offending line / absolute line amount. | Confirmed line/exemption behavior |
 | 22 | `sales_tax_on_bills` | medium | Purchase-bill line uses a sales-only tax rate. Qualifying SPEND lines may be retained only as display-only observations. | Counted bill line / absolute tax amount; bank observations contribute zero. | Confirmed default |
@@ -197,6 +197,29 @@ matters is between a value Xero does not return directly and a value that cannot
 
 ## Known parity blockers
 
+- **Dated multi-client baseline (16 Aug 2026):** comparisons must retain both run dates.
+  Handymanz app 13 Aug versus Xenon 15 Aug differs by exactly four headline findings:
+  two unavailable Bank Balance findings and two stale/hidden multi-tax contacts. MBX app
+  11 Aug versus Xenon 7 Aug differs by exactly 74 findings across Bank Balance (2),
+  Opening Balance (2), Capital Review (11), Misallocated (61), Bill or Direct (-4),
+  Old Unpaid Invoices (3), Unreconciled Bank (-1), Multi-Tax (1), and Unexpected Tax
+  (-1). Rose app 13 Aug versus Xenon 7 Aug is not a rule-calibration target because its
+  Xenon review state removes 1,719 Purchase Tax Missing findings and 52 Unexpected Tax
+  findings while the app correctly reports raw API findings. Never fit a global rule or
+  score scale to those hidden-state differences.
+- **RBC legacy report integrity (fixed 16 Aug 2026):** legacy aggregate `issues` rows have no
+  normalized `issue_findings`. Refreshing review-state aggregates previously replaced every
+  stored count/value with zero while leaving the old health-score headline active, producing
+  an impossible “867 / £1.3m” headline with every detailed check shown as OK. Aggregation now
+  preserves legacy totals when no normalized rows exist, and RBC was fully resynced into one
+  atomic run. Its Xenon account settings were reconstructed exactly where evidence permits:
+  CIS Labour Expense is ignored for Purchase Tax Missing (91 / £80,369), General Expenses is
+  the only Misallocated account at £100 (1 / £121.66), and Repairs & Maintenance is a Capital
+  Review account at £200 (2 / £651.72).
+- **Capital settings reconstructed from exact rows:** MBX uses Printing & Stationery and
+  Repairs & Maintenance at £200, yielding 11 / £4,881.71 versus Xenon 11 / £4,882. Rose and
+  Handymanz remain unconfigured because the supplied summaries do not identify a unique,
+  evidence-backed account set. A numerically close subset is not sufficient evidence.
 - Purchase-tax per-client exclusions beyond confirmed core exemptions require accountant
   configuration. The mechanism exists: per-account **Ignore** and **Include asset/prepayment**
   toggles on the client page, plus a global `purchase_tax_missing_exclude_codes` setting.
