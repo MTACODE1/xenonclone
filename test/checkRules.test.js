@@ -11,6 +11,7 @@ const {
   findDirectMatches,
   findDuplicateContacts,
   findDuplicates,
+  excludeDuplicateDrafts,
   findUnexpectedDefaultLines,
   isOldDocument,
   isPurchaseTaxExemptAccount,
@@ -186,6 +187,25 @@ test('bill duplicates use a 3-day window and keep pairs with at least one unpaid
   ].sort());
   // Value is each group's amount counted once: 12.16 + 20.40.
   assert.equal(Number(sumAbsoluteExposure(found).toFixed(2)), 32.56);
+});
+
+test('excludeDuplicateDrafts drops a whole duplicate cluster, matching RBC Sutherland Ltd real evidence', () => {
+  // Real RBC Sutherland Ltd data: 6 identical £24,164.34 drafts for one contact, all dated the
+  // same day (saved repeatedly within a 10-minute window), plus two genuine one-off drafts.
+  // Xenon's real Unapproved Invoices for this client is exactly 2/£40,907 — the two singles,
+  // with the whole 6-invoice cluster excluded (not collapsed to one representative).
+  const contact = { contactID: 'scargall' };
+  const drafts = [
+    ...['711', '735', '572', '57200', '386', '432'].map(number => ({
+      invoiceID: `inv-${number}`, invoiceNumber: number, date: '2026-03-01', total: 24164.34, contact,
+    })),
+    { invoiceID: 'inv-mosley', invoiceNumber: 'M1', date: '2026-03-02', total: 10000, contact: { contactID: 'mosley' } },
+    { invoiceID: 'inv-mk', invoiceNumber: 'MK1', date: '2026-03-08', total: 30907, contact: { contactID: 'mk' } },
+  ];
+  const kept = excludeDuplicateDrafts(drafts);
+  assert.equal(kept.length, 2);
+  assert.deepEqual(kept.map(i => i.invoiceID).sort(), ['inv-mk', 'inv-mosley']);
+  assert.equal(sumAbsoluteExposure(kept, i => i.total), 40907);
 });
 
 test('old documents age from document date, not due date', () => {

@@ -130,11 +130,29 @@ function isTransientError(err) {
   return false;
 }
 
+const API_CALL_TIMEOUT_MS = 45000;
+
+// A stalled connection (server accepts the request but never responds) resolves neither way —
+// it isn't a rejection, so the retry loop below never sees it and the whole sync hangs forever
+// instead of failing one check. Racing a timeout turns that silence into an ETIMEDOUT, which
+// isTransientError already retries with backoff exactly like a dropped connection.
+function withTimeout(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(Object.assign(new Error(`Xero API call timed out after ${ms}ms`), { code: 'ETIMEDOUT' }));
+    }, ms);
+    promise.then(
+      value => { clearTimeout(timer); resolve(value); },
+      err => { clearTimeout(timer); reject(err); }
+    );
+  });
+}
+
 async function apiCall(tenantId, fn, retries = 6) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const xero = await getAuthenticatedClient(tenantId);
-      return await fn(xero, tenantId);
+      return await withTimeout(fn(xero, tenantId), API_CALL_TIMEOUT_MS);
     } catch (err) {
       if (isTransientError(err)) {
         const isRateLimit = err.response && err.response.statusCode === 429;

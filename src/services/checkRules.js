@@ -250,6 +250,19 @@ function findDuplicates(items, windowDays = CHECK_DEFAULTS.duplicateWindowDays, 
     .sort((a, b) => String(b.date2 || '').localeCompare(String(a.date2 || '')));
 }
 
+// Unapproved Invoices/Bills should report distinct amounts genuinely awaiting a decision, not
+// inflate that exposure with repeat drafts of the same document (someone re-saving/copying while
+// working on it, never deleting the earlier attempts). Confirmed against RBC Sutherland Ltd real
+// Xenon evidence: our raw draft pool was 8/£185,893.04, including 6 identical £24,164.34 drafts
+// for one contact all saved within a 10-minute window — excluding that whole cluster (not
+// collapsing it to one representative) landed on Xenon's exact 2/£40,907, matching on both count
+// and value simultaneously.
+function excludeDuplicateDrafts(items, windowDays = CHECK_DEFAULTS.duplicateWindowDays, precomputedGroups = null) {
+  const groups = precomputedGroups || findDuplicates(items, windowDays);
+  const duplicateIds = new Set(groups.flatMap(group => group.documentIds));
+  return items.filter(item => !duplicateIds.has(item.invoiceID));
+}
+
 function isOldDocument(document, asOf, days = CHECK_DEFAULTS.oldDocumentDays) {
   const age = daysBetween(asOf, document.date);
   return age != null && age > days;
@@ -465,6 +478,7 @@ module.exports = {
   findDirectMatches,
   findDuplicateContacts,
   findDuplicates,
+  excludeDuplicateDrafts,
   findUnexpectedDefaultLines,
   isOldDocument,
   isPurchaseTaxExemptAccount,
