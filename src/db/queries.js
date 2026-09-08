@@ -1,6 +1,6 @@
 const { getDb } = require('./schema');
 const {
-  NON_SCORED_CHECKS, addFindingKeys, allocateFindingValues, isReviewStateActive,
+  NON_SCORED_CHECKS, addFindingKeys, allocateFindingValues, isReviewStateActive, normalizeContactKey,
 } = require('../services/checkRules');
 const { calculateScoreBreakdown } = require('../services/scoreProfile');
 
@@ -21,6 +21,13 @@ function upsertOrganisation(data) {
       connection_status = excluded.connection_status,
       last_synced_at = COALESCE(excluded.last_synced_at, organisations.last_synced_at)
   `).run(data);
+}
+
+// Raw organisations row (no health_scores join) — for resolving per-org check configuration,
+// where only the organisation's own override columns matter, not its latest health score.
+function getOrganisationById(orgId) {
+  const db = getDb();
+  return db.prepare(`SELECT * FROM organisations WHERE id = ?`).get(orgId);
 }
 
 function getAllOrganisations() {
@@ -75,6 +82,91 @@ function updateOrganisationAccountingSettings(orgId, data) {
 function updateOrganisationSupplierPatternLookback(orgId, months) {
   getDb().prepare(`UPDATE organisations SET supplier_pattern_lookback_months = ? WHERE id = ?`)
     .run(Number.isInteger(months) && months > 0 ? months : null, orgId);
+}
+
+function updateOrganisationMultiAccountPatternLookback(orgId, months) {
+  getDb().prepare(`UPDATE organisations SET multi_account_pattern_lookback_months = ? WHERE id = ?`)
+    .run(Number.isInteger(months) && months > 0 ? months : null, orgId);
+}
+
+// Config-isolation overrides (2026-09) — one organisation's own settings for values that
+// previously came only from the practice-wide `settings` table or a hardcoded constant. Every
+// field is nullable: NULL means "not configured for this client," so this UPDATE alone can never
+// change a client's behaviour — only an explicit non-null value the accountant chose to set does.
+// A caller passing `undefined` for a field leaves that column untouched (COALESCE onto its current
+// value) so a form that only edits some fields can't accidentally null out the others.
+function updateOrganisationCheckConfig(orgId, fields) {
+  const db = getDb();
+  const current = db.prepare(`SELECT * FROM organisations WHERE id = ?`).get(orgId);
+  if (!current) return;
+  const numericOrNull = value => (Number.isFinite(Number(value)) ? Number(value) : null);
+  // Tri-state boolean field: '' / null means "not configured, use the documented default";
+  // '1'/true means explicitly on; '0'/false (and anything else) means explicitly off. A plain HTML
+  // checkbox can't express this (unchecked and never-shown look identical), so these come from a
+  // three-option <select> on the settings form instead.
+  const triStateBoolOrNull = value => (value === '' || value == null ? null : (value === '1' || value === true || value === 1 ? 1 : 0));
+  const merged = {
+    opening_balance_threshold_gbp: fields.opening_balance_threshold_gbp === undefined
+      ? current.opening_balance_threshold_gbp
+      : (fields.opening_balance_threshold_gbp === null ? null : numericOrNull(fields.opening_balance_threshold_gbp)),
+    capital_review_default_threshold_gbp: fields.capital_review_default_threshold_gbp === undefined
+      ? current.capital_review_default_threshold_gbp
+      : (fields.capital_review_default_threshold_gbp === null ? null : numericOrNull(fields.capital_review_default_threshold_gbp)),
+    misallocated_items_default_threshold_gbp: fields.misallocated_items_default_threshold_gbp === undefined
+      ? current.misallocated_items_default_threshold_gbp
+      : (fields.misallocated_items_default_threshold_gbp === null ? null : numericOrNull(fields.misallocated_items_default_threshold_gbp)),
+    multi_account_suppliers_min_value_gbp: fields.multi_account_suppliers_min_value_gbp === undefined
+      ? current.multi_account_suppliers_min_value_gbp
+      : (fields.multi_account_suppliers_min_value_gbp === null ? null : numericOrNull(fields.multi_account_suppliers_min_value_gbp)),
+    multi_tax_suppliers_min_value_gbp: fields.multi_tax_suppliers_min_value_gbp === undefined
+      ? current.multi_tax_suppliers_min_value_gbp
+      : (fields.multi_tax_suppliers_min_value_gbp === null ? null : numericOrNull(fields.multi_tax_suppliers_min_value_gbp)),
+    purchase_tax_missing_exclude_codes: fields.purchase_tax_missing_exclude_codes === undefined
+      ? current.purchase_tax_missing_exclude_codes
+      : fields.purchase_tax_missing_exclude_codes,
+    duplicate_invoice_window_days: fields.duplicate_invoice_window_days === undefined
+      ? current.duplicate_invoice_window_days
+      : (fields.duplicate_invoice_window_days === null ? null : (Number.isInteger(Number(fields.duplicate_invoice_window_days)) ? Number(fields.duplicate_invoice_window_days) : null)),
+    duplicate_bill_window_days: fields.duplicate_bill_window_days === undefined
+      ? current.duplicate_bill_window_days
+      : (fields.duplicate_bill_window_days === null ? null : (Number.isInteger(Number(fields.duplicate_bill_window_days)) ? Number(fields.duplicate_bill_window_days) : null)),
+    duplicate_invoice_require_exact_reference: fields.duplicate_invoice_require_exact_reference === undefined
+      ? current.duplicate_invoice_require_exact_reference
+      : triStateBoolOrNull(fields.duplicate_invoice_require_exact_reference),
+    duplicate_invoice_include_fully_paid: fields.duplicate_invoice_include_fully_paid === undefined
+      ? current.duplicate_invoice_include_fully_paid
+      : triStateBoolOrNull(fields.duplicate_invoice_include_fully_paid),
+    duplicate_bill_require_exact_reference: fields.duplicate_bill_require_exact_reference === undefined
+      ? current.duplicate_bill_require_exact_reference
+      : triStateBoolOrNull(fields.duplicate_bill_require_exact_reference),
+    duplicate_bill_include_fully_paid: fields.duplicate_bill_include_fully_paid === undefined
+      ? current.duplicate_bill_include_fully_paid
+      : triStateBoolOrNull(fields.duplicate_bill_include_fully_paid),
+    duplicate_invoice_require_exact_total: fields.duplicate_invoice_require_exact_total === undefined
+      ? current.duplicate_invoice_require_exact_total
+      : triStateBoolOrNull(fields.duplicate_invoice_require_exact_total),
+    duplicate_bill_require_exact_total: fields.duplicate_bill_require_exact_total === undefined
+      ? current.duplicate_bill_require_exact_total
+      : triStateBoolOrNull(fields.duplicate_bill_require_exact_total),
+  };
+  db.prepare(`
+    UPDATE organisations SET
+      opening_balance_threshold_gbp = @opening_balance_threshold_gbp,
+      capital_review_default_threshold_gbp = @capital_review_default_threshold_gbp,
+      misallocated_items_default_threshold_gbp = @misallocated_items_default_threshold_gbp,
+      multi_account_suppliers_min_value_gbp = @multi_account_suppliers_min_value_gbp,
+      multi_tax_suppliers_min_value_gbp = @multi_tax_suppliers_min_value_gbp,
+      purchase_tax_missing_exclude_codes = @purchase_tax_missing_exclude_codes,
+      duplicate_invoice_window_days = @duplicate_invoice_window_days,
+      duplicate_bill_window_days = @duplicate_bill_window_days,
+      duplicate_invoice_require_exact_reference = @duplicate_invoice_require_exact_reference,
+      duplicate_invoice_include_fully_paid = @duplicate_invoice_include_fully_paid,
+      duplicate_bill_require_exact_reference = @duplicate_bill_require_exact_reference,
+      duplicate_bill_include_fully_paid = @duplicate_bill_include_fully_paid,
+      duplicate_invoice_require_exact_total = @duplicate_invoice_require_exact_total,
+      duplicate_bill_require_exact_total = @duplicate_bill_require_exact_total
+    WHERE id = @id
+  `).run({ ...merged, id: orgId });
 }
 
 function markOrganisationDisconnected(tenantId) {
@@ -132,11 +224,31 @@ function insertIssue(data) {
       SELECT * FROM finding_review_states WHERE org_id = ? AND check_type = ?
     `).all(data.org_id, data.check_type);
     const reviewByKey = new Map(reviews.map(review => [review.finding_key, review]));
-    const values = allocateFindingValues(details, data.potential_value_gbp);
+    let values = allocateFindingValues(details, data.potential_value_gbp);
+    // Recorded BEFORE contact-exclusion filtering below: whether this check produced a real
+    // findings array at all. Distinguishes "a legacy/simple check with no findings array — trust
+    // data.count/value as given" from "a real findings array that exclusions happened to filter
+    // down to zero" — the latter must still report count 0 / value 0, not silently revert to the
+    // original unfiltered numbers.
+    const hadDetails = details.length > 0;
+    // "Ignore this contact" is a PERMANENT exclusion (contact_exclusions), unlike the per-finding
+    // dismiss/ignore below — applied AFTER allocateFindingValues so the excluded contact's own
+    // share of the total is what's removed (not the whole total re-inflated across fewer items);
+    // this takes effect on every future sync automatically, with no changes needed in any check.
+    const excluded = new Set(db.prepare(`
+      SELECT contact_key FROM contact_exclusions WHERE org_id = ? AND check_type = ?
+    `).all(data.org_id, data.check_type).map(row => row.contact_key));
+    if (excluded.size && details.length) {
+      const keep = details.map((detail, index) =>
+        !excluded.has(normalizeContactKey(detail.contact || detail.name)) ? index : null
+      ).filter(index => index !== null);
+      details = keep.map(index => details[index]);
+      values = keep.map(index => values[index]);
+    }
     const activeDetails = details.filter(detail =>
       !detail.displayOnly && !isReviewStateActive(reviewByKey.get(detail.finding_key), data.period_checked)
     );
-    const filteredData = details.length ? {
+    const filteredData = hadDetails ? {
       ...data,
       count: data.count == null ? null : activeDetails.length,
       potential_value_gbp: details.reduce((sum, detail, index) =>
@@ -150,7 +262,7 @@ function insertIssue(data) {
         @period_checked, @run_id, @is_active)
     `).run({
       run_id: null, is_active: 1, ...filteredData,
-      detail_json: details.length ? null : (data.detail_json || '[]'),
+      detail_json: hadDetails ? null : (data.detail_json || '[]'),
     });
     const insertFinding = db.prepare(`
       INSERT OR IGNORE INTO issue_findings
@@ -167,6 +279,39 @@ function insertIssue(data) {
     }
     return result;
   })();
+}
+
+// "Ignore this contact" — see contact_exclusions in schema.js. Deliberately takes effect on the
+// NEXT sync/reanalyse of this check, not immediately — same as every other check-configuration
+// change in this app (e.g. account thresholds). An earlier version also immediately dismissed the
+// contact's currently-active findings via finding_review_states, but that left a stale 'dismissed'
+// row keyed by a deterministic finding_key hash that outlived the exclusion itself: removing the
+// exclusion later did not correctly un-hide the contact, because there was no reliable way to tell
+// "dismissed because of this exclusion" apart from "dismissed by the user for an unrelated reason"
+// in order to undo only the former. Kept simple and consistent instead of adding that ambiguity.
+function addContactExclusion(orgId, checkType, contactName) {
+  const db = getDb();
+  const contactKey = normalizeContactKey(contactName);
+  if (!orgId || !checkType || !contactKey) throw new Error('Missing required field');
+  db.prepare(`
+    INSERT OR IGNORE INTO contact_exclusions (org_id, check_type, contact_key)
+    VALUES (?, ?, ?)
+  `).run(orgId, checkType, contactKey);
+}
+
+function getContactExclusions(orgId, checkType) {
+  const db = getDb();
+  return db.prepare(`
+    SELECT contact_key, created_at FROM contact_exclusions WHERE org_id = ? AND check_type = ? ORDER BY contact_key
+  `).all(orgId, checkType);
+}
+
+function removeContactExclusion(orgId, checkType, contactName) {
+  const db = getDb();
+  const contactKey = normalizeContactKey(contactName);
+  db.prepare(`
+    DELETE FROM contact_exclusions WHERE org_id = ? AND check_type = ? AND contact_key = ?
+  `).run(orgId, checkType, contactKey);
 }
 
 function replaceIssueForCheck(data) {
@@ -468,7 +613,12 @@ function getIssueByCheckType(orgId, checkType) {
   return db.prepare(`SELECT * FROM issues WHERE org_id = ? AND check_type = ? AND is_active = 1`).get(orgId, checkType);
 }
 
-function getIssueFindings(issueId, page = 1, pageSize = 50, status = 'active') {
+// orgId is defense-in-depth, not the primary guard: today's only caller (client.js) already
+// resolves issueId from an org_id-scoped getIssueByCheckType lookup, so this can't currently be
+// reached with a mismatched (issueId, orgId) pair. Requiring orgId here anyway means a future
+// caller that skips that lookup fails closed (returns nothing) instead of silently leaking another
+// organisation's finding detail if it ever passed the wrong issueId.
+function getIssueFindings(issueId, orgId, page = 1, pageSize = 50, status = 'active') {
   const db = getDb();
   const safeSize = Math.min(100, Math.max(1, Number(pageSize) || 50));
   const allowedStatus = ['active', 'dismissed', 'ignored', 'ok', 'all'].includes(status) ? status : 'active';
@@ -478,14 +628,14 @@ function getIssueFindings(issueId, page = 1, pageSize = 50, status = 'active') {
     WHEN r.state = 'ok' AND r.period_key = i.period_checked THEN 'ok'
     ELSE 'active' END`;
   const where = allowedStatus === 'all' ? '' : `AND (${effectiveState}) = ?`;
-  const params = allowedStatus === 'all' ? [issueId] : [issueId, allowedStatus];
+  const params = allowedStatus === 'all' ? [issueId, orgId] : [issueId, orgId, allowedStatus];
   const total = db.prepare(`
     SELECT COUNT(*) AS count
     FROM issue_findings f
     JOIN issues i ON i.id = f.issue_id
     LEFT JOIN finding_review_states r
       ON r.org_id = f.org_id AND r.check_type = f.check_type AND r.finding_key = f.finding_key
-    WHERE f.issue_id = ? ${where}
+    WHERE f.issue_id = ? AND f.org_id = ? ${where}
   `).get(...params).count;
   const totalPages = Math.max(1, Math.ceil(total / safeSize));
   const safePage = Math.min(totalPages, Math.max(1, Number(page) || 1));
@@ -496,7 +646,7 @@ function getIssueFindings(issueId, page = 1, pageSize = 50, status = 'active') {
     JOIN issues i ON i.id = f.issue_id
     LEFT JOIN finding_review_states r
       ON r.org_id = f.org_id AND r.check_type = f.check_type AND r.finding_key = f.finding_key
-    WHERE f.issue_id = ? ${where}
+    WHERE f.issue_id = ? AND f.org_id = ? ${where}
     ORDER BY f.id LIMIT ? OFFSET ?
   `).all(...params, safeSize, (safePage - 1) * safeSize);
   return {
@@ -516,7 +666,32 @@ function getIssueFindings(issueId, page = 1, pageSize = 50, status = 'active') {
   };
 }
 
-function getIssueFindingSummary(issueId) {
+// For a bulk "act on every matching finding" action (e.g. "Ignore all N items") — deliberately
+// uncapped, unlike getIssueFindings' pageSize (capped at 100 for normal display pagination), since
+// a real check can have thousands of active findings (e.g. Rose's purchase_tax_missing at 2952) and
+// a bulk action must reach all of them, not silently the first 100.
+function getAllFindingKeysForIssue(issueId, orgId, status = 'active') {
+  const db = getDb();
+  const allowedStatus = ['active', 'dismissed', 'ignored', 'ok', 'all'].includes(status) ? status : 'active';
+  const effectiveState = `CASE
+    WHEN r.state = 'dismissed' THEN 'dismissed'
+    WHEN r.state = 'ignored' AND datetime(r.ignored_until) > datetime('now') THEN 'ignored'
+    WHEN r.state = 'ok' AND r.period_key = i.period_checked THEN 'ok'
+    ELSE 'active' END`;
+  const where = allowedStatus === 'all' ? '' : `AND (${effectiveState}) = ?`;
+  const params = allowedStatus === 'all' ? [issueId, orgId] : [issueId, orgId, allowedStatus];
+  return db.prepare(`
+    SELECT f.finding_key
+    FROM issue_findings f
+    JOIN issues i ON i.id = f.issue_id
+    LEFT JOIN finding_review_states r
+      ON r.org_id = f.org_id AND r.check_type = f.check_type AND r.finding_key = f.finding_key
+    WHERE f.issue_id = ? AND f.org_id = ? ${where}
+  `).all(...params).map(row => row.finding_key);
+}
+
+// orgId is defense-in-depth here too — see getIssueFindings above for why.
+function getIssueFindingSummary(issueId, orgId) {
   const db = getDb();
   const summary = { active: 0, dismissed: 0, ignored: 0, ok: 0 };
   const rows = db.prepare(`
@@ -530,9 +705,9 @@ function getIssueFindingSummary(issueId) {
     JOIN issues i ON i.id = f.issue_id
     LEFT JOIN finding_review_states r
       ON r.org_id = f.org_id AND r.check_type = f.check_type AND r.finding_key = f.finding_key
-    WHERE f.issue_id = ?
+    WHERE f.issue_id = ? AND f.org_id = ?
     GROUP BY status
-  `).all(issueId);
+  `).all(issueId, orgId);
   for (const row of rows) summary[row.status] = row.count;
   return summary;
 }
@@ -667,6 +842,57 @@ function setFindingReviewStates(orgId, checkType, findingKeys, state, notes = nu
   })();
 }
 
+// Per-transaction "reviewed" audit trail for checks with a drill-down (multi_account_suppliers,
+// multi_tax_suppliers) — see finding_line_reviews in schema.js. Deliberately does not touch
+// issues/health_scores: a transaction-level mark never changes the parent finding's count/value.
+function setLineReviewState(orgId, checkType, findingKey, lineKey, ok, notes = null) {
+  if (!orgId || !checkType || !findingKey || !lineKey) throw new Error('Missing required field');
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO finding_line_reviews (org_id, check_type, finding_key, line_key, ok, notes)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(org_id, check_type, finding_key, line_key) DO UPDATE SET
+      ok = excluded.ok, notes = excluded.notes, updated_at = CURRENT_TIMESTAMP
+  `).run(orgId, checkType, findingKey, lineKey, ok ? 1 : 0, notes || null);
+}
+
+// Returns a { [lineKey]: { ok, notes } } map for one contact-level finding, for the drill-down UI.
+function getLineReviewStates(orgId, checkType, findingKey) {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT line_key, ok, notes FROM finding_line_reviews
+    WHERE org_id = ? AND check_type = ? AND finding_key = ?
+  `).all(orgId, checkType, findingKey);
+  const map = {};
+  for (const row of rows) map[row.line_key] = { ok: !!row.ok, notes: row.notes };
+  return map;
+}
+
+// A note attached to a finding independent of its dismiss/ignore/ok review state — see
+// finding_notes in schema.js. Never touches finding_review_states or the parent issue's
+// count/value/score.
+function setFindingNote(orgId, checkType, findingKey, notes) {
+  if (!orgId || !checkType || !findingKey) throw new Error('Missing required field');
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO finding_notes (org_id, check_type, finding_key, notes)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(org_id, check_type, finding_key) DO UPDATE SET
+      notes = excluded.notes, updated_at = CURRENT_TIMESTAMP
+  `).run(orgId, checkType, findingKey, notes || null);
+}
+
+// Returns a { [finding_key]: note } map for one check, for bulk display alongside a findings list.
+function getFindingNotes(orgId, checkType) {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT finding_key, notes FROM finding_notes WHERE org_id = ? AND check_type = ?
+  `).all(orgId, checkType);
+  const map = {};
+  for (const row of rows) map[row.finding_key] = row.notes;
+  return map;
+}
+
 // Tokens
 function upsertToken(data) {
   const db = getDb();
@@ -774,6 +1000,24 @@ function updateStatementBalance(orgId, bankAccountId, statementBalance) {
 function getBankReconciliationForOrg(orgId) {
   const db = getDb();
   return db.prepare(`SELECT * FROM bank_reconciliation WHERE org_id = ? ORDER BY bank_account_name`).all(orgId);
+}
+
+// Bank Balance / Unreconciled Bank Items exclusions — organisation-scoped, per bank account.
+function getExcludedBankAccountIds(orgId) {
+  const rows = getDb().prepare(`SELECT bank_account_id FROM bank_account_exclusions WHERE org_id = ?`).all(orgId);
+  return new Set(rows.map(row => row.bank_account_id));
+}
+
+function setBankAccountExcluded(orgId, bankAccountId, excluded) {
+  const db = getDb();
+  if (excluded) {
+    db.prepare(`
+      INSERT INTO bank_account_exclusions (org_id, bank_account_id) VALUES (?, ?)
+      ON CONFLICT(org_id, bank_account_id) DO NOTHING
+    `).run(orgId, bankAccountId);
+  } else {
+    db.prepare(`DELETE FROM bank_account_exclusions WHERE org_id = ? AND bank_account_id = ?`).run(orgId, bankAccountId);
+  }
 }
 
 // Manual statement evidence
@@ -1138,6 +1382,10 @@ function setAccountCheckConfiguration(orgId, configurations) {
         row.account_code
       );
     }
+    // First save flips this org from "never configured" (xeroSync.js still auto-adds Xenon's
+    // documented 461/473 defaults if present) to "explicitly configured" (is_capital_candidate is
+    // trusted verbatim from here on, including a deliberate 0 on 461 or 473 — a real opt-out).
+    db.prepare(`UPDATE organisations SET account_settings_initialised = 1 WHERE id = ?`).run(orgId);
   });
   run();
 }
@@ -1403,18 +1651,310 @@ function getPanoramaOrganisations() {
   });
 }
 
+// Staff login / access control
+function getAllStaff() {
+  const db = getDb();
+  return db.prepare(`SELECT * FROM staff_users ORDER BY name`).all();
+}
+
+// Case-insensitive/trimmed, matching how MTAKPI itself resolves a login and how the mtakpi
+// pairing is meant to be looked up regardless of how the admin originally typed it in.
+function getStaffByMtakpiName(mtakpiStaffName) {
+  const db = getDb();
+  const name = String(mtakpiStaffName || '').trim();
+  return db.prepare(`
+    SELECT * FROM staff_users WHERE LOWER(TRIM(mtakpi_staff_name)) = LOWER(?)
+  `).get(name);
+}
+
+function getStaffById(id) {
+  const db = getDb();
+  return db.prepare(`SELECT * FROM staff_users WHERE id = ?`).get(id);
+}
+
+function createStaff({ mtakpi_staff_name, name, initials, role }) {
+  const db = getDb();
+  const result = db.prepare(`
+    INSERT INTO staff_users (mtakpi_staff_name, name, initials, role)
+    VALUES (?, ?, ?, ?)
+  `).run(mtakpi_staff_name, name, initials, role);
+  return getStaffById(result.lastInsertRowid);
+}
+
+// Bulk import from the "Import from MTAKPI" picker — one transaction so a failure partway
+// through (e.g. a duplicate name that slipped in) doesn't leave a half-imported batch. Skips
+// (rather than errors on) a name already linked, since the picker's own list already excludes
+// them but a race between two admins importing at once is still possible.
+function createStaffBulk(entries) {
+  const db = getDb();
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO staff_users (mtakpi_staff_name, name, initials, role)
+    VALUES (@mtakpi_staff_name, @name, @initials, @role)
+  `);
+  const importAll = db.transaction((rows) => {
+    let created = 0;
+    for (const row of rows) {
+      const result = insert.run(row);
+      if (result.changes > 0) created++;
+    }
+    return created;
+  });
+  return importAll(entries);
+}
+
+function deactivateStaff(id) {
+  const db = getDb();
+  db.prepare(`UPDATE staff_users SET is_active = 0 WHERE id = ?`).run(id);
+}
+
+function reactivateStaff(id) {
+  const db = getDb();
+  db.prepare(`UPDATE staff_users SET is_active = 1 WHERE id = ?`).run(id);
+}
+
+function touchStaffLastLogin(id) {
+  const db = getDb();
+  db.prepare(`UPDATE staff_users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?`).run(id);
+}
+
+// Permission checks (only super_admin may set role to admin/super_admin) live in the route
+// layer via src/services/staffPermissions.js — this is a plain write, trusted to have already
+// been authorized by the caller.
+function updateStaffRole(id, role) {
+  const db = getDb();
+  db.prepare(`UPDATE staff_users SET role = ? WHERE id = ?`).run(role, id);
+}
+
+function updateStaffInitials(id, initials) {
+  const db = getDb();
+  db.prepare(`UPDATE staff_users SET initials = ? WHERE id = ?`).run(initials, id);
+}
+
+function setStaffCanManageSettings(id, canManage) {
+  const db = getDb();
+  db.prepare(`UPDATE staff_users SET can_manage_settings = ? WHERE id = ?`).run(canManage ? 1 : 0, id);
+}
+
+// Hard delete — distinct from deactivateStaff (the soft-delete default used elsewhere in this
+// app). Offered explicitly for removing an account added by mistake (e.g. the wrong MTAKPI name
+// picked during import) rather than leaving permanent clutter; ON DELETE CASCADE on
+// staff_org_access cleans up any access grants for this account automatically.
+function deleteStaff(id) {
+  const db = getDb();
+  db.prepare(`DELETE FROM staff_users WHERE id = ?`).run(id);
+}
+
+function staffHasOrgAccess(staffId, orgId) {
+  const db = getDb();
+  return !!db.prepare(`
+    SELECT 1 FROM staff_org_access WHERE staff_id = ? AND org_id = ?
+  `).get(staffId, orgId);
+}
+
+function getOrgIdsForStaff(staffId) {
+  const db = getDb();
+  return db.prepare(`SELECT org_id FROM staff_org_access WHERE staff_id = ?`).all(staffId)
+    .map(row => row.org_id);
+}
+
+// Active staff assigned to an org, for the client-list "Team Member Access" avatar badges.
+function getStaffForOrg(orgId) {
+  const db = getDb();
+  return db.prepare(`
+    SELECT su.id, su.name, su.initials
+    FROM staff_org_access soa
+    JOIN staff_users su ON su.id = soa.staff_id
+    WHERE soa.org_id = ? AND su.is_active = 1
+    ORDER BY su.name
+  `).all(orgId);
+}
+
+// Replaces a staff member's ENTIRE org-access set in one transaction — the primary editing
+// surface (a full-page checklist of every org) submits the whole new set at once.
+function replaceStaffOrgAccess(staffId, orgIds) {
+  const db = getDb();
+  const replace = db.transaction((ids) => {
+    db.prepare(`DELETE FROM staff_org_access WHERE staff_id = ?`).run(staffId);
+    const insert = db.prepare(`INSERT INTO staff_org_access (staff_id, org_id) VALUES (?, ?)`);
+    for (const orgId of ids) insert.run(staffId, orgId);
+  });
+  replace(orgIds);
+}
+
+// Toggles a single (staff, org) pair — the client-list "+" popover's quick-add/remove shortcut,
+// writing to the same join table as replaceStaffOrgAccess but scoped to one pair at a time.
+function toggleStaffOrgAccess(staffId, orgId, grant) {
+  const db = getDb();
+  if (grant) {
+    db.prepare(`INSERT OR IGNORE INTO staff_org_access (staff_id, org_id) VALUES (?, ?)`).run(staffId, orgId);
+  } else {
+    db.prepare(`DELETE FROM staff_org_access WHERE staff_id = ? AND org_id = ?`).run(staffId, orgId);
+  }
+}
+
+// --- Insight cache ---
+function saveInsightData(orgId, reportType, data) {
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO insight_cache (org_id, report_type, data_json, fetched_at)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(org_id, report_type) DO UPDATE SET data_json=excluded.data_json, fetched_at=excluded.fetched_at
+  `).run(orgId, reportType, JSON.stringify(data));
+}
+
+function getInsightData(orgId, reportType) {
+  const db = getDb();
+  const row = db.prepare(`SELECT data_json, fetched_at FROM insight_cache WHERE org_id=? AND report_type=?`).get(orgId, reportType);
+  if (!row) return null;
+  try { return { data: JSON.parse(row.data_json), fetchedAt: row.fetched_at }; } catch { return null; }
+}
+
+function getAllInsightData(orgId) {
+  const db = getDb();
+  const rows = db.prepare(`SELECT report_type, data_json, fetched_at FROM insight_cache WHERE org_id=?`).all(orgId);
+  const result = {};
+  for (const row of rows) {
+    try { result[row.report_type] = { data: JSON.parse(row.data_json), fetchedAt: row.fetched_at }; } catch {}
+  }
+  return result;
+}
+
+// --- Insight account mappings (which Xero accounts feed each KPI) ---
+function getInsightAccountMappings(orgId) {
+  const db = getDb();
+  const rows = db.prepare(`SELECT category, account_code FROM insight_account_mappings WHERE org_id=?`).all(orgId);
+  const result = {};
+  for (const row of rows) {
+    (result[row.category] = result[row.category] || []).push(row.account_code);
+  }
+  return result;
+}
+
+function setInsightAccountMapping(orgId, category, accountCodes) {
+  const db = getDb();
+  const run = db.transaction(() => {
+    db.prepare(`DELETE FROM insight_account_mappings WHERE org_id=? AND category=?`).run(orgId, category);
+    const insert = db.prepare(`INSERT INTO insight_account_mappings (org_id, category, account_code) VALUES (?, ?, ?)`);
+    for (const code of accountCodes) if (code) insert.run(orgId, category, code);
+  });
+  run();
+}
+
+// --- Insight category settings (Cash Health include/override toggles) ---
+function getInsightCategorySettings(orgId) {
+  const db = getDb();
+  const rows = db.prepare(`SELECT category, enabled, override_enabled, override_value FROM insight_category_settings WHERE org_id=?`).all(orgId);
+  const result = {};
+  for (const row of rows) {
+    result[row.category] = {
+      enabled: !!row.enabled,
+      overrideEnabled: !!row.override_enabled,
+      overrideValue: row.override_value,
+    };
+  }
+  return result;
+}
+
+function setInsightCategorySetting(orgId, category, { enabled, overrideEnabled, overrideValue }) {
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO insight_category_settings (org_id, category, enabled, override_enabled, override_value)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(org_id, category) DO UPDATE SET
+      enabled=excluded.enabled, override_enabled=excluded.override_enabled, override_value=excluded.override_value
+  `).run(orgId, category, enabled ? 1 : 0, overrideEnabled ? 1 : 0, overrideValue ?? null);
+}
+
+// --- Insight dashboard widget visibility ---
+function getInsightWidgetVisibility(orgId) {
+  const db = getDb();
+  const rows = db.prepare(`SELECT widget_key, visible, pdf_visible FROM insight_widget_visibility WHERE org_id=?`).all(orgId);
+  const result = {};
+  for (const row of rows) result[row.widget_key] = { visible: !!row.visible, pdfVisible: !!row.pdf_visible };
+  return result;
+}
+
+function setInsightWidgetVisibility(orgId, widgetKey, visible, pdfVisible) {
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO insight_widget_visibility (org_id, widget_key, visible, pdf_visible)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(org_id, widget_key) DO UPDATE SET visible=excluded.visible, pdf_visible=excluded.pdf_visible
+  `).run(orgId, widgetKey, visible ? 1 : 0, pdfVisible ? 1 : 0);
+}
+
+// --- Insight misc key/value settings (target basis, valuation model, etc.) ---
+function getInsightSettingsKv(orgId) {
+  const db = getDb();
+  const rows = db.prepare(`SELECT key, value FROM insight_settings_kv WHERE org_id=?`).all(orgId);
+  const result = {};
+  for (const row of rows) result[row.key] = row.value;
+  return result;
+}
+
+function setInsightSettingsKv(orgId, key, value) {
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO insight_settings_kv (org_id, key, value)
+    VALUES (?, ?, ?)
+    ON CONFLICT(org_id, key) DO UPDATE SET value=excluded.value
+  `).run(orgId, key, value == null ? null : String(value));
+}
+
+// --- Insight corp tax custom rate bands ---
+function getInsightCorpTaxRateBands(orgId) {
+  const db = getDb();
+  return db.prepare(`SELECT id, effective_date, rate_pct FROM insight_corp_tax_rate_bands WHERE org_id=? ORDER BY effective_date DESC`).all(orgId);
+}
+
+function addInsightCorpTaxRateBand(orgId, effectiveDate, ratePct) {
+  const db = getDb();
+  db.prepare(`INSERT INTO insight_corp_tax_rate_bands (org_id, effective_date, rate_pct) VALUES (?, ?, ?)`).run(orgId, effectiveDate, ratePct);
+}
+
+function deleteInsightCorpTaxRateBand(orgId, id) {
+  const db = getDb();
+  db.prepare(`DELETE FROM insight_corp_tax_rate_bands WHERE org_id=? AND id=?`).run(orgId, id);
+}
+
+// --- Insight corp tax adjustments (addback / deduct_other / capital_allowance) ---
+function getInsightCorpTaxAdjustments(orgId, adjustmentType) {
+  const db = getDb();
+  return db.prepare(`
+    SELECT id, account_code, pct, treatment FROM insight_corp_tax_adjustments WHERE org_id=? AND adjustment_type=?
+  `).all(orgId, adjustmentType);
+}
+
+function setInsightCorpTaxAdjustment(orgId, adjustmentType, accountCode, { pct, treatment }) {
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO insight_corp_tax_adjustments (org_id, adjustment_type, account_code, pct, treatment)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(org_id, adjustment_type, account_code) DO UPDATE SET pct=excluded.pct, treatment=excluded.treatment
+  `).run(orgId, adjustmentType, accountCode, pct ?? null, treatment ?? null);
+}
+
+function deleteInsightCorpTaxAdjustment(orgId, adjustmentType, accountCode) {
+  const db = getDb();
+  db.prepare(`DELETE FROM insight_corp_tax_adjustments WHERE org_id=? AND adjustment_type=? AND account_code=?`).run(orgId, adjustmentType, accountCode);
+}
+
 module.exports = {
-  upsertOrganisation, getAllOrganisations, getOrganisationByTenantId,
+  upsertOrganisation, getAllOrganisations, getOrganisationByTenantId, getOrganisationById,
   updateOrganisationMeta, updateOrganisationAccountingSettings, updateOrganisationSupplierPatternLookback,
+  updateOrganisationMultiAccountPatternLookback, updateOrganisationCheckConfig,
   markOrganisationDisconnected,
   upsertHealthScore, deleteIssuesForOrg, insertIssue, replaceIssueForCheck, refreshLatestHealthScore,
   getIssuesForOrg, getScoringObservations, getIssueByCheckType,
   getIssuesForRun, getScoringObservationsForRun,
   getIssueFindings, getIssueFindingSummary, getReportFindings, setFindingReviewStates,
+  setLineReviewState, getLineReviewStates, setFindingNote, getFindingNotes, getAllFindingKeysForIssue,
+  addContactExclusion, getContactExclusions, removeContactExclusion,
   upsertToken, upsertTokenForConnection, markConnectionDisconnected,
   getTenantsSharingRefreshToken, getToken, deleteToken, getSetting, setSetting,
   upsertTransactionCounts, getTransactionCountsForOrg, getAllTransactionCounts, getPanoramaOrganisations,
   upsertBankReconciliationXeroBalance, updateStatementBalance, getBankReconciliationForOrg,
+  getExcludedBankAccountIds, setBankAccountExcluded,
   getXeroBankItemsForOrg, replaceXeroBankItemsCache, createStatementImport,
   getStatementImportByHash, getStatementImportsForOrg, getLatestStatementLinesForOrg, getStatementLinesForOrg,
   getLatestStatementImportsForOrg, updateStatementLineMatches, deleteStatementImport,
@@ -1427,5 +1967,16 @@ module.exports = {
   createSyncRun, finishSyncRun, activateSyncRun, getLastSuccessfulRun,
   mergeEntityCache, getCachedEntities, getEntityCacheWatermark,
   createValidationSnapshot, getValidationSnapshots, getActiveValidationRuns,
-  getValidationRunForPeriod, getValidationGateAssurances, setValidationGateAssurance
+  getValidationRunForPeriod, getValidationGateAssurances, setValidationGateAssurance,
+  getAllStaff, getStaffByMtakpiName, getStaffById, createStaff, createStaffBulk, deactivateStaff, reactivateStaff,
+  touchStaffLastLogin, staffHasOrgAccess, getOrgIdsForStaff, getStaffForOrg,
+  replaceStaffOrgAccess, toggleStaffOrgAccess,
+  updateStaffRole, updateStaffInitials, setStaffCanManageSettings, deleteStaff,
+  saveInsightData, getInsightData, getAllInsightData,
+  getInsightAccountMappings, setInsightAccountMapping,
+  getInsightCategorySettings, setInsightCategorySetting,
+  getInsightWidgetVisibility, setInsightWidgetVisibility,
+  getInsightSettingsKv, setInsightSettingsKv,
+  getInsightCorpTaxRateBands, addInsightCorpTaxRateBand, deleteInsightCorpTaxRateBand,
+  getInsightCorpTaxAdjustments, setInsightCorpTaxAdjustment, deleteInsightCorpTaxAdjustment,
 };

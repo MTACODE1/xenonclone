@@ -2,68 +2,385 @@
 
 <div class="page-header">
   <h4>Settings</h4>
-  <p>Configure your practice details and preferences</p>
+  <p>Configure your practice details, bandings, tags and call-to-action buttons</p>
+</div>
+
+<%# Tab nav %>
+<div class="settings-tabs">
+  <a href="/settings?tab=practice" class="settings-tab <%= tab === 'practice' ? 'active' : '' %>">Practice</a>
+  <a href="/settings?tab=banding&metric=turnover" class="settings-tab <%= tab === 'banding' ? 'active' : '' %>">Activity Banding</a>
+  <a href="/settings?tab=tags" class="settings-tab <%= tab === 'tags' ? 'active' : '' %>">Tag Manager</a>
+  <a href="/settings?tab=cta" class="settings-tab <%= tab === 'cta' ? 'active' : '' %>">Call To Action</a>
 </div>
 
 <% if (query && query.saved) { %>
-  <div class="alert alert-success">Settings saved successfully.</div>
+  <div class="alert alert-success" style="margin-top:12px;">Settings saved successfully.</div>
 <% } %>
 <% if (query && query.ch_key_error) { %>
-  <div class="alert alert-danger">That doesn't look like a Companies House API key — it looks like a web address. Paste the key itself from your application's "Create new key" screen. Nothing was saved.</div>
+  <div class="alert alert-danger" style="margin-top:12px;">That doesn't look like a Companies House API key. Paste the key itself, not a URL.</div>
 <% } %>
 
-<div class="card" style="max-width: 600px;">
-  <div class="card-header">
-    <h5>Practice Configuration</h5>
-  </div>
-  <form method="POST" action="/settings" enctype="multipart/form-data" class="card-body">
-    <div class="form-group">
-      <label class="form-label">Practice Name</label>
-      <input type="text" name="practice_name" value="<%= settings.practiceName %>" class="form-input" style="width: 100%;">
-    </div>
-    <div class="form-group">
-      <label class="form-label">Practice Logo</label>
-      <% if (settings.practiceLogo) { %>
-        <img src="<%= settings.practiceLogo %>" style="height: 48px; margin-bottom: 8px; border-radius: 7px; border: 1px solid var(--divider);" alt="Logo">
-      <% } %>
-      <input type="file" name="logo" accept="image/*" class="form-input" style="padding: 6px;">
-    </div>
-    <div class="form-group">
-      <label class="form-label">Default Sync Period</label>
-      <select name="default_sync_period" class="form-select" style="width: 100%;">
-        <option value="since_lock_date" <%= settings.defaultSyncPeriod === 'since_lock_date' ? 'selected' : '' %>>Since Lock Date</option>
-        <option value="current_month" <%= settings.defaultSyncPeriod === 'current_month' ? 'selected' : '' %>>Current Month</option>
-        <option value="previous_month" <%= settings.defaultSyncPeriod === 'previous_month' ? 'selected' : '' %>>Previous Month</option>
-        <option value="rolling_12_months" <%= settings.defaultSyncPeriod === 'rolling_12_months' ? 'selected' : '' %>>Rolling 12 Months</option>
-        <option value="current_fy" <%= settings.defaultSyncPeriod === 'current_fy' ? 'selected' : '' %>>Current Financial Year</option>
-        <option value="previous_fy" <%= settings.defaultSyncPeriod === 'previous_fy' ? 'selected' : '' %>>Previous Financial Year</option>
-      </select>
-    </div>
-    <div class="form-group">
-      <label class="form-label">Companies House API key</label>
-      <input type="password" name="companies_house_api_key" autocomplete="off"
-        placeholder="<%= settings.companiesHouseKeySet ? '•••••••• (saved — leave blank to keep)' : 'Paste your free API key' %>"
-        class="form-input" style="width: 100%;">
-      <p style="font-size: 0.72rem; color: #7C8FAC; margin-top: 6px;">
-        Free key from <a href="https://developer.company-information.service.gov.uk/" target="_blank" rel="noopener">developer.company-information.service.gov.uk</a>.
-        Enables company status and filing-deadline lookups on each client.
-        <% if (settings.companiesHouseKeySet) { %>
-          <label style="display:inline-flex;align-items:center;gap:4px;margin-top:6px;">
-            <input type="checkbox" name="clear_companies_house_api_key" value="1"> Remove saved key
-          </label>
+<%# ===== PRACTICE TAB ===== %>
+<% if (tab === 'practice') { %>
+
+<div class="settings-layout">
+  <div class="card" style="max-width:600px;">
+    <div class="card-header"><h5>Practice Configuration</h5></div>
+    <form method="POST" action="/settings" enctype="multipart/form-data" class="card-body">
+      <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+      <div class="form-group">
+        <label class="form-label">Practice Name</label>
+        <input type="text" name="practice_name" value="<%= settings.practiceName %>" class="form-input" style="width:100%;">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Practice Logo</label>
+        <% if (settings.practiceLogo) { %>
+          <img src="<%= settings.practiceLogo %>" style="height:48px;margin-bottom:8px;border-radius:7px;border:1px solid var(--divider);" alt="Logo">
         <% } %>
-      </p>
+        <input type="file" name="logo" accept="image/*" class="form-input" style="padding:6px;">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Default Sync Period</label>
+        <select name="default_sync_period" class="form-select" style="width:100%;">
+          <option value="since_lock_date" <%= settings.defaultSyncPeriod === 'since_lock_date' ? 'selected' : '' %>>Since Lock Date</option>
+          <option value="current_month" <%= settings.defaultSyncPeriod === 'current_month' ? 'selected' : '' %>>Current Month</option>
+          <option value="previous_month" <%= settings.defaultSyncPeriod === 'previous_month' ? 'selected' : '' %>>Previous Month</option>
+          <option value="rolling_12_months" <%= settings.defaultSyncPeriod === 'rolling_12_months' ? 'selected' : '' %>>Rolling 12 Months</option>
+          <option value="current_fy" <%= settings.defaultSyncPeriod === 'current_fy' ? 'selected' : '' %>>Current Financial Year</option>
+          <option value="previous_fy" <%= settings.defaultSyncPeriod === 'previous_fy' ? 'selected' : '' %>>Previous Financial Year</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Companies House API Key</label>
+        <input type="password" name="companies_house_api_key" autocomplete="off"
+          placeholder="<%= settings.companiesHouseKeySet ? '•••••••• (saved — leave blank to keep)' : 'Paste your free API key' %>"
+          class="form-input" style="width:100%;">
+        <p style="font-size:0.72rem;color:#7C8FAC;margin-top:6px;">
+          Free key from <a href="https://developer.company-information.service.gov.uk/" target="_blank" rel="noopener">developer.company-information.service.gov.uk</a>.
+          <% if (settings.companiesHouseKeySet) { %>
+            <label style="display:inline-flex;align-items:center;gap:4px;margin-top:6px;">
+              <input type="checkbox" name="clear_companies_house_api_key" value="1"> Remove saved key
+            </label>
+          <% } %>
+        </p>
+      </div>
+      <button type="submit" class="btn btn-primary">Save Settings</button>
+    </form>
+  </div>
+
+  <div class="card" style="max-width:600px;margin-top:20px;">
+    <div class="card-header"><h5>Xenon Cancellation Safety</h5></div>
+    <div class="card-body">
+      <p style="margin-bottom:12px;">Xenon must remain active until real-client parity and workflow evidence pass the auditable validation gate.</p>
+      <a href="/validation" class="btn btn-outlined">Open Validation Gate</a>
     </div>
-    <button type="submit" class="btn btn-primary">Save Settings</button>
+  </div>
+</div>
+
+<%# ===== ACTIVITY BANDING TAB ===== %>
+<% } else if (tab === 'banding') { %>
+
+<div class="settings-layout banding-layout">
+  <%# Left metric nav %>
+  <div class="banding-metric-nav">
+    <% bandingMetrics.forEach(m => { %>
+      <a href="/settings?tab=banding&metric=<%= m.key %>"
+         class="banding-metric-item <%= metric === m.key ? 'active' : '' %>">
+        <%= m.label %>
+      </a>
+    <% }) %>
+  </div>
+
+  <%# Right banding editor %>
+  <div style="flex:1;">
+    <%
+      const metricMeta = bandingMetrics.find(m => m.key === metric);
+      const metricTitles = {
+        turnover: 'Sales Turnover',
+        total_transaction: 'Total Transaction Count',
+        invoice_count: 'Customer Sales Invoice Count',
+        bill_count: 'Supplier Bill Count',
+        bank_activity_count: 'Bank Transaction Count',
+      };
+    %>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <h5 style="margin:0;">Package Bandings based on <%= metricTitles[metric] || metricMeta.label %></h5>
+      <form method="POST" action="/settings/banding/reset" style="display:inline;">
+        <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+        <input type="hidden" name="metric" value="<%= metric %>">
+        <button type="submit" class="btn btn-ghost-error btn-sm" onclick="return confirm('Reset to default bandings?')">Revert to default bandings</button>
+      </form>
+    </div>
+
+    <form method="POST" action="/settings/banding" id="bandingForm">
+      <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+      <input type="hidden" name="metric" value="<%= metric %>">
+
+      <div class="card" style="padding:0;overflow:hidden;">
+        <table class="data-table banding-table" id="bandingRows">
+          <thead>
+            <tr>
+              <th style="width:35%;">Banding / Package Name</th>
+              <th style="width:18%;">From</th>
+              <th style="width:18%;">To</th>
+              <th style="width:12%;">Colour</th>
+              <th style="width:8%;"></th>
+            </tr>
+          </thead>
+          <tbody id="bandingBody">
+            <% bandings.forEach((band, i) => { %>
+              <tr class="banding-row">
+                <td><input type="text" name="band_name" value="<%= band.name %>" class="form-input banding-input" placeholder="Package <%= i+1 %>"></td>
+                <td>
+                  <% if (i === 0) { %>
+                    <input type="number" name="band_from" value="0" class="form-input banding-input" readonly style="background:var(--surface-2);color:var(--text-muted);">
+                  <% } else { %>
+                    <input type="number" name="band_from" value="<%= band.from %>" class="form-input banding-input band-from" readonly style="background:var(--surface-2);color:var(--text-muted);">
+                  <% } %>
+                </td>
+                <td>
+                  <% if (band.to == null) { %>
+                    <input type="text" name="band_to" value="" class="form-input banding-input band-to" placeholder="<%= band.from %>+" readonly style="background:var(--surface-2);color:var(--text-muted);">
+                  <% } else if (i === 0) { %>
+                    <input type="number" name="band_to" value="<%= band.to %>" class="form-input banding-input band-to" readonly style="background:var(--surface-2);color:var(--text-muted);">
+                  <% } else { %>
+                    <input type="number" name="band_to" value="<%= band.to %>" class="form-input banding-input band-to" oninput="recalcFroms()">
+                  <% } %>
+                </td>
+                <td>
+                  <input type="color" name="band_color" value="<%= band.color || '#ffffff' %>" class="banding-color-input">
+                </td>
+                <td>
+                  <% if (i > 0 && band.to != null) { %>
+                    <button type="button" class="banding-remove-btn" onclick="removeRow(this)" title="Remove">X</button>
+                  <% } %>
+                </td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+
+      <div style="margin-top:14px;display:flex;gap:10px;align-items:center;">
+        <button type="button" class="btn btn-outlined btn-sm" onclick="addBandRow()" style="font-size:1.2rem;line-height:1;padding:4px 14px;">+</button>
+        <button type="submit" class="btn btn-primary">Save Bandings</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+function recalcFroms() {
+  const rows = document.querySelectorAll('#bandingBody .banding-row');
+  rows.forEach((row, i) => {
+    if (i === 0) return;
+    const prevTo = rows[i - 1].querySelector('.band-to');
+    const thisFrom = row.querySelector('.band-from');
+    if (prevTo && thisFrom && prevTo.value !== '') {
+      thisFrom.value = parseInt(prevTo.value, 10) + 1;
+    }
+  });
+}
+
+function removeRow(btn) {
+  const row = btn.closest('tr');
+  row.remove();
+  recalcFroms();
+  // Make the new last row's To field readonly (open-ended)
+  const rows = document.querySelectorAll('#bandingBody .banding-row');
+  if (rows.length) {
+    const lastTo = rows[rows.length - 1].querySelector('.band-to');
+    if (lastTo) {
+      lastTo.value = '';
+      lastTo.placeholder = lastTo.closest('tr').querySelector('.band-from').value + '+';
+      lastTo.setAttribute('readonly', true);
+      lastTo.style.background = 'var(--surface-2)';
+      lastTo.style.color = 'var(--text-muted)';
+    }
+    const lastRemove = rows[rows.length - 1].querySelector('.banding-remove-btn');
+    if (lastRemove) lastRemove.remove();
+  }
+}
+
+function addBandRow() {
+  const tbody = document.getElementById('bandingBody');
+  const rows = tbody.querySelectorAll('.banding-row');
+  const lastRow = rows[rows.length - 1];
+  const rowCount = rows.length + 1;
+  const lastFromEl = lastRow.querySelector('.band-from');
+  const prevFrom = lastFromEl ? parseInt(lastFromEl.value, 10) : 0;
+
+  // Make previous last row editable (it now has a To)
+  const prevLastTo = lastRow.querySelector('.band-to');
+  const defaultTo = prevFrom + 99;
+  if (prevLastTo) {
+    prevLastTo.type = 'number';
+    prevLastTo.value = defaultTo;
+    prevLastTo.placeholder = '';
+    prevLastTo.removeAttribute('readonly');
+    prevLastTo.style.background = '';
+    prevLastTo.style.color = '';
+    prevLastTo.setAttribute('oninput', 'recalcFroms()');
+  }
+  // Add remove btn to previous last row
+  const prevLastTd = lastRow.querySelector('td:last-child');
+  if (prevLastTd && !prevLastTd.querySelector('.banding-remove-btn')) {
+    prevLastTd.innerHTML = '<button type="button" class="banding-remove-btn" onclick="removeRow(this)" title="Remove">X</button>';
+  }
+
+  const newFrom = defaultTo + 1;
+  const tr = document.createElement('tr');
+  tr.className = 'banding-row';
+  tr.innerHTML = `
+    <td><input type="text" name="band_name" value="Package ${rowCount}" class="form-input banding-input"></td>
+    <td><input type="number" name="band_from" value="${newFrom}" class="form-input banding-input band-from" readonly style="background:var(--surface-2);color:var(--text-muted);"></td>
+    <td><input type="text" name="band_to" value="" class="form-input banding-input band-to" placeholder="${newFrom}+" readonly style="background:var(--surface-2);color:var(--text-muted);"></td>
+    <td><input type="color" name="band_color" value="#000000" class="banding-color-input"></td>
+    <td></td>
+  `;
+  tbody.appendChild(tr);
+}
+</script>
+
+<%# ===== TAG MANAGER TAB ===== %>
+<% } else if (tab === 'tags') { %>
+
+<div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;margin-bottom:16px;">
+  <input type="text" id="tagSearch" placeholder="Search Clients..." class="form-input" style="width:220px;">
+  <form method="POST" action="/settings/tags/create" style="display:flex;gap:8px;align-items:center;margin-left:auto;">
+    <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+    <input type="text" name="tag_name" placeholder="New tag name..." class="form-input" style="width:180px;" required>
+    <button type="submit" class="btn btn-primary">Create Tag</button>
   </form>
 </div>
 
-<div class="card" style="max-width: 600px; margin-top: 20px;">
-  <div class="card-header"><h5>Xenon Cancellation Safety</h5></div>
-  <div class="card-body">
-    <p style="margin-bottom: 12px;">Xenon must remain active until real-client parity and workflow evidence pass the auditable validation gate.</p>
-    <a href="/validation" class="btn btn-outlined">Open Validation Gate</a>
+<% if (!allTags.length) { %>
+  <div class="card">
+    <div class="empty-state">
+      <h5>No tags yet</h5>
+      <p>Create your first tag above and then assign it to clients.</p>
+    </div>
+  </div>
+<% } else { %>
+<div class="card" style="padding:0;overflow:auto;">
+  <table class="data-table tag-matrix-table" id="tagMatrix">
+    <thead>
+      <tr>
+        <th style="min-width:200px;position:sticky;left:0;z-index:2;background:var(--surface);">Business Name</th>
+        <% allTags.forEach(tag => { %>
+          <th style="text-align:center;min-width:130px;">
+            <span class="chip" style="background:<%= tagChipColor(tag) %>1a;color:<%= tagChipColor(tag) %>;"><%= tag %></span>
+            <form method="POST" action="/settings/tags/delete" style="display:inline;margin-left:4px;" onsubmit="return confirm('Delete tag \'<%= tag %>\'? It will be removed from all clients.')">
+              <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+              <input type="hidden" name="tag_name" value="<%= tag %>">
+              <button type="submit" class="banding-remove-btn" title="Delete tag">×</button>
+            </form>
+          </th>
+        <% }) %>
+      </tr>
+    </thead>
+    <tbody>
+      <% orgs.forEach(org => { %>
+        <tr class="tag-row" data-name="<%= org.name.toLowerCase() %>">
+          <td style="position:sticky;left:0;z-index:1;background:var(--surface);font-weight:500;">
+            <a href="/client/<%= org.xero_tenant_id %>"><%= org.name %></a>
+          </td>
+          <% allTags.forEach(tag => { %>
+            <td style="text-align:center;">
+              <form method="POST" action="/settings/tags/assign">
+                <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+                <input type="hidden" name="tenant_id" value="<%= org.xero_tenant_id %>">
+                <input type="hidden" name="tag_name" value="<%= tag %>">
+                <label class="toggle-switch" title="<%= org.tag === tag ? 'Remove tag' : 'Assign tag' %>">
+                  <input type="checkbox" onchange="this.form.submit()" <%= org.tag === tag ? 'checked' : '' %>>
+                  <span class="toggle-slider"></span>
+                </label>
+              </form>
+            </td>
+          <% }) %>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+</div>
+<% } %>
+
+<%
+function tagChipColor(tag) {
+  if (!tag) return '#94a3b8';
+  if (/^VAT[_ ]/i.test(tag) || /^VAT Exempt$/i.test(tag)) return '#7c3aed';
+  if (/^Complex[_ ]/i.test(tag)) return '#dc2626';
+  if (/^Non-VAT[_ ]/i.test(tag)) return '#16a34a';
+  return '#2563eb';
+}
+%>
+
+<script>
+document.getElementById('tagSearch').addEventListener('input', function() {
+  const q = this.value.toLowerCase();
+  document.querySelectorAll('.tag-row').forEach(row => {
+    row.style.display = !q || (row.dataset.name || '').includes(q) ? '' : 'none';
+  });
+});
+</script>
+
+<%# ===== CALL TO ACTION TAB ===== %>
+<% } else if (tab === 'cta') { %>
+
+<div class="card" style="padding:0;overflow:hidden;max-width:900px;">
+  <div class="card-header"><h5>Global Call To Action Settings</h5></div>
+  <div class="card-body" style="padding:0 0 16px;">
+    <p class="text-muted" style="padding:12px 20px 0;">
+      Create, edit, enable &amp; disable "Call To Action" buttons. Once enabled, they can appear on client dashboards and bookkeeping check pages.
+    </p>
+    <form method="POST" action="/settings/cta">
+      <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th style="width:80px;">Status</th>
+            <th style="width:120px;">Type</th>
+            <th style="width:180px;">Call To Action Button</th>
+            <th>Edit Button Label</th>
+            <th>Value / Link</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% ctaTypes.forEach(ct => { %>
+            <% const saved = ctaSettings[ct.type] || {}; %>
+            <tr>
+              <td>
+                <label class="toggle-switch">
+                  <input type="checkbox" name="cta_enabled_<%= ct.type %>" value="1" <%= saved.enabled ? 'checked' : '' %>>
+                  <span class="toggle-slider"></span>
+                </label>
+              </td>
+              <td><%= ct.label %></td>
+              <td>
+                <span class="btn btn-primary btn-sm" style="pointer-events:none;display:inline-block;min-width:140px;text-align:center;">
+                  <%= saved.label || ct.defaultBtn %>
+                </span>
+              </td>
+              <td>
+                <input type="text" name="cta_label_<%= ct.type %>" value="<%= saved.label || ct.defaultBtn %>"
+                  class="form-input" style="width:100%;">
+              </td>
+              <td>
+                <span class="text-muted" style="font-size:0.75rem;display:block;margin-bottom:4px;"><%= ct.placeholder %></span>
+                <input type="text" name="cta_value_<%= ct.type %>" value="<%= saved.value || '' %>"
+                  class="form-input" style="width:100%;" placeholder="<%= ct.placeholder %>">
+              </td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+      <div style="padding:12px 20px;">
+        <button type="submit" class="btn btn-primary">Save CTA Settings</button>
+      </div>
+    </form>
   </div>
 </div>
+
+<% } %>
 
 <%- include('partials/footer') %>

@@ -1,0 +1,628 @@
+<%- include('partials/header', { currentPage: 'client' }) %>
+
+<%
+function selectedFor(category) { return mappings[category] || []; }
+const accountsJson = JSON.stringify(accounts.map(a => ({ code: a.account_code, name: a.account_name })));
+const widgetLabels = {
+  sales_tracker: 'Sales Tracker', cash_health: 'Cash Health Check', bookkeeping_health: 'Bookkeeping Health Check',
+  profitability: 'Profitability', corp_tax_estimate: 'Corporation Tax Estimate', directors_loan: "Directors' Loan Accounts",
+  business_valuation: 'Business Valuation', working_capital: 'Working Capital Cycle', dividend_availability: 'Dividend Availability',
+};
+const navItems = [
+  ['sales-tracker', 'Sales Tracker'], ['cash-health', 'Cash Health Check'], ['directors-loan', "Directors' Loan Accounts"],
+  ['corp-tax', 'Corporation Tax Estimate'], ['business-valuation', 'Business Valuation'], ['dividend', 'Dividend Availability'],
+  ['working-capital', 'Working Capital Cycle'], ['widget-visibility', 'Show / Hide Dashboard Widgets'],
+];
+%>
+
+<style>
+.ins-shell { display: flex; gap: 24px; margin-top: 16px; align-items: flex-start; }
+.ins-sidenav {
+  width: 220px; flex-shrink: 0; background: #1a2942; border-radius: 10px; padding: 16px 0;
+  position: sticky; top: 16px;
+}
+.ins-sidenav-title { color: #fff; font-weight: 700; font-size: 0.85rem; padding: 4px 18px 10px; }
+.ins-sidenav a {
+  display: block; padding: 8px 18px; font-size: 0.8rem; color: #b7c3d6; text-decoration: none;
+}
+.ins-sidenav a:hover { color: #fff; background: rgba(255,255,255,0.06); }
+.ins-main { flex: 1; min-width: 0; }
+
+.ins-settings-section { margin-top: 20px; scroll-margin-top: 16px; }
+.ins-settings-section .card-header p { font-size: 0.78rem; color: #7C8FAC; margin-top: 4px; }
+.ins-cat-block { padding: 16px 20px; border-top: 1px solid #f2f6fa; }
+.ins-cat-block:first-child { border-top: none; }
+.ins-cat-title { font-weight: 600; font-size: 0.85rem; margin-bottom: 6px; color: #2A3547; }
+.ins-cat-help { font-size: 0.75rem; color: #7C8FAC; margin-bottom: 8px; }
+
+.ins-toggle { position: relative; display: inline-block; width: 38px; height: 21px; flex-shrink: 0; vertical-align: middle; }
+.ins-toggle input { opacity: 0; width: 0; height: 0; }
+.ins-toggle-slider { position: absolute; inset: 0; background: #d7dfe9; transition: .15s; border-radius: 21px; cursor: pointer; }
+.ins-toggle-slider::before {
+  content: ""; position: absolute; height: 15px; width: 15px; left: 3px; top: 3px;
+  background: #fff; transition: .15s; border-radius: 50%; box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+}
+.ins-toggle input:checked + .ins-toggle-slider { background: #2b6ca3; }
+.ins-toggle input:checked + .ins-toggle-slider::before { transform: translateX(17px); }
+.ins-toggle-row { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; }
+
+.chip-picker { margin-top: 4px; }
+.chip-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; background: #eef2f7; border: 1px solid #dbe3ec;
+  border-radius: 5px; padding: 3px 6px 3px 10px; font-size: 0.78rem; color: #2A3547;
+}
+.chip-x { border: none; background: none; cursor: pointer; color: #7C8FAC; font-size: 0.85rem; line-height: 1; padding: 2px; border-radius: 3px; }
+.chip-x:hover { background: #dbe3ec; color: #2A3547; }
+.chip-add-btn {
+  display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px;
+  background: #22c55e; color: #fff; border: none; border-radius: 5px; cursor: pointer; font-size: 0.9rem; line-height: 1;
+}
+.chip-add-wrap { position: relative; display: inline-block; }
+.chip-search {
+  position: absolute; top: 0; left: 0; z-index: 20; display: none; width: 260px;
+  border: 1px solid #dbe3ec; border-radius: 6px; padding: 6px 8px; font-size: 0.8rem;
+  background: #fff; box-shadow: 0 4px 14px rgba(0,0,0,0.12);
+}
+.chip-dropdown {
+  position: absolute; top: 34px; left: 0; z-index: 20; display: none; width: 260px; max-height: 220px; overflow: auto;
+  border: 1px solid #dbe3ec; border-radius: 6px; background: #fff; box-shadow: 0 4px 14px rgba(0,0,0,0.12);
+}
+.chip-option { padding: 6px 10px; font-size: 0.78rem; cursor: pointer; }
+.chip-option:hover { background: #f2f6fa; }
+.chip-empty { font-size: 0.75rem; color: #7C8FAC; font-style: italic; padding: 8px 10px; }
+
+.ch-row-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.ch-override-amount { border: 1px solid #dbe3ec; border-radius: 6px; padding: 5px 8px; font-size: 0.8rem; width: 110px; }
+.ch-override-amount:disabled { background: #f2f6fa; color: #7C8FAC; }
+
+.widget-vis-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.widget-vis-table th { text-align: left; padding: 8px 12px; background: #F2F6FA; font-size: 0.72rem; text-transform: uppercase; color: #7C8FAC; }
+.widget-vis-table td { padding: 8px 12px; border-top: 1px solid #f2f6fa; }
+
+/* Corp tax adjustment list rows (Account | % | ×) */
+.adj-list-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-top: 6px; }
+.adj-list-table th { text-align: left; padding: 6px 8px; font-size: 0.72rem; text-transform: uppercase; color: #7C8FAC; }
+.adj-list-table td { padding: 6px 8px; border-top: 1px solid #f2f6fa; vertical-align: middle; }
+.adj-pct-input { width: 70px; border: 1px solid #dbe3ec; border-radius: 5px; padding: 4px 6px; font-size: 0.8rem; }
+.adj-treatment-select { border: 1px solid #dbe3ec; border-radius: 5px; padding: 4px 6px; font-size: 0.78rem; max-width: 220px; }
+.adj-row-x { border: none; background: none; cursor: pointer; color: #7C8FAC; font-size: 0.95rem; }
+.adj-row-x:hover { color: #dc2626; }
+.rate-band-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-top: 6px; }
+.rate-band-table th { text-align: left; padding: 6px 8px; font-size: 0.72rem; text-transform: uppercase; color: #7C8FAC; }
+.rate-band-table td { padding: 6px 8px; border-top: 1px solid #f2f6fa; }
+</style>
+
+<div class="page-header">
+  <h4>Xenon Insight Settings — <%= org.name %></h4>
+  <p>Map which Xero accounts feed each Insight KPI. Leave a category unmapped to fall back to automatic detection by account name.</p>
+</div>
+
+<div style="margin-top:12px;">
+  <a href="/client/<%= org.xero_tenant_id %>?panel=insight" class="btn btn-outline-primary btn-sm">← Back to Insight</a>
+</div>
+
+<% if (query && query.saved) { %>
+  <div class="alert alert-success" style="margin-top:12px;">Insight settings saved. They'll apply on the next sync.</div>
+<% } %>
+
+<% if (!accounts || !accounts.length) { %>
+  <div class="card ins-settings-section"><div style="padding:24px 20px;color:#7C8FAC;font-size:0.875rem;">No accounts found yet — sync this client first.</div></div>
+<% } else { %>
+
+<div class="ins-shell">
+  <nav class="ins-sidenav">
+    <div class="ins-sidenav-title">Xenon Insight<br><span style="font-weight:400;color:#7C8FAC;">Dashboard &amp; Activity</span></div>
+    <% navItems.forEach(([id, label]) => { %>
+      <a href="#<%= id %>"><%= label %></a>
+    <% }); %>
+  </nav>
+
+  <div class="ins-main">
+<form method="POST" action="/client/<%= org.xero_tenant_id %>/insight/settings" id="insightSettingsForm">
+  <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+
+  <%
+  function renderAccountPicker(category) { %>
+    <div class="chip-picker" data-category="<%= category %>" data-selected='<%- JSON.stringify(selectedFor(category)) %>'></div>
+  <% }
+  %>
+
+  <!-- ============================================================ -->
+  <!-- SALES TRACKER -->
+  <!-- ============================================================ -->
+  <div class="card ins-settings-section" id="sales-tracker">
+    <div class="card-header"><h5>Sales Tracker</h5></div>
+    <div class="ins-cat-block" style="display:flex;gap:24px;flex-wrap:wrap;">
+      <div>
+        <div class="ins-cat-title">What do you want to base the monthly sales target figures on?</div>
+        <select name="target_basis" class="form-select" id="targetBasisSelect" style="width:240px;">
+          <option value="none" <%= (!target.basis || target.basis === 'none') ? 'selected' : '' %>>No Target Set</option>
+          <option value="fixed" <%= target.basis === 'fixed' ? 'selected' : '' %>>Manual Monthly Target Value</option>
+          <option value="previous_month" <%= target.basis === 'previous_month' ? 'selected' : '' %>>Previous Month</option>
+          <option value="avg3" <%= target.basis === 'avg3' ? 'selected' : '' %>>3 Month Average</option>
+          <option value="avg6" <%= target.basis === 'avg6' ? 'selected' : '' %>>6 Month Average</option>
+          <option value="avg12" <%= target.basis === 'avg12' ? 'selected' : '' %>>12 Month Average</option>
+          <option value="same_month_last_year" <%= target.basis === 'same_month_last_year' ? 'selected' : '' %>>Same Month, Previous Year*</option>
+        </select>
+        <div style="font-size:0.7rem;color:#7C8FAC;margin-top:4px;">*Needs 13+ months of sync history; falls back to No Target Set until then.</div>
+      </div>
+      <div id="fixedAmountWrap" style="display:<%= target.basis === 'fixed' ? 'block' : 'none' %>;">
+        <div class="ins-cat-title">Manual Monthly Target £</div>
+        <input type="number" step="0.01" min="0" name="target_fixed_amount"
+          value="<%= target.monthly_target != null ? target.monthly_target : '' %>"
+          class="form-input" style="width:160px;">
+      </div>
+      <div>
+        <div class="ins-cat-title">Target % Increase</div>
+        <input type="number" step="0.1" name="target_pct_increase"
+          value="<%= target.pct_increase != null ? target.pct_increase : 0 %>"
+          class="form-input" style="width:100px;">
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- CASH HEALTH CHECK -->
+  <!-- ============================================================ -->
+  <div class="card ins-settings-section" id="cash-health">
+    <div class="card-header">
+      <h5>Cash Health Check</h5>
+      <p>Which outgoing types to include, the accounts that fund each one, and an optional manual override for the cash requirement.</p>
+    </div>
+    <% cashHealthCategories.forEach(cat => {
+      const setting = categorySettings[cat.key] || { enabled: true, overrideEnabled: false, overrideValue: null };
+    %>
+    <div class="ins-cat-block">
+      <div class="ch-row-head">
+        <label class="ins-toggle-row">
+          <span class="ins-toggle">
+            <input type="checkbox" name="enabled_<%= cat.key %>" <%= setting.enabled ? 'checked' : '' %>>
+            <span class="ins-toggle-slider"></span>
+          </span>
+          Include
+        </label>
+        <div class="ins-cat-title" style="margin:0;min-width:130px;"><%= cat.label %></div>
+        <label class="ins-toggle-row">
+          <span class="ins-toggle">
+            <input type="checkbox" name="override_enabled_<%= cat.key %>" class="override-toggle" <%= setting.overrideEnabled ? 'checked' : '' %>>
+            <span class="ins-toggle-slider"></span>
+          </span>
+          Override
+        </label>
+        <input type="number" step="0.01" min="0" name="override_value_<%= cat.key %>"
+          value="<%= setting.overrideValue != null ? setting.overrideValue : '' %>" placeholder="Cash requirement £"
+          class="ch-override-amount" <%= setting.overrideEnabled ? '' : 'disabled' %>>
+      </div>
+      <% renderAccountPicker(cat.key) %>
+    </div>
+    <% }); %>
+    <div class="ins-cat-block">
+      <div class="ins-cat-title">Disregard the following bank accounts from the current cash balance</div>
+      <% renderAccountPicker('cash_disregard_banks') %>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- DIRECTORS' LOAN ACCOUNTS -->
+  <!-- ============================================================ -->
+  <div class="card ins-settings-section" id="directors-loan">
+    <div class="card-header"><h5>Directors' Loan Accounts</h5></div>
+    <div class="ins-cat-block">
+      <div class="ins-cat-help">Select which accounts represent loans to/from directors:</div>
+      <% renderAccountPicker('directors_loan') %>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- CORPORATION TAX ESTIMATE -->
+  <!-- ============================================================ -->
+  <div class="card ins-settings-section" id="corp-tax">
+    <div class="card-header"><h5>Corporation Tax Estimate</h5></div>
+    <div class="ins-cat-block">
+      <div class="alert alert-info" style="font-size:0.78rem;">
+        We strongly recommend involving your accountant when changing these settings. Add-backs and deductions apply
+        to the matching account's total for each financial year before tax is estimated; capital allowance treatment
+        is recorded here but not yet applied to the estimate (writing-down-allowance pools need multi-year tracking
+        we haven't built). Custom rate bands, once added, replace HMRC's standard small-profits-rate/marginal-relief
+        calculation entirely.
+      </div>
+
+      <div class="ins-cat-title" style="margin-top:16px;">Disallow / Add Back to Net Profit</div>
+      <table class="adj-list-table" id="addbackTable">
+        <thead><tr><th>Account</th><th>% to add back</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="chip-add-wrap" style="margin-top:6px;">
+        <button type="button" class="chip-add-btn" data-adj-add="addback">+</button>
+        <input type="text" class="chip-search" placeholder="Search accounts…">
+        <div class="chip-dropdown"></div>
+      </div>
+
+      <div class="ins-cat-title" style="margin-top:20px;">Deduct Other Items</div>
+      <table class="adj-list-table" id="deductTable">
+        <thead><tr><th>Account</th><th>% to deduct</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="chip-add-wrap" style="margin-top:6px;">
+        <button type="button" class="chip-add-btn" data-adj-add="deduct">+</button>
+        <input type="text" class="chip-search" placeholder="Search accounts…">
+        <div class="chip-dropdown"></div>
+      </div>
+
+      <div class="ins-cat-title" style="margin-top:20px;">Deduct Capital Allowances on Fixed Asset Additions</div>
+      <div style="font-size:0.72rem;color:#7C8FAC;margin-bottom:4px;">Recorded for reference — not yet applied to the estimate.</div>
+      <table class="adj-list-table" id="capallowTable">
+        <thead><tr><th>Account</th><th>Treatment</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="chip-add-wrap" style="margin-top:6px;">
+        <button type="button" class="chip-add-btn" data-adj-add="capallow">+</button>
+        <input type="text" class="chip-search" placeholder="Search accounts…">
+        <div class="chip-dropdown"></div>
+      </div>
+
+      <div class="ins-cat-title" style="margin-top:20px;">Rate of Corporation Tax</div>
+      <div style="font-size:0.72rem;color:#7C8FAC;margin-bottom:4px;">
+        Adding any band here overrides the built-in HMRC calculation for every financial year on or after its date.
+      </div>
+      <table class="rate-band-table">
+        <thead><tr><th>Profit on or after</th><th>Tax Rate %</th><th></th></tr></thead>
+        <tbody>
+          <% rateBands.forEach(b => { %>
+          <tr>
+            <td><%= b.effective_date %></td>
+            <td><%= b.rate_pct %>%</td>
+            <td><label style="display:flex;align-items:center;gap:4px;font-size:0.75rem;"><input type="checkbox" name="delete_rate_band" value="<%= b.id %>"> remove</label></td>
+          </tr>
+          <% }); %>
+          <tr>
+            <td><input type="date" name="new_rate_band_date" class="form-input" style="padding:4px 6px;"></td>
+            <td><input type="number" step="0.01" name="new_rate_band_pct" placeholder="%" class="adj-pct-input"></td>
+            <td style="font-size:0.75rem;color:#7C8FAC;">add new</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- BUSINESS VALUATION -->
+  <!-- ============================================================ -->
+  <div class="card ins-settings-section" id="business-valuation">
+    <div class="card-header"><h5>Business Valuation</h5></div>
+    <div class="ins-cat-block" style="display:flex;gap:28px;flex-wrap:wrap;">
+      <div>
+        <div class="ins-cat-title">Base the business valuation calculation on…</div>
+        <select name="valuation_model" class="form-select" style="width:260px;">
+          <option value="">Select a valuation model…</option>
+          <option value="current_profit" <%= kv.valuation_model === 'current_profit' ? 'selected' : '' %>>Current Annual Profit (last 12 months)</option>
+          <option value="current_sales" <%= kv.valuation_model === 'current_sales' ? 'selected' : '' %>>Current Annual Sales (last 12 months)</option>
+          <option value="net_asset_value" <%= kv.valuation_model === 'net_asset_value' ? 'selected' : '' %>>Current Net Asset Value</option>
+        </select>
+      </div>
+      <div>
+        <div class="ins-cat-title">But disregard the following accounts…</div>
+        <% renderAccountPicker('valuation_disregard') %>
+      </div>
+      <div>
+        <div class="ins-cat-title">And then apply a multiple of…</div>
+        <input type="number" step="0.01" min="0" name="valuation_multiple"
+          value="<%= kv.valuation_multiple != null ? kv.valuation_multiple : 1 %>" class="form-input" style="width:100px;">
+        <div style="font-size:0.7rem;color:#7C8FAC;margin-top:4px;">to reach a business valuation</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- DIVIDEND AVAILABILITY -->
+  <!-- ============================================================ -->
+  <div class="card ins-settings-section" id="dividend">
+    <div class="card-header"><h5>Dividend Availability</h5></div>
+    <div class="ins-cat-block">
+      <div class="ins-cat-help">Select which accounts represent dividends paid to shareholders:</div>
+      <% renderAccountPicker('dividend') %>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- WORKING CAPITAL CYCLE -->
+  <!-- ============================================================ -->
+  <div class="card ins-settings-section" id="working-capital">
+    <div class="card-header"><h5>Working Capital Cycle</h5></div>
+    <div class="ins-cat-block">
+      <div class="ins-cat-help">Select the accounts which form part of the working capital cycle calculation:</div>
+      <div class="ins-cat-title">Trade Debtors</div>
+      <% renderAccountPicker('wc_trade_debtors') %>
+      <div class="ins-cat-title" style="margin-top:14px;">Stock Held</div>
+      <% renderAccountPicker('wc_stock') %>
+      <div class="ins-cat-title" style="margin-top:14px;">Trade Creditors</div>
+      <% renderAccountPicker('wc_trade_creditors') %>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- SHOW / HIDE DASHBOARD WIDGETS -->
+  <!-- ============================================================ -->
+  <div class="card ins-settings-section" id="widget-visibility">
+    <div class="card-header"><h5>Show / Hide Dashboard Widgets</h5></div>
+    <table class="widget-vis-table">
+      <thead><tr><th>Widget</th><th>Dashboard</th><th>PDF Report</th></tr></thead>
+      <tbody>
+        <% widgetKeys.forEach(key => {
+          const vis = widgetVisibility[key] || { visible: true, pdfVisible: true };
+        %>
+        <tr>
+          <td><%= widgetLabels[key] || key %></td>
+          <td>
+            <span class="ins-toggle">
+              <input type="checkbox" name="widget_<%= key %>" <%= vis.visible !== false ? 'checked' : '' %>>
+              <span class="ins-toggle-slider"></span>
+            </span>
+          </td>
+          <td>
+            <span class="ins-toggle">
+              <input type="checkbox" name="widget_pdf_<%= key %>" <%= vis.pdfVisible !== false ? 'checked' : '' %>>
+              <span class="ins-toggle-slider"></span>
+            </span>
+          </td>
+        </tr>
+        <% }); %>
+      </tbody>
+    </table>
+    <div style="padding:10px 20px;font-size:0.72rem;color:#7C8FAC;">Akrio doesn't generate an Insight PDF report yet — the PDF Report column is stored for when it does.</div>
+  </div>
+
+  <div class="ins-settings-section" style="padding-bottom:40px;">
+    <button type="submit" class="btn btn-primary">Save Insight Settings</button>
+  </div>
+</form>
+  </div>
+</div>
+
+<script>
+(function() {
+  const ALL_ACCOUNTS = <%- accountsJson %>;
+  const CODE_TO_NAME = <%- JSON.stringify(codeToName) %>;
+
+  function initChipPicker(el) {
+    const category = el.dataset.category;
+    let selected = [];
+    try { selected = JSON.parse(el.dataset.selected || '[]'); } catch { selected = []; }
+
+    const listEl = document.createElement('div');
+    listEl.className = 'chip-list';
+    const addWrap = document.createElement('div');
+    addWrap.className = 'chip-add-wrap';
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'chip-add-btn';
+    addBtn.textContent = '+';
+    const searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.className = 'chip-search';
+    searchInput.placeholder = 'Search accounts…';
+    const dropdown = document.createElement('div');
+    dropdown.className = 'chip-dropdown';
+    addWrap.appendChild(addBtn);
+    addWrap.appendChild(searchInput);
+    addWrap.appendChild(dropdown);
+    el.appendChild(listEl);
+    el.appendChild(addWrap);
+
+    function render() {
+      listEl.innerHTML = '';
+      el.querySelectorAll('input[type="hidden"]').forEach(n => n.remove());
+      selected.forEach(code => {
+        const acc = ALL_ACCOUNTS.find(a => a.code === code);
+        const label = acc ? `${acc.code} — ${acc.name}` : code;
+        const chip = document.createElement('span');
+        chip.className = 'chip';
+        chip.appendChild(document.createTextNode(label));
+        const x = document.createElement('button');
+        x.type = 'button';
+        x.className = 'chip-x';
+        x.textContent = '×';
+        x.addEventListener('click', () => { selected = selected.filter(c => c !== code); render(); });
+        chip.appendChild(x);
+        listEl.appendChild(chip);
+
+        const hidden = document.createElement('input');
+        hidden.type = 'hidden';
+        hidden.name = `accounts_${category}`;
+        hidden.value = code;
+        el.insertBefore(hidden, listEl);
+      });
+    }
+
+    function renderDropdown(query) {
+      const q = query.toLowerCase();
+      const matches = ALL_ACCOUNTS
+        .filter(a => !selected.includes(a.code))
+        .filter(a => !q || a.code.toLowerCase().includes(q) || a.name.toLowerCase().includes(q))
+        .slice(0, 30);
+      dropdown.innerHTML = '';
+      if (!matches.length) {
+        const empty = document.createElement('div');
+        empty.className = 'chip-empty';
+        empty.textContent = 'No matching accounts';
+        dropdown.appendChild(empty);
+      } else {
+        matches.forEach(a => {
+          const opt = document.createElement('div');
+          opt.className = 'chip-option';
+          opt.textContent = `${a.code} — ${a.name}`;
+          opt.addEventListener('click', () => {
+            selected.push(a.code);
+            searchInput.style.display = 'none';
+            dropdown.style.display = 'none';
+            render();
+          });
+          dropdown.appendChild(opt);
+        });
+      }
+      dropdown.style.display = 'block';
+    }
+
+    addBtn.addEventListener('click', () => {
+      searchInput.style.display = 'block';
+      searchInput.value = '';
+      searchInput.focus();
+      renderDropdown('');
+    });
+    searchInput.addEventListener('input', () => renderDropdown(searchInput.value));
+    searchInput.addEventListener('blur', () => {
+      setTimeout(() => { searchInput.style.display = 'none'; dropdown.style.display = 'none'; }, 150);
+    });
+
+    render();
+  }
+
+  document.querySelectorAll('.chip-picker').forEach(initChipPicker);
+
+  // Cash Health override: only editable when that row's Override toggle is on — and, matching
+  // Xenon, the account picker's Add button disables too (an overridden figure doesn't need
+  // mapped accounts feeding it).
+  document.querySelectorAll('.override-toggle').forEach(toggle => {
+    const block = toggle.closest('.ins-cat-block');
+    const amountInput = block.querySelector('.ch-override-amount');
+    const addBtn = block.querySelector('.chip-picker .chip-add-btn');
+    function sync() {
+      amountInput.disabled = !toggle.checked;
+      if (addBtn) { addBtn.disabled = toggle.checked; addBtn.style.opacity = toggle.checked ? '0.4' : '1'; }
+    }
+    toggle.addEventListener('change', sync);
+    sync();
+  });
+
+  const basisSelect = document.getElementById('targetBasisSelect');
+  const fixedWrap = document.getElementById('fixedAmountWrap');
+  if (basisSelect) {
+    basisSelect.addEventListener('change', () => {
+      fixedWrap.style.display = basisSelect.value === 'fixed' ? 'block' : 'none';
+    });
+  }
+
+  // ---- Corp tax adjustment lists (addback / deduct / capital allowance) ----
+  const ADJ_CONFIG = {
+    addback:  { tableId: 'addbackTable', codeField: 'addback_code', pctField: 'addback_pct', initial: <%- JSON.stringify(addbacks) %>, hasTreatment: false },
+    deduct:   { tableId: 'deductTable', codeField: 'deduct_code', pctField: 'deduct_pct', initial: <%- JSON.stringify(deductions) %>, hasTreatment: false },
+    capallow: { tableId: 'capallowTable', codeField: 'capallow_code', pctField: 'capallow_pct', treatmentField: 'capallow_treatment', initial: <%- JSON.stringify(capitalAllowances) %>, hasTreatment: true },
+  };
+  const TREATMENT_OPTIONS = [
+    ['', 'Please select capital allowance treatment'],
+    ['none', 'No Writing Down Allowance Available'],
+    ['general_pool_18', '18% General Pool Writing Down Allowance'],
+    ['special_pool_6', '6% Special Rate Pool Writing Down Allowance'],
+    ['custom', 'Custom %'],
+  ];
+
+  Object.keys(ADJ_CONFIG).forEach(key => {
+    const cfg = ADJ_CONFIG[key];
+    const table = document.getElementById(cfg.tableId);
+    const tbody = table.querySelector('tbody');
+    let rows = (cfg.initial || []).map(r => ({ code: r.account_code, pct: r.pct, treatment: r.treatment }));
+
+    function render() {
+      tbody.innerHTML = '';
+      rows.forEach((row, i) => {
+        const tr = document.createElement('tr');
+        const name = CODE_TO_NAME[row.code] || row.code;
+
+        const nameTd = document.createElement('td');
+        nameTd.textContent = name;
+        const hiddenCode = document.createElement('input');
+        hiddenCode.type = 'hidden'; hiddenCode.name = cfg.codeField; hiddenCode.value = row.code;
+        nameTd.appendChild(hiddenCode);
+        tr.appendChild(nameTd);
+
+        const midTd = document.createElement('td');
+        if (cfg.hasTreatment) {
+          const select = document.createElement('select');
+          select.className = 'adj-treatment-select';
+          select.name = cfg.treatmentField;
+          TREATMENT_OPTIONS.forEach(([val, label]) => {
+            const opt = document.createElement('option');
+            opt.value = val; opt.textContent = label;
+            if (row.treatment === val) opt.selected = true;
+            select.appendChild(opt);
+          });
+          select.addEventListener('change', () => { row.treatment = select.value; });
+          midTd.appendChild(select);
+          const hiddenPct = document.createElement('input');
+          hiddenPct.type = 'hidden'; hiddenPct.name = cfg.pctField; hiddenPct.value = row.pct != null ? row.pct : 100;
+          midTd.appendChild(hiddenPct);
+        } else {
+          const pctInput = document.createElement('input');
+          pctInput.type = 'number'; pctInput.step = '0.01'; pctInput.className = 'adj-pct-input';
+          pctInput.name = cfg.pctField;
+          pctInput.value = row.pct != null ? row.pct : 100;
+          pctInput.addEventListener('input', () => { row.pct = pctInput.value; });
+          midTd.appendChild(pctInput);
+        }
+        tr.appendChild(midTd);
+
+        const xTd = document.createElement('td');
+        const xBtn = document.createElement('button');
+        xBtn.type = 'button'; xBtn.className = 'adj-row-x'; xBtn.textContent = '×';
+        xBtn.addEventListener('click', () => { rows = rows.filter((_, j) => j !== i); render(); });
+        xTd.appendChild(xBtn);
+        tr.appendChild(xTd);
+
+        tbody.appendChild(tr);
+      });
+    }
+    render();
+
+    const addBtn = document.querySelector(`[data-adj-add="${key}"]`);
+    const wrap = addBtn.closest('.chip-add-wrap');
+    const searchInput = wrap.querySelector('.chip-search');
+    const dropdown = wrap.querySelector('.chip-dropdown');
+
+    function renderDropdown(query) {
+      const q = query.toLowerCase();
+      const selectedCodes = rows.map(r => r.code);
+      const matches = ALL_ACCOUNTS
+        .filter(a => !selectedCodes.includes(a.code))
+        .filter(a => !q || a.code.toLowerCase().includes(q) || a.name.toLowerCase().includes(q))
+        .slice(0, 30);
+      dropdown.innerHTML = '';
+      if (!matches.length) {
+        const empty = document.createElement('div');
+        empty.className = 'chip-empty';
+        empty.textContent = 'No matching accounts';
+        dropdown.appendChild(empty);
+      } else {
+        matches.forEach(a => {
+          const opt = document.createElement('div');
+          opt.className = 'chip-option';
+          opt.textContent = `${a.code} — ${a.name}`;
+          opt.addEventListener('click', () => {
+            rows.push({ code: a.code, pct: 100, treatment: '' });
+            searchInput.style.display = 'none';
+            dropdown.style.display = 'none';
+            render();
+          });
+          dropdown.appendChild(opt);
+        });
+      }
+      dropdown.style.display = 'block';
+    }
+
+    addBtn.addEventListener('click', () => {
+      searchInput.style.display = 'block';
+      searchInput.value = '';
+      searchInput.focus();
+      renderDropdown('');
+    });
+    searchInput.addEventListener('input', () => renderDropdown(searchInput.value));
+    searchInput.addEventListener('blur', () => {
+      setTimeout(() => { searchInput.style.display = 'none'; dropdown.style.display = 'none'; }, 150);
+    });
+  });
+})();
+</script>
+
+<% } %>
+
+<%- include('partials/footer') %>

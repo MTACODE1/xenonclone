@@ -72,7 +72,7 @@ test('filtering changes count and value while display-only findings never count'
   const scoreBeforeReview = db.prepare(`SELECT score FROM health_scores WHERE org_id = ? ORDER BY id DESC`).get(orgId).score;
   assert.equal(issue.count, 2);
   assert.equal(issue.potential_value_gbp, 150);
-  const all = getIssueFindings(issue.id, 1, 50, 'all');
+  const all = getIssueFindings(issue.id, orgId, 1, 50, 'all');
   assert.equal(all.total, 3);
 
   const firstKey = all.items.find(item => item.amount === 100).finding_key;
@@ -80,30 +80,30 @@ test('filtering changes count and value while display-only findings never count'
   const reviewed = getIssueByCheckType(orgId, 'duplicate_invoices');
   assert.equal(reviewed.count, 1);
   assert.equal(reviewed.potential_value_gbp, 50);
-  assert.equal(getIssueFindings(issue.id, 1, 50, 'dismissed').total, 1);
-  assert.equal(getIssueFindings(issue.id, 1, 50, 'active').total, 2);
+  assert.equal(getIssueFindings(issue.id, orgId, 1, 50, 'dismissed').total, 1);
+  assert.equal(getIssueFindings(issue.id, orgId, 1, 50, 'active').total, 2);
   const health = db.prepare(`
     SELECT score, score_breakdown_json FROM health_scores WHERE org_id = ? ORDER BY id DESC
   `).get(orgId);
   assert.ok(health.score > scoreBeforeReview);
   const breakdown = JSON.parse(health.score_breakdown_json);
   assert.equal(breakdown.observations.find(row => row.checkType === 'duplicate_invoices').count, 1);
-  assert.deepEqual(getIssueFindingSummary(issue.id), {
+  assert.deepEqual(getIssueFindingSummary(issue.id, orgId), {
     active: 2, dismissed: 1, ignored: 0, ok: 0,
   });
 });
 
 test('period OK resurfaces in a different period and review survives sync replacement', () => {
   let issue = getIssueByCheckType(orgId, 'duplicate_invoices');
-  const secondKey = getIssueFindings(issue.id, 1, 50, 'active').items
+  const secondKey = getIssueFindings(issue.id, orgId, 1, 50, 'active').items
     .find(item => !item.displayOnly).finding_key;
   setFindingReviewStates(orgId, 'duplicate_invoices', [secondKey], 'ok');
-  assert.equal(getIssueFindings(issue.id, 1, 50, 'ok').total, 1);
+  assert.equal(getIssueFindings(issue.id, orgId, 1, 50, 'ok').total, 1);
 
   deleteIssuesForOrg(orgId);
   issue = seed('period-2');
-  assert.equal(getIssueFindings(issue.id, 1, 50, 'ok').total, 0);
-  assert.equal(getIssueFindings(issue.id, 1, 50, 'dismissed').total, 1);
+  assert.equal(getIssueFindings(issue.id, orgId, 1, 50, 'ok').total, 0);
+  assert.equal(getIssueFindings(issue.id, orgId, 1, 50, 'dismissed').total, 1);
   assert.equal(issue.count, 1);
 
   const auditCount = db.prepare(`
@@ -114,15 +114,50 @@ test('period OK resurfaces in a different period and review survives sync replac
 
 test('expired ignore automatically returns to active filtering and aggregates', () => {
   const issue = getIssueByCheckType(orgId, 'duplicate_invoices');
-  const key = getIssueFindings(issue.id, 1, 50, 'active').items
+  const key = getIssueFindings(issue.id, orgId, 1, 50, 'active').items
     .find(item => !item.displayOnly).finding_key;
   setFindingReviewStates(orgId, 'duplicate_invoices', [key], 'ignored');
-  assert.equal(getIssueFindings(issue.id, 1, 50, 'ignored').total, 1);
+  assert.equal(getIssueFindings(issue.id, orgId, 1, 50, 'ignored').total, 1);
 
   db.prepare(`
     UPDATE finding_review_states SET ignored_until = datetime('now', '-1 day')
     WHERE org_id = ? AND check_type = ? AND finding_key = ?
   `).run(orgId, 'duplicate_invoices', key);
-  assert.equal(getIssueFindings(issue.id, 1, 50, 'ignored').total, 0);
+  assert.equal(getIssueFindings(issue.id, orgId, 1, 50, 'ignored').total, 0);
   assert.equal(getIssueByCheckType(orgId, 'duplicate_invoices').count, 1);
+});
+
+// Phase 5 financial-invariant check: count must equal active non-display-only findings, and value
+// must equal their exact sum, even at a one-penny boundary and with a credit-note-shaped (negative
+// underlying) amount — allocateFindingValues (checkRules.js) always stores the absolute value, so a
+// credit note's negative amount must never make the aggregate wrong or negative.
+test('count and value invariants hold at a one-penny boundary and for a negative (credit-note) amount', () => {
+  insertIssue({
+    org_id: orgId,
+    check_type: 'old_sales_credits',
+    importance: 'medium',
+    count: 3,
+    // Deliberately not a round number: 0.01 + 100.00 + 943.68 = 1043.69 exactly, at the penny.
+    potential_value_gbp: 1043.69,
+    detail_json: JSON.stringify([
+      { id: 'penny-boundary', remaining: 0.01 },
+      { id: 'credit-note-negative', remaining: -100.00 },
+      { id: 'ordinary', remaining: 943.68 },
+      { id: 'display-only-large', remaining: 500000, displayOnly: true },
+    ]),
+    period_checked: 'penny-boundary-period',
+  });
+  const issue = getIssueByCheckType(orgId, 'old_sales_credits');
+  assert.equal(issue.count, 3, 'display-only finding must not inflate count');
+  assert.ok(Math.abs(issue.potential_value_gbp - 1043.69) < 0.005,
+    `value must equal the sum of active findings' absolute amounts, to the penny (got ${issue.potential_value_gbp})`);
+
+  // getIssueFindings returns each finding's raw detail_json (the true, possibly-negative amount,
+  // as the UI legitimately shows a credit note) rather than the abs'd aggregation value — only the
+  // issue-level potential_value_gbp asserted above is the absolute exposure figure used for scoring.
+  const findings = getIssueFindings(issue.id, orgId, 1, 50, 'all').items;
+  assert.equal(findings.find(f => f.id === 'credit-note-negative').remaining, -100.00,
+    'the raw negative credit-note amount must survive to the finding detail, unmodified');
+  assert.equal(findings.find(f => f.id === 'display-only-large').displayOnly, true,
+    'the display-only finding must still be present and flagged, just excluded from count/value');
 });

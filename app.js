@@ -8,14 +8,22 @@ const cron = require('node-cron');
 const crypto = require('crypto');
 
 const { getDb } = require('./src/db/schema');
-const { getAllOrganisations, getSetting } = require('./src/db/queries');
+const { getAllOrganisations, getSetting, getStaffById } = require('./src/db/queries');
 const { syncOrganisation } = require('./src/services/xeroSync');
 const { startJob } = require('./src/services/syncJobs');
+const SqliteSessionStore = require('./src/services/sqliteSessionStore');
+const { bootstrapAdmin } = require('./src/services/bootstrapAdmin');
+const { isStaffManager, canAccessSettings } = require('./src/services/staffPermissions');
 
 // Init DB on startup
 getDb();
+bootstrapAdmin();
 
 const app = express();
+
+if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) {
+  throw new Error('SESSION_SECRET is required in production');
+}
 
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'src/views'));
@@ -33,17 +41,31 @@ const useLocalTlsServer = isSecureRedirect && process.env.NODE_ENV !== 'producti
 app.set('trust proxy', 1);
 
 app.use(session({
+  store: new SqliteSessionStore(),
   secret: process.env.SESSION_SECRET || 'xero-dashboard-secret',
   resave: false,
   saveUninitialized: false,
-  cookie: { secure: isSecureRedirect, maxAge: 24 * 60 * 60 * 1000 }
+  cookie: {
+    secure: isSecureRedirect,
+    httpOnly: true,
+    sameSite: 'lax',
+    maxAge: 24 * 60 * 60 * 1000,
+  }
 }));
+
+// Sweeps expired session rows hourly so the sessions table doesn't grow unbounded.
+setInterval(() => SqliteSessionStore.pruneExpired(), 60 * 60 * 1000).unref();
 
 app.use((req, res, next) => {
   if (!req.session.csrfToken) req.session.csrfToken = crypto.randomBytes(24).toString('hex');
   res.locals.csrfToken = req.session.csrfToken;
   res.locals.practiceName = getSetting('practice_name') || '';
   res.locals.cssVersion = '20260807';
+  res.locals.staffName = req.session.staffName || null;
+  res.locals.staffRole = req.session.staffRole || null;
+  res.locals.isStaffManager = isStaffManager(req.session.staffRole);
+  res.locals.canAccessSettings = res.locals.isStaffManager
+    || (req.session.staffId ? canAccessSettings(getStaffById(req.session.staffId)) : false);
   next();
 });
 
@@ -53,10 +75,24 @@ const dashboardRoutes = require('./src/routes/dashboard');
 const clientRoutes = require('./src/routes/client');
 const settingsRoutes = require('./src/routes/settings');
 const validationRoutes = require('./src/routes/validation');
+const staffAuthRoutes = require('./src/routes/staffAuth');
+const staffRoutes = require('./src/routes/staff');
+const { requireStaffLogin, requireStaffManager, requireSettingsAccess } = require('./src/middleware/staffAuth');
 
+app.use('/login', staffAuthRoutes); // reachable pre-auth
+app.use(requireStaffLogin); // everything below requires a staff session
+
+// /auth is Xero OAuth (connect/callback/disconnect a client's Xero org) — now implicitly
+// staff-gated by the requireStaffLogin above, since only a logged-in admin/staff clicking
+// "Connect Client" should ever start that flow.
 app.use('/auth', authRoutes);
+// Per-:tenantId access enforcement (resolveOrgAccess) is mounted INSIDE client.js itself via
+// router.use('/:tenantId', ...) — Express only populates req.params from a path pattern that
+// contains the named param, so it can't be applied here as plain middleware on the bare '/client'
+// prefix.
 app.use('/client', clientRoutes);
-app.use('/settings', settingsRoutes);
+app.use('/settings', requireSettingsAccess, settingsRoutes);
+app.use('/staff', requireStaffManager, staffRoutes);
 app.use('/validation', validationRoutes);
 app.use('/', dashboardRoutes);
 

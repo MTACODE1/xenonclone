@@ -86,17 +86,39 @@ test('filed-account comparison never reports clean without a Xero balance', () =
   assert.equal(filedAccountsComparison(1000, 990).hasIssue, true);
 });
 
-test('a whole-pound filing is not held to penny precision it was never filed at', () => {
-  // Every client whose accounts were filed to the nearest £1 was reporting the filing's own
-  // rounding as an opening-balance difference. Xenon reports all three of these as clean.
+test('opening balance differences use Xenon\'s documented default: a flat £1 threshold, not penny precision', () => {
+  // Xenon's own docs (opening-balance-differences): "a difference of £1 or more will result in
+  // an issue being flagged for your review" — a flat default, not conditional on whether the
+  // filed figure happens to carry pence. Every client whose accounts were filed to the nearest £1
+  // was previously reporting the filing's own rounding as an opening-balance difference; Xenon
+  // reports all three of these as clean, and they all fall within the £1 default too.
   assert.equal(filedAccountsComparison(-21385, -21385.25).hasIssue, false, '4X4&MORE £0.25');
   assert.equal(filedAccountsComparison(-2268, -2267.88).hasIssue, false, 'Handymanz £0.12');
   assert.equal(filedAccountsComparison(1000952, 1000952.99).hasIssue, false, 'Rose £0.99');
-  // The tolerance is rounding-sized only: a real difference still reports, as Xenon does for MBX.
+  // A real difference still reports, as Xenon does for MBX.
   assert.equal(filedAccountsComparison(1000952, 886562).hasIssue, true, 'MBX £114,390');
-  assert.equal(filedAccountsComparison(1000, 998.5).hasIssue, true, '£1.50 exceeds rounding');
-  // A filing that does carry pence was filed at that precision, so it keeps the penny tolerance.
-  assert.equal(filedAccountsComparison(1000.5, 1000.25).hasIssue, true);
+  assert.equal(filedAccountsComparison(1000, 998.5).hasIssue, true, '£1.50 exceeds the £1 default');
+  // A small difference on a filing that carries pence is still under the £1 default, so it's
+  // clean too — Xenon's threshold isn't penny precision just because the filing has pence.
+  assert.equal(filedAccountsComparison(1000.5, 1000.25).hasIssue, false);
+});
+
+test('opening balance threshold: an organisation override takes precedence, but NULL (unset) must fall through — not resolve to £0', () => {
+  // Number(null) is 0, not NaN — a genuinely-unset org column (what SQLite actually returns) must
+  // be checked for null explicitly, or a real £0.50 difference would wrongly flag for every client
+  // that has never touched this setting.
+  assert.equal(
+    filedAccountsComparison(1000, 999.5, null, { opening_balance_threshold_gbp: null }).hasIssue, false,
+    'unset org override must fall through to the £1 documented default, not resolve to £0'
+  );
+  assert.equal(
+    filedAccountsComparison(1000, 998, null, { opening_balance_threshold_gbp: 3 }).hasIssue, false,
+    '£2 difference stays clean under an explicit £3 organisation override'
+  );
+  assert.equal(
+    filedAccountsComparison(1000, 995, null, { opening_balance_threshold_gbp: 3 }).hasIssue, true,
+    '£5 difference exceeds an explicit £3 organisation override'
+  );
 });
 
 // --- Global one-to-one allocation ---
@@ -370,4 +392,289 @@ test('a stale not_configured bank_balance row cannot leak into opening_balance_d
   assert.notEqual(openingBalance.period_checked, 'not_configured');
   // And it is genuinely configured and clean (filed matches Xero exactly).
   assert.equal(openingBalance.count, 0);
+});
+
+// --- opening_balance_differences: every eligible filed year-end, not just the latest ---
+// Confirmed gap: the check used to reduce getFiledAccountsForOrg(orgId) to its first (newest) row,
+// so a client with two historical filings that BOTH differ from Xero could only ever surface one.
+// xeroSync.js already fetches a live Balance Sheet as-of each filing's own date (independently of
+// this check), so the data has always supported this — only the comparison itself was too narrow.
+
+test('opening_balance_differences flags every comparable filing with a genuine difference, not just the latest', () => {
+  const { getDb } = require('../src/db/schema');
+  const { getIssueByCheckType, upsertFiledAccounts, updateFiledAccountsXeroBalance } = require('../src/db/queries');
+  const db = getDb();
+  const orgId = Number(db.prepare(`
+    INSERT INTO organisations (xero_tenant_id, name) VALUES ('multi-filing-both-bad', 'Both Bad')
+  `).run().lastInsertRowid);
+
+  upsertFiledAccounts(orgId, { filingDate: '2024-12-31', netAssets: 1000, madeUpTo: '2024-12-31' });
+  updateFiledAccountsXeroBalance(orgId, '2024-12-31', 900); // £100 genuine difference
+  upsertFiledAccounts(orgId, { filingDate: '2025-12-31', netAssets: 2000, madeUpTo: '2025-12-31' });
+  updateFiledAccountsXeroBalance(orgId, '2025-12-31', 1950); // £50 genuine difference
+  recomputeEvidenceIssues(orgId);
+
+  const issue = getIssueByCheckType(orgId, 'opening_balance_differences');
+  assert.equal(issue.count, 2);
+  assert.equal(issue.potential_value_gbp, 150);
+  assert.equal(issue.period_checked, 'filed_accounts_2024-12-31,2025-12-31');
+  // With more than one finding, per-item detail lives in issue_findings (normalised), not the
+  // issues row's own detail_json — same pattern insertIssue uses everywhere else in the app.
+  const rows = db.prepare(`SELECT detail_json, finding_key FROM issue_findings WHERE issue_id = ?`).all(issue.id);
+  const details = rows.map(row => JSON.parse(row.detail_json));
+  assert.deepEqual(details.map(d => d.filingDate).sort(), ['2024-12-31', '2025-12-31']);
+  // Each filing must key as its own distinct finding, not collide with the other.
+  assert.equal(new Set(rows.map(row => row.finding_key)).size, 2);
+});
+
+test('opening_balance_differences only lists the filing(s) that actually differ, when one of several is clean', () => {
+  const { getDb } = require('../src/db/schema');
+  const { getIssueByCheckType, upsertFiledAccounts, updateFiledAccountsXeroBalance } = require('../src/db/queries');
+  const db = getDb();
+  const orgId = Number(db.prepare(`
+    INSERT INTO organisations (xero_tenant_id, name) VALUES ('multi-filing-one-clean', 'One Clean')
+  `).run().lastInsertRowid);
+
+  upsertFiledAccounts(orgId, { filingDate: '2024-12-31', netAssets: 1000, madeUpTo: '2024-12-31' });
+  updateFiledAccountsXeroBalance(orgId, '2024-12-31', 1000); // exact match — clean
+  upsertFiledAccounts(orgId, { filingDate: '2025-12-31', netAssets: 2000, madeUpTo: '2025-12-31' });
+  updateFiledAccountsXeroBalance(orgId, '2025-12-31', 1500); // £500 genuine difference
+  recomputeEvidenceIssues(orgId);
+
+  const issue = getIssueByCheckType(orgId, 'opening_balance_differences');
+  assert.equal(issue.count, 1);
+  assert.equal(issue.potential_value_gbp, 500);
+  const rows = db.prepare(`SELECT detail_json FROM issue_findings WHERE issue_id = ?`).all(issue.id);
+  assert.equal(rows.length, 1);
+  assert.equal(JSON.parse(rows[0].detail_json).filingDate, '2025-12-31');
+});
+
+test('opening_balance_differences stays pending (not a false clean) while any filing has no comparable Xero balance yet', () => {
+  const { getDb } = require('../src/db/schema');
+  const { getIssueByCheckType, upsertFiledAccounts, updateFiledAccountsXeroBalance } = require('../src/db/queries');
+  const db = getDb();
+  const orgId = Number(db.prepare(`
+    INSERT INTO organisations (xero_tenant_id, name) VALUES ('multi-filing-partial-sync', 'Partial Sync')
+  `).run().lastInsertRowid);
+
+  upsertFiledAccounts(orgId, { filingDate: '2024-12-31', netAssets: 1000, madeUpTo: '2024-12-31' });
+  updateFiledAccountsXeroBalance(orgId, '2024-12-31', 1000); // synced and comparable
+  upsertFiledAccounts(orgId, { filingDate: '2025-12-31', netAssets: 2000, madeUpTo: '2025-12-31' });
+  // The second filing's Xero balance is never synced — must not let the first filing's clean
+  // result silently report as if the whole check had run.
+  recomputeEvidenceIssues(orgId);
+
+  const issue = getIssueByCheckType(orgId, 'opening_balance_differences');
+  assert.equal(issue.count, null);
+  assert.equal(issue.period_checked, 'needs_sync');
+});
+
+// --- bank_balance: per-account exclusion ---
+// Xenon supports excluding individual bank accounts from Bank Balance — e.g. a dormant account an
+// accountant once entered a closing balance for but no longer wants flagged.
+
+test('an excluded bank account is left out of bank_balance entirely — no discrepancy, no needs_sync stall', () => {
+  const { getDb } = require('../src/db/schema');
+  const {
+    getIssueByCheckType, upsertBankReconciliationXeroBalance, updateStatementBalance,
+    setBankAccountExcluded,
+  } = require('../src/db/queries');
+  const db = getDb();
+  const orgId = Number(db.prepare(`
+    INSERT INTO organisations (xero_tenant_id, name) VALUES ('bank-exclusion-test', 'Bank Exclusion')
+  `).run().lastInsertRowid);
+
+  upsertBankReconciliationXeroBalance(orgId, 'bank-1', 'Main Account', 1000, '2026-01-01');
+  updateStatementBalance(orgId, 'bank-1', 900); // genuine £100 discrepancy
+  upsertBankReconciliationXeroBalance(orgId, 'bank-2', 'Dormant PayPal', 50, '2026-01-01');
+  updateStatementBalance(orgId, 'bank-2', 10); // also differs, but this account will be excluded
+
+  recomputeEvidenceIssues(orgId);
+  const before = getIssueByCheckType(orgId, 'bank_balance');
+  assert.equal(before.count, 2);
+
+  setBankAccountExcluded(orgId, 'bank-2', true);
+  recomputeEvidenceIssues(orgId);
+  const after = getIssueByCheckType(orgId, 'bank_balance');
+  assert.equal(after.count, 1);
+  assert.equal(after.potential_value_gbp, 100);
+
+  // Un-excluding restores it — exclusion is reversible, not a destructive action.
+  setBankAccountExcluded(orgId, 'bank-2', false);
+  recomputeEvidenceIssues(orgId);
+  assert.equal(getIssueByCheckType(orgId, 'bank_balance').count, 2);
+});
+
+test('excluding every evidenced bank account correctly reports not_configured, not a false-clean zero', () => {
+  const { getDb } = require('../src/db/schema');
+  const {
+    getIssueByCheckType, upsertBankReconciliationXeroBalance, updateStatementBalance,
+    setBankAccountExcluded,
+  } = require('../src/db/queries');
+  const db = getDb();
+  const orgId = Number(db.prepare(`
+    INSERT INTO organisations (xero_tenant_id, name) VALUES ('bank-exclusion-all', 'Exclude All')
+  `).run().lastInsertRowid);
+
+  upsertBankReconciliationXeroBalance(orgId, 'bank-1', 'Only Account', 1000, '2026-01-01');
+  updateStatementBalance(orgId, 'bank-1', 1000);
+  setBankAccountExcluded(orgId, 'bank-1', true);
+  recomputeEvidenceIssues(orgId);
+
+  const issue = getIssueByCheckType(orgId, 'bank_balance');
+  assert.equal(issue.count, null);
+  assert.equal(issue.period_checked, 'not_configured');
+});
+
+// --- not_vat_registered: persistence and cross-client isolation ---
+// Confirmed bug this fixes: sales_tax_missing/purchase_tax_missing write
+// period_checked: 'not_vat_registered' for a non-VAT-registered client, but before it was added to
+// RESERVED_PERIOD_LABELS it was silently overwritten by the active period key at persistence,
+// making it indistinguishable in storage from a VAT-registered client with zero genuine findings.
+// These tests exercise the actual persistence layer (insertIssue/getIssueByCheckType), not just
+// the pure resolvePeriodChecked function, and prove client A's VAT status cannot leak into client B.
+
+test('a non-VAT-registered client preserves not_vat_registered through the same insertIssue path xeroSync.js uses', () => {
+  const { getDb } = require('../src/db/schema');
+  const { insertIssue, getIssueByCheckType } = require('../src/db/queries');
+  const { resolvePeriodChecked, resolveCheckDisplayStatus } = require('../src/services/checkRules');
+  const db = getDb();
+  const orgId = Number(db.prepare(`
+    INSERT INTO organisations (xero_tenant_id, name) VALUES ('not-vat-registered', 'No VAT Ltd')
+  `).run().lastInsertRowid);
+
+  // Mirrors exactly what xeroSync.js's persistIssue wrapper does: the check writes its own intended
+  // label, then the caller runs it through resolvePeriodChecked against whatever the active period
+  // key happens to be for this sync.
+  const activePeriodKey = 'since_lock_date:2025-10-31:2026-09-07';
+  insertIssue({
+    org_id: orgId, check_type: 'sales_tax_missing', importance: 'medium', count: 0,
+    potential_value_gbp: 0, detail_json: '[]',
+    period_checked: resolvePeriodChecked('not_vat_registered', activePeriodKey),
+  });
+  insertIssue({
+    org_id: orgId, check_type: 'purchase_tax_missing', importance: 'medium', count: 0,
+    potential_value_gbp: 0, detail_json: '[]',
+    period_checked: resolvePeriodChecked('not_vat_registered', activePeriodKey),
+  });
+
+  const sales = getIssueByCheckType(orgId, 'sales_tax_missing');
+  const purchase = getIssueByCheckType(orgId, 'purchase_tax_missing');
+  assert.equal(sales.period_checked, 'not_vat_registered');
+  assert.equal(purchase.period_checked, 'not_vat_registered');
+  assert.equal(resolveCheckDisplayStatus(sales), 'not_applicable');
+  assert.equal(resolveCheckDisplayStatus(purchase), 'not_applicable');
+});
+
+test('a VAT-registered client with zero findings still displays OK, not not_applicable', () => {
+  const { getDb } = require('../src/db/schema');
+  const { insertIssue, getIssueByCheckType } = require('../src/db/queries');
+  const { resolvePeriodChecked, resolveCheckDisplayStatus } = require('../src/services/checkRules');
+  const db = getDb();
+  const orgId = Number(db.prepare(`
+    INSERT INTO organisations (xero_tenant_id, name) VALUES ('vat-registered-clean', 'Clean VAT Ltd')
+  `).run().lastInsertRowid);
+
+  const activePeriodKey = 'since_lock_date:2025-10-31:2026-09-07';
+  // A genuinely VAT-registered, genuinely clean client: the check writes no special label at all
+  // (undefined), so resolvePeriodChecked falls through to the real period key, exactly as for any
+  // other normally-computed check.
+  insertIssue({
+    org_id: orgId, check_type: 'sales_tax_missing', importance: 'medium', count: 0,
+    potential_value_gbp: 0, detail_json: '[]',
+    period_checked: resolvePeriodChecked(undefined, activePeriodKey),
+  });
+
+  const issue = getIssueByCheckType(orgId, 'sales_tax_missing');
+  assert.equal(issue.period_checked, activePeriodKey);
+  assert.equal(resolveCheckDisplayStatus(issue), 'ok');
+});
+
+test('a VAT-registered client with genuine findings still displays its issue count', () => {
+  const { getDb } = require('../src/db/schema');
+  const { insertIssue, getIssueByCheckType } = require('../src/db/queries');
+  const { resolvePeriodChecked, resolveCheckDisplayStatus } = require('../src/services/checkRules');
+  const db = getDb();
+  const orgId = Number(db.prepare(`
+    INSERT INTO organisations (xero_tenant_id, name) VALUES ('vat-registered-issues', 'Issues VAT Ltd')
+  `).run().lastInsertRowid);
+
+  const activePeriodKey = 'since_lock_date:2025-10-31:2026-09-07';
+  insertIssue({
+    org_id: orgId, check_type: 'purchase_tax_missing', importance: 'medium', count: 12,
+    potential_value_gbp: 340.5, detail_json: '[]',
+    period_checked: resolvePeriodChecked(undefined, activePeriodKey),
+  });
+
+  const issue = getIssueByCheckType(orgId, 'purchase_tax_missing');
+  assert.equal(issue.count, 12);
+  assert.equal(resolveCheckDisplayStatus(issue), 'issues');
+});
+
+test('client A being not-VAT-registered cannot affect client B\'s VAT check result — org-scoped isolation', () => {
+  const { getDb } = require('../src/db/schema');
+  const { insertIssue, getIssueByCheckType } = require('../src/db/queries');
+  const { resolvePeriodChecked, resolveCheckDisplayStatus } = require('../src/services/checkRules');
+  const db = getDb();
+  const orgA = Number(db.prepare(`
+    INSERT INTO organisations (xero_tenant_id, name) VALUES ('isolation-a-no-vat', 'Isolation A')
+  `).run().lastInsertRowid);
+  const orgB = Number(db.prepare(`
+    INSERT INTO organisations (xero_tenant_id, name) VALUES ('isolation-b-vat-issues', 'Isolation B')
+  `).run().lastInsertRowid);
+
+  const activePeriodKey = 'since_lock_date:2025-10-31:2026-09-07';
+  // Same check_type on both orgs, written in the same test — if org scoping ever broke, one write
+  // would clobber the other.
+  insertIssue({
+    org_id: orgA, check_type: 'sales_tax_missing', importance: 'medium', count: 0,
+    potential_value_gbp: 0, detail_json: '[]',
+    period_checked: resolvePeriodChecked('not_vat_registered', activePeriodKey),
+  });
+  insertIssue({
+    org_id: orgB, check_type: 'sales_tax_missing', importance: 'medium', count: 7,
+    potential_value_gbp: 250, detail_json: '[]',
+    period_checked: resolvePeriodChecked(undefined, activePeriodKey),
+  });
+
+  const issueA = getIssueByCheckType(orgA, 'sales_tax_missing');
+  const issueB = getIssueByCheckType(orgB, 'sales_tax_missing');
+  assert.equal(resolveCheckDisplayStatus(issueA), 'not_applicable');
+  assert.equal(resolveCheckDisplayStatus(issueB), 'issues');
+  assert.equal(issueB.count, 7);
+  assert.equal(issueB.period_checked, activePeriodKey);
+});
+
+test('full sync and single-check reanalysis both preserve not_vat_registered, regardless of which active period key is in force', () => {
+  // The full-sync path and the per-check reanalysis path both run through the exact same
+  // resolvePeriodChecked call in xeroSync.js's persistIssue wrapper — the only thing that varies
+  // between them is which period key happens to be active. Simulating an insertIssue write against
+  // two different active period keys (as a full sync vs. a reanalysis of a different selected
+  // period each would produce) proves preservation holds regardless.
+  const { getDb } = require('../src/db/schema');
+  const { insertIssue, getIssueByCheckType } = require('../src/db/queries');
+  const { resolvePeriodChecked, resolveCheckDisplayStatus } = require('../src/services/checkRules');
+  const db = getDb();
+  const orgId = Number(db.prepare(`
+    INSERT INTO organisations (xero_tenant_id, name) VALUES ('reanalysis-preserves', 'Reanalysis Ltd')
+  `).run().lastInsertRowid);
+
+  // Simulates a full sync (the org's normal since-lock-date period).
+  insertIssue({
+    org_id: orgId, check_type: 'purchase_tax_missing', importance: 'medium', count: 0,
+    potential_value_gbp: 0, detail_json: '[]',
+    period_checked: resolvePeriodChecked('not_vat_registered', 'since_lock_date:2025-10-31:2026-09-07'),
+  });
+  assert.equal(getIssueByCheckType(orgId, 'purchase_tax_missing').period_checked, 'not_vat_registered');
+
+  // Simulates a single-check reanalysis against a completely different selected period (e.g. the
+  // accountant previewed "Rolling 12 Months" and clicked Reanalyse on just this one check).
+  insertIssue({
+    org_id: orgId, check_type: 'purchase_tax_missing', importance: 'medium', count: 0,
+    potential_value_gbp: 0, detail_json: '[]',
+    period_checked: resolvePeriodChecked('not_vat_registered', 'rolling_12_months:2025-09-08:2026-09-07'),
+  });
+  const reanalysed = getIssueByCheckType(orgId, 'purchase_tax_missing');
+  assert.equal(reanalysed.period_checked, 'not_vat_registered');
+  assert.equal(resolveCheckDisplayStatus(reanalysed), 'not_applicable');
 });

@@ -50,12 +50,27 @@
   <table>
     <thead><tr><th>Check</th><th>Importance</th><th>Status</th><th>Active count</th><th>Potential value</th></tr></thead>
     <tbody>
-      <% checkDefs.forEach(check => { const unavailable = check.count == null; %>
+      <%
+      // check.displayStatus is computed once, server-side, by resolveCheckDisplayStatus — this
+      // report must read it rather than re-deriving status from count == null, which cannot tell
+      // not_applicable (count: 0, e.g. a non-VAT-registered client) from a genuinely clean check,
+      // nor tell unavailable/not_configured/not_synced apart (see src/views/client.ejs, which this
+      // mirrors, and src/services/checkRules.js/periodStatus.js for the full status model).
+      const statusLabel = {
+        unavailable: 'Unavailable', not_applicable: 'Not applicable',
+        not_configured: 'Not configured', not_synced: 'Not synced',
+      };
+      %>
+      <% checkDefs.forEach(check => {
+        const status = check.displayStatus;
+        const hasIssues = status === 'issues';
+        const isReviewable = hasIssues || status === 'ok';
+      %>
       <tr>
         <td><%= check.label %></td>
         <td><span class="badge <%= check.importance %>"><%= check.importance %></span></td>
-        <td class="<%= unavailable ? 'muted' : check.count > 0 ? 'issue' : 'ok' %>"><%= unavailable ? 'Not synced/configured' : check.count > 0 ? 'Review' : 'OK' %></td>
-        <td><%= unavailable ? '—' : Number(check.count).toLocaleString('en-GB') %></td>
+        <td class="<%= !isReviewable ? 'muted' : hasIssues ? 'issue' : 'ok' %>"><%= isReviewable ? (hasIssues ? 'Review' : 'OK') : statusLabel[status] %></td>
+        <td><%= isReviewable ? Number(check.count).toLocaleString('en-GB') : '—' %></td>
         <td><%= check.potential_value_gbp ? `£${Number(check.potential_value_gbp).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2})}` : '—' %></td>
       </tr>
       <% }) %>
@@ -65,6 +80,15 @@
   <h2>Issue details</h2>
   <% const issueChecks = checkDefs.filter(check => check.count > 0); %>
   <% if (!issueChecks.length) { %><p class="ok">No active issues were identified.</p><% } %>
+  <%
+    // Same raw-Xero-ID fields hidden here as in checkDetail.ejs — they exist only to build
+    // "Open in Xero" links elsewhere and duplicate the friendly name/description fields shown here.
+    const hiddenFindingFields = [
+      'finding_key', 'review_state', 'displayOnly',
+      'contactId', 'contactID', 'invoiceId', 'invoiceID', 'bankTransactionId', 'bankTransactionID',
+      'paymentId', 'paymentID', 'creditNoteId', 'creditNoteID', 'id1', 'id2',
+    ];
+  %>
   <% issueChecks.forEach(check => { const rows = reportFindings[check.type] || []; %>
     <section class="finding">
       <h3><%= check.label %> — <%= check.count %> active</h3>
@@ -75,7 +99,7 @@
           <% rows.forEach(row => { %>
             <tr>
               <td><%= row.review_state %><%= row.displayOnly ? ' (display only)' : '' %></td>
-              <td><%= Object.entries(row).filter(([key]) => !['finding_key','review_state','displayOnly'].includes(key)).map(([key,value]) => `${key}: ${Array.isArray(value) ? value.join(', ') : value ?? '—'}`).join(' · ') %></td>
+              <td><%= Object.entries(row).filter(([key]) => !hiddenFindingFields.includes(key)).map(([key,value]) => `${key}: ${Array.isArray(value) ? value.join(', ') : value ?? '—'}`).join(' · ') %></td>
             </tr>
           <% }) %>
           </tbody>

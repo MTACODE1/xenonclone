@@ -21,11 +21,12 @@ const {
 //   reports.banksummary  -> Reports/BankSummary (the Xero side of bank_balance). Previously relied
 //                    on the deprecated broad accounting.reports.read, so bank_balance would have
 //                    lost its Xero balance when broad scopes retire.
-function createXeroClient() {
+function createXeroClient(state) {
   return new XeroClient({
     clientId: process.env.XERO_CLIENT_ID,
     clientSecret: process.env.XERO_CLIENT_SECRET,
     redirectUris: [process.env.XERO_REDIRECT_URI],
+    state,
     scopes: [
       'openid', 'profile', 'email', 'offline_access',
       'accounting.settings.read',
@@ -148,6 +149,37 @@ function withTimeout(promise, ms) {
   });
 }
 
+// Xero's rate-limit documentation requires clients to honour the `Retry-After` header on a 429
+// rather than guess a backoff — it tells you exactly how long the current limit window has left,
+// which can be longer OR shorter than a blind exponential delay would produce. Xero sends it as an
+// integer number of seconds (not an HTTP-date), but this parses defensively either way and falls
+// through to the existing exponential backoff whenever the header is absent or unparseable — a
+// non-Xero transient error, or a 429 with no header at all, behaves exactly as before.
+function retryAfterMs(err) {
+  const raw = err?.response?.headers?.['retry-after'] ?? err?.response?.headers?.['Retry-After'];
+  if (raw == null) return null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const dateMs = Date.parse(raw);
+  return Number.isFinite(dateMs) ? Math.max(0, dateMs - Date.now()) : null;
+}
+
+// Split out so it's testable without waiting through real backoffs, and so the jitter policy lives
+// in one place. Xero's own Retry-After value is authoritative (it reflects the server's actual rate
+// limit window) so it is never jittered — only the blind exponential guesses are, and only to spread
+// out multiple organisations that hit a transient error at the same moment (e.g. a shared Xero
+// outage) so their retries don't all land in the same instant and re-trigger the same rate limit.
+function computeRetryDelayMs(attempt, err, randomFn = Math.random) {
+  const isRateLimit = err.response && err.response.statusCode === 429;
+  const headerDelay = isRateLimit ? retryAfterMs(err) : null;
+  if (headerDelay != null) return { delay: Math.min(headerDelay, 120000), reason: 'Rate limited (Retry-After honoured)' };
+  const base = isRateLimit ? Math.min(Math.pow(2, attempt) * 2500, 60000) : Math.min(Math.pow(2, attempt) * 1000, 15000);
+  // +/-15% jitter, deterministic bounds so tests can assert on the range without mocking Math.random.
+  const jittered = Math.round(base * (0.85 + randomFn() * 0.3));
+  const reason = isRateLimit ? 'Rate limited' : `Transient error (${err.code || err.response?.statusCode})`;
+  return { delay: jittered, reason };
+}
+
 async function apiCall(tenantId, fn, retries = 6) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -155,9 +187,7 @@ async function apiCall(tenantId, fn, retries = 6) {
       return await withTimeout(fn(xero, tenantId), API_CALL_TIMEOUT_MS);
     } catch (err) {
       if (isTransientError(err)) {
-        const isRateLimit = err.response && err.response.statusCode === 429;
-        const delay = isRateLimit ? Math.min(Math.pow(2, attempt) * 2500, 60000) : Math.min(Math.pow(2, attempt) * 1000, 15000);
-        const reason = isRateLimit ? 'Rate limited' : `Transient error (${err.code || err.response?.statusCode})`;
+        const { delay, reason } = computeRetryDelayMs(attempt, err);
         console.log(`${reason} (attempt ${attempt}/${retries}), waiting ${delay}ms...`);
         await new Promise(r => setTimeout(r, delay));
         continue;
@@ -181,4 +211,7 @@ async function getAllPages(xero, tenantId, fetchFn) {
   return allItems;
 }
 
-module.exports = { createXeroClient, getAuthenticatedClient, apiCall, getAllPages };
+module.exports = {
+  createXeroClient, getAuthenticatedClient, apiCall, getAllPages, retryAfterMs, isTransientError,
+  computeRetryDelayMs,
+};

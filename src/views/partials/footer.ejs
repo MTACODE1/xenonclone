@@ -1,11 +1,12 @@
     </div>
     <footer class="site-footer">
-      <p>Xero Health Dashboard &copy; 2026 &mdash; MTA Workflow Design Standards</p>
+      <p>Akrio Verify &copy; 2026 &mdash; MTA Workflow Design Standards</p>
     </footer>
   </div>
 </div>
 
 <script>
+const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || '';
 function openSidebar() {
   document.getElementById('sidebar').classList.add('open');
   document.getElementById('sidebarOverlay').classList.add('open');
@@ -15,16 +16,32 @@ function closeSidebar() {
   document.getElementById('sidebarOverlay').classList.remove('open');
 }
 
+function collapseSidebar() {
+  document.documentElement.classList.add('sidebar-collapsed');
+  localStorage.setItem('sidebarCollapsed', '1');
+}
+function expandSidebar() {
+  document.documentElement.classList.remove('sidebar-collapsed');
+  localStorage.setItem('sidebarCollapsed', '0');
+}
+
 async function syncAll() {
   const btn = document.getElementById('syncAllBtn') || event.target;
   const originalHTML = btn.innerHTML;
   btn.disabled = true;
   btn.innerHTML = '<svg class="spinning" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg> Syncing...';
   try {
-    const response = await fetch('/sync-all?async=1', { method: 'POST' });
+    const response = await fetch('/sync-all?async=1', {
+      method: 'POST', headers: { 'x-csrf-token': csrfToken }
+    });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Could not start sync');
-    followJob(data.jobId, btn, originalHTML);
+    const jobIds = (data.results || []).map(result => result.jobId).filter(Boolean);
+    const failures = (data.results || []).filter(result => result.error);
+    if (!jobIds.length) {
+      throw new Error(failures[0]?.error || 'No connected clients were queued');
+    }
+    followAllJobs(jobIds, btn, originalHTML, failures.length);
   } catch(e) {
     alert('Sync failed: ' + e.message);
     btn.disabled = false;
@@ -32,12 +49,38 @@ async function syncAll() {
   }
 }
 
+function followAllJobs(jobIds, btn, originalHTML, initialFailures = 0) {
+  const poll = async () => {
+    try {
+      const responses = await Promise.all(jobIds.map(id =>
+        fetch('/sync-jobs/' + encodeURIComponent(id)).then(response => response.json())
+      ));
+      const completed = responses.filter(job => ['succeeded', 'failed', 'cancelled'].includes(job.status));
+      const failed = initialFailures + responses.filter(job => job.status === 'failed').length;
+      btn.textContent = `Syncing ${completed.length}/${jobIds.length}`;
+      if (completed.length === jobIds.length) {
+        if (failed) alert(`${failed} client sync${failed === 1 ? '' : 's'} failed. Verified older results were preserved.`);
+        window.location.reload();
+        return;
+      }
+      window.setTimeout(poll, 1500);
+    } catch (error) {
+      alert('Could not read sync progress: ' + error.message);
+      btn.disabled = false;
+      btn.innerHTML = originalHTML;
+    }
+  };
+  poll();
+}
+
 async function syncClient(tenantId, btn) {
   const originalHTML = btn.innerHTML;
   btn.disabled = true;
   btn.innerHTML = '<svg class="spinning" width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke-width="4"/></svg>';
   try {
-    const resp = await fetch('/sync/' + tenantId + '?async=1', { method: 'POST' });
+    const resp = await fetch('/sync/' + tenantId + '?async=1', {
+      method: 'POST', headers: { 'x-csrf-token': csrfToken }
+    });
     const data = await resp.json();
     if (data.jobId) followJob(data.jobId, btn, originalHTML);
     else {

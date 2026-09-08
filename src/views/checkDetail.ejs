@@ -9,6 +9,10 @@
 </nav>
 
 <div class="page-header">
+  <a href="/" class="btn btn-outlined btn-sm back-button">
+    <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+    Back to Clients
+  </a>
   <h4><%= def ? def.label : checkType %></h4>
   <% if (issue) { %>
     <p>
@@ -22,6 +26,170 @@
     </p>
   <% } %>
 </div>
+
+<%
+  const detailDesc = (typeof checkDescriptions !== 'undefined' ? checkDescriptions : {})[checkType] || {};
+%>
+<% if (detailDesc.issue) { %>
+<div class="card" style="padding: 16px 20px; margin-bottom: 20px;">
+  <div class="desc-row">
+    <span class="chip" style="flex-shrink: 0; margin-top: 2px; background: var(--mta-dark-blue); color: white;">Issue</span>
+    <p><%= detailDesc.issue %></p>
+  </div>
+  <div class="desc-row">
+    <span class="chip" style="flex-shrink: 0; margin-top: 2px; background: var(--success); color: white;">So What?</span>
+    <p><%= detailDesc.soWhat %></p>
+  </div>
+  <div class="desc-row">
+    <span class="chip" style="flex-shrink: 0; margin-top: 2px; background: var(--mta-dark-blue); color: white;">Solution</span>
+    <p><%= detailDesc.solution %></p>
+  </div>
+</div>
+<% } %>
+
+<% if (checkType === 'bank_balance') { %>
+<%
+  // Build a map of discrepancies keyed by accountId for quick lookup
+  const discrepancyByAccountId = {};
+  (items || []).forEach(item => { discrepancyByAccountId[item.accountId] = item; });
+  const allAccounts = bankReconciliation || [];
+  const excludedIds = excludedBankAccountIds || new Set();
+  // Close date: read from issue period_checked string like "statement_comparison_as_of_YYYY-MM-DD"
+  let closingDateStr = null;
+  if (issue && issue.period_checked) {
+    const m = issue.period_checked.match(/(\d{4}-\d{2}-\d{2})$/);
+    if (m) closingDateStr = new Date(m[1]).toLocaleDateString('en-GB', { day:'2-digit', month:'2-digit', year:'numeric' });
+  }
+  function fmtBal(val) {
+    if (val == null) return null;
+    const n = Number(val);
+    const abs = Math.abs(n).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return (n < 0 ? '-£' : '£') + abs;
+  }
+%>
+
+<%# Issue/So What?/Solution boxes %>
+<div class="card bb-description-card">
+  <div class="desc-row"><span class="chip" style="flex-shrink:0;background:var(--mta-dark-blue);color:white;">Issue</span><p>Bank accounts where Xero's calculated balance doesn't match the bank's own closing balance.</p></div>
+  <div class="desc-row"><span class="chip" style="flex-shrink:0;background:var(--success);color:white;">So What?</span><p>Bookkeeping is incomplete and does not currently reflect all of the bank transactions going through the business bank accounts.</p></div>
+  <div class="desc-row"><span class="chip" style="flex-shrink:0;background:var(--mta-dark-blue);color:white;">Solution</span><p>Review the bank feed in Xero and process outstanding items. If the difference is due to uncleared items, use the "Mark as OK" button.</p></div>
+</div>
+
+<%# Show-all toggle %>
+<div class="bb-show-all-row">
+  <label class="toggle-switch" style="gap:10px;">
+    <input type="checkbox" id="bbShowAll" checked onchange="toggleBbShowAll(this.checked)">
+    <span class="toggle-slider"></span>
+    <span style="font-size:0.875rem;">Show all bank accounts (allows you to compare statement value for all bank accounts)</span>
+  </label>
+</div>
+
+<%# Bank account cards grid %>
+<div class="bb-cards-grid" id="bbCardsGrid">
+<% allAccounts.forEach(acc => {
+  const disc = discrepancyByAccountId[acc.bank_account_id];
+  const hasDisc = !!disc || (acc.statement_balance != null && acc.xero_calculated_balance != null && Math.abs(acc.xero_calculated_balance - acc.statement_balance) > 0.01);
+  const isExcluded = excludedIds.has(acc.bank_account_id);
+  const diff = (acc.statement_balance != null && acc.xero_calculated_balance != null)
+    ? acc.xero_calculated_balance - acc.statement_balance : null;
+  const diffOk = diff !== null && Math.abs(diff) < 0.01;
+%>
+<div class="bb-account-card <%= !hasDisc ? 'bb-card-ok' : '' %>" data-has-disc="<%= hasDisc ? '1' : '0' %>" data-account-id="<%= acc.bank_account_id %>">
+  <%# Exclude button %>
+  <form method="POST" action="/client/<%= org.xero_tenant_id %>/bank-account-exclusion" style="position:absolute;top:10px;right:10px;">
+    <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+    <input type="hidden" name="bank_account_id" value="<%= acc.bank_account_id %>">
+    <input type="hidden" name="excluded" value="<%= isExcluded ? '0' : '1' %>">
+    <button type="submit" class="bb-exclude-btn" title="<%= isExcluded ? 'Include in checks' : 'Exclude from checks' %>">×</button>
+  </form>
+
+  <h5 class="bb-account-name"><%= acc.bank_account_name %></h5>
+  <p class="bb-closing-label">Closing Balance<% if (closingDateStr) { %> at <%= closingDateStr %><% } %></p>
+
+  <div class="bb-balance-row">
+    <span class="bb-balance-label">Per Bank Statement <span class="bb-help" title="The closing balance on the actual bank statement or bank feed. Enter this manually — Xero's standard API does not provide the real bank statement balance.">?</span></span>
+    <% if (acc.statement_balance != null) { %>
+      <span class="bb-balance-value"><%= fmtBal(acc.statement_balance) %></span>
+    <% } else { %>
+      <button type="button" class="bb-click-to-add" onclick="toggleBbAddForm('<%= acc.bank_account_id %>')">Click to add balance</button>
+    <% } %>
+  </div>
+
+  <%# Inline add-balance form (hidden until "Click to add balance" clicked) %>
+  <% if (acc.statement_balance == null) { %>
+  <div id="bb-add-form-<%= acc.bank_account_id %>" style="display:none;margin:4px 0 8px;">
+    <form method="POST" action="/client/<%= org.xero_tenant_id %>/bank-reconciliation" style="display:flex;gap:6px;align-items:center;">
+      <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+      <input type="hidden" name="bank_account_id" value="<%= acc.bank_account_id %>">
+      <input type="number" step="0.01" name="statement_balance" class="form-input" style="flex:1;padding:5px 8px;font-size:0.82rem;" placeholder="Enter closing balance" autofocus>
+      <button type="submit" class="btn btn-primary btn-sm">Save</button>
+      <button type="button" class="btn btn-outlined btn-sm" onclick="toggleBbAddForm('<%= acc.bank_account_id %>')">Cancel</button>
+    </form>
+  </div>
+  <% } else { %>
+  <div id="bb-edit-form-<%= acc.bank_account_id %>" style="display:none;margin:4px 0 8px;">
+    <form method="POST" action="/client/<%= org.xero_tenant_id %>/bank-reconciliation" style="display:flex;gap:6px;align-items:center;">
+      <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+      <input type="hidden" name="bank_account_id" value="<%= acc.bank_account_id %>">
+      <input type="number" step="0.01" name="statement_balance" value="<%= acc.statement_balance %>" class="form-input" style="flex:1;padding:5px 8px;font-size:0.82rem;">
+      <button type="submit" class="btn btn-primary btn-sm">Save</button>
+      <button type="button" class="btn btn-outlined btn-sm" onclick="toggleBbEditForm('<%= acc.bank_account_id %>')">Cancel</button>
+    </form>
+  </div>
+  <% } %>
+
+  <div class="bb-balance-row">
+    <span class="bb-balance-label">Per Xero Statement</span>
+    <span class="bb-balance-value"><%= fmtBal(acc.xero_calculated_balance) || '—' %></span>
+  </div>
+  <div class="bb-balance-row">
+    <span class="bb-balance-label"><strong>Per Xero TB</strong></span>
+    <span class="bb-balance-value"><strong><%= fmtBal(acc.xero_calculated_balance) || '—' %></strong></span>
+  </div>
+  <div class="bb-balance-row">
+    <span class="bb-balance-label" style="color:<%= diffOk ? 'var(--success)' : (diff !== null ? 'var(--error)' : 'inherit') %>;font-weight:600;">Difference</span>
+    <span class="bb-balance-value" style="color:<%= diffOk ? 'var(--success)' : (diff !== null ? 'var(--error)' : 'inherit') %>;font-weight:600;"><%= diff !== null ? fmtBal(diff) : '—' %></span>
+  </div>
+
+  <% if (acc.xero_balance_as_of) { %><p style="font-size:0.7rem;color:var(--text-muted);margin:6px 0 10px;">Xero balance as of <%= acc.xero_balance_as_of %></p><% } %>
+
+  <a href="/client/<%= org.xero_tenant_id %>#statement-evidence" class="bb-upload-link">Upload Supporting Documents</a>
+
+  <div class="bb-action-row">
+    <a href="/client/<%= org.xero_tenant_id %>#bank-reconciliation" class="btn btn-primary btn-sm" style="background:#16a34a;border-color:#16a34a;min-width:90px;">Process</a>
+    <% if (acc.statement_balance != null) { %>
+      <button type="button" class="btn btn-outlined btn-sm" onclick="toggleBbEditForm('<%= acc.bank_account_id %>')">Edit Balance</button>
+    <% } %>
+  </div>
+  <div style="margin-top:8px;">
+    <a href="/client/<%= org.xero_tenant_id %>#bank-reconciliation" class="btn btn-outlined btn-sm" style="width:100%;text-align:center;border-color:#16a34a;color:#16a34a;">Mark as "OK"</a>
+  </div>
+  <% if (isExcluded) { %><div style="margin-top:6px;font-size:0.75rem;color:var(--text-muted);text-align:center;">Excluded from checks</div><% } %>
+</div>
+<% }) %>
+<% if (!allAccounts.length) { %>
+  <div class="empty-state" style="grid-column:1/-1;"><p>No bank accounts found — sync this client first.</p></div>
+<% } %>
+</div>
+
+<script>
+function toggleBbShowAll(show) {
+  document.querySelectorAll('.bb-account-card').forEach(card => {
+    if (!show && card.dataset.hasDisc === '0') card.style.display = 'none';
+    else card.style.display = '';
+  });
+}
+function toggleBbAddForm(id) {
+  const form = document.getElementById('bb-add-form-' + id);
+  if (form) form.style.display = form.style.display === 'none' ? '' : 'none';
+}
+function toggleBbEditForm(id) {
+  const form = document.getElementById('bb-edit-form-' + id);
+  if (form) form.style.display = form.style.display === 'none' ? '' : 'none';
+}
+</script>
+
+<% } else { %>
 
 <div class="card">
   <div class="table-filters">
@@ -41,40 +209,144 @@
       <p>No <%= status === 'active' ? 'active' : status %> findings for this check.</p>
     </div>
   <% } else { %>
+    <%
+      // Bank-sourced findings (sales_tax_on_bills/purchase_tax_on_invoices) are already stored as
+      // display-only context (see withDisplayOnlyBankFindings in checkRules.js — they never count
+      // toward this check's headline count/value/score); this is purely a client-side visibility
+      // toggle for rows already present in the page, matching Xenon's own "Show bank
+      // payments/deposits too" toggle, which defaults to off.
+      const hasDisplayOnlyRows = items.some(item => item.displayOnly);
+    %>
+    <% if (hasDisplayOnlyRows) { %>
+      <div class="table-filters">
+        <label style="display:flex;align-items:center;gap:6px;font-size:0.85rem;cursor:pointer;">
+          <input type="checkbox" id="showDisplayOnly" onchange="document.querySelectorAll('.display-only-row').forEach(row => row.style.display = this.checked ? '' : 'none')">
+          Show bank payments/deposits too
+        </label>
+      </div>
+    <% } %>
     <form id="bulkReview" method="post" action="/client/<%= org.xero_tenant_id %>/check/<%= checkType %>/review"></form>
+    <% if (status === 'active' && pagination.total > 0) { %>
+      <form id="bulkAll" method="post" action="/client/<%= org.xero_tenant_id %>/check/<%= checkType %>/review"></form>
+      <div class="table-filters">
+        <input form="bulkAll" type="hidden" name="csrf_token" value="<%= csrfToken %>">
+        <input form="bulkAll" type="hidden" name="return_status" value="<%= status %>">
+        <input form="bulkAll" type="hidden" name="return_page" value="1">
+        <input form="bulkAll" type="hidden" name="select_all" value="1">
+        <input form="bulkAll" type="hidden" name="action" id="bulkAllAction" value="ignored">
+        <!-- Applies to every active finding for this check, not just the current page — matches
+             Xenon's own "Ignore/Dismiss all N items" buttons, which state the full count. One
+             dropdown + Apply replaces two separate buttons to keep this row compact. -->
+        <select id="bulkAllSelect" class="form-input" style="width:auto;" onchange="document.getElementById('bulkAllAction').value=this.value">
+          <option value="ignored">Ignore all <%= pagination.total %> items (30 Days)</option>
+          <option value="dismissed">Dismiss all <%= pagination.total %> items</option>
+        </select>
+        <button form="bulkAll" type="submit" class="btn btn-sm btn-outlined" onclick="return confirmBulkAll()">Apply</button>
+      </div>
+    <% } %>
     <div class="table-filters">
       <input form="bulkReview" type="hidden" name="csrf_token" value="<%= csrfToken %>">
       <input form="bulkReview" type="hidden" name="return_status" value="<%= status %>">
       <input form="bulkReview" type="hidden" name="return_page" value="<%= pagination.page %>">
-      <button type="button" class="btn btn-sm btn-outlined" onclick="document.querySelectorAll('[name=&quot;finding_keys&quot;]').forEach(box => box.checked = true)">Select page</button>
-      <button form="bulkReview" class="btn btn-sm btn-outlined" name="action" value="dismissed">Dismiss</button>
-      <button form="bulkReview" class="btn btn-sm btn-outlined" name="action" value="ignored">Ignore 30 days</button>
-      <button form="bulkReview" class="btn btn-sm btn-outlined" name="action" value="ok">Mark OK this period</button>
-      <% if (status !== 'active') { %>
-        <button form="bulkReview" class="btn btn-sm btn-primary" name="action" value="restore">Restore</button>
-      <% } %>
+      <button type="button" class="btn btn-sm btn-outlined" id="selectPageBtn" onclick="toggleSelectPage(this)">Select page</button>
+      <select form="bulkReview" name="action" class="form-input" style="width:auto;">
+        <option value="dismissed">Dismiss</option>
+        <option value="ignored">Ignore 30 days</option>
+        <option value="ok">Mark OK this period</option>
+        <% if (status !== 'active') { %>
+          <option value="restore">Restore</option>
+        <% } %>
+      </select>
+      <button form="bulkReview" type="submit" class="btn btn-sm btn-outlined">Apply</button>
       <input form="bulkReview" class="form-input" name="notes" maxlength="500" placeholder="Optional note">
     </div>
-    <% const hiddenColumns = new Set(['finding_key', 'review_state', 'ignored_until', 'notes', 'displayOnly', 'xero_links']); %>
+    <%
+      // Raw Xero GUIDs exist on findings only to build the "Open in Xero" links (see xeroLinks in
+      // src/routes/client.js) — they're not meant as a user-facing column alongside the friendly
+      // name/description fields that already carry the same information.
+      const hiddenColumns = new Set([
+        'finding_key', 'review_state', 'ignored_until', 'notes', 'displayOnly', 'xero_links',
+        'contactId', 'contactID', 'invoiceId', 'invoiceID', 'bankTransactionId', 'bankTransactionID',
+        'paymentId', 'paymentID', 'creditNoteId', 'creditNoteID', 'id1', 'id2', 'id',
+        // 'id' is the same kind of raw Xero GUID as the others above (see xeroLinks in
+        // src/routes/client.js, where it's used as a fallback for the invoice/bill/credit-note
+        // link) — old_unpaid_invoices/old_sales_credits/old_unpaid_bills/old_purchase_credits (and
+        // others) already show the friendly "number" and "contact" fields alongside it, so the raw
+        // id added nothing but noise.
+        'transactions', // rendered as its own expandable drill-down row below, not a plain column
+        // Combined into one colored "Account" badge and one colored transaction-type badge below,
+        // instead of two-plus plain-text columns — same treatment for every check that carries
+        // these fields (most of the 29: misallocated_items, purchase_tax_missing,
+        // unexpected_account_used, etc.), not just the two with a drill-down.
+        'accountCode', 'accountName', 'source',
+        'ageDays', // rendered as a dedicated "Age" column instead of the generic "age Days" label
+        'standaloneNote', // rendered inline under the Review actions, not as its own column
+      ]);
+      // Per-transaction column set for the drill-down (multi_account_suppliers/multi_tax_suppliers)
+      // — same hidden-ID-field rule as the main table, applied to each transaction sub-object.
+      // lineKey/ok/notes are rendered specially below (the per-line review form); accountCode/
+      // accountName are combined into one colored "Account" badge column instead of two plain ones.
+      const transactionHiddenColumns = new Set([...hiddenColumns, 'xero_links', 'lineKey', 'ok', 'accountCode', 'accountName', 'source']);
+      const transactionColumns = items[0]?.transactions?.length
+        ? Object.keys(items[0].transactions[0]).filter(key => !transactionHiddenColumns.has(key))
+        : [];
+      const hasAccountColumn = items[0]?.transactions?.some(tx => tx.accountCode);
+      const hasSourceColumn = items[0]?.transactions?.some(tx => tx.source);
+      // A small fixed palette, assigned per account code in first-seen order within one contact's
+      // transaction list — same idea as Xenon's colored account pills, so a reader can tell at a
+      // glance which lines share an account without reading every code.
+      const ACCOUNT_BADGE_COLORS = ['#c0264a', '#b8860b', '#2f6f4e', '#3457a6', '#7d4f9a', '#a35c1e'];
+      function accountBadgeColor(colorByCode, accountCode) {
+        if (!colorByCode.has(accountCode)) {
+          colorByCode.set(accountCode, ACCOUNT_BADGE_COLORS[colorByCode.size % ACCOUNT_BADGE_COLORS.length]);
+        }
+        return colorByCode.get(accountCode);
+      }
+      // Fixed (not rotating) — the transaction direction is a fixed category, not an arbitrary set
+      // like account codes, so it always gets the same color regardless of what else is on the page.
+      const SOURCE_BADGE = {
+        bank_spend: { label: 'Money Out', color: '#7a1f2b' },
+        bank_receive: { label: 'Money In', color: '#1e6b45' },
+        bill: { label: 'Bill', color: '#4a4a4a' },
+        invoice: { label: 'Invoice', color: '#4a4a4a' },
+      };
+    %>
     <% const columns = Object.keys(items[0]).filter(key => !hiddenColumns.has(key)); %>
+    <% const mainHasAccountColumn = items.some(item => item.accountCode); %>
+    <% const mainHasSourceColumn = items.some(item => item.source); %>
+    <% const mainHasAge = items.some(item => item.ageDays != null); %>
+    <% const mainColorByCode = new Map(); %>
     <div class="table-wrap">
       <table class="data-table">
         <thead>
           <tr>
             <th><span class="sr-only">Select</span></th>
+            <% if (mainHasSourceColumn) { %><th><span class="sr-only">Type</span></th><% } %>
             <% columns.forEach(key => { %>
               <th style="text-transform: capitalize;"><%= key.replace(/_/g,' ').replace(/([A-Z])/g,' $1').trim() %></th>
+              <% if (key === 'date' && mainHasAge) { %><th>Age</th><% } %>
             <% }) %>
+            <% if (mainHasAccountColumn) { %><th>Account Code Used</th><% } %>
             <th>Xero</th>
             <th>Review</th>
           </tr>
         </thead>
         <tbody>
           <% items.forEach(item => { %>
-            <tr>
+            <tr <%- item.displayOnly ? 'class="display-only-row" style="display:none;"' : '' %>>
               <td>
                 <input form="bulkReview" type="checkbox" name="finding_keys" value="<%= item.finding_key %>" aria-label="Select finding">
               </td>
+              <% if (mainHasSourceColumn) { %>
+                <td>
+                  <% const mainBadge = SOURCE_BADGE[item.source]; %>
+                  <% if (mainBadge) { %>
+                    <span class="chip" style="background: <%= mainBadge.color %>; color: white;"><%= mainBadge.label %></span>
+                  <% } else if (item.source) { %>
+                    <span class="chip" style="background: #4a4a4a; color: white;"><%= item.source %></span>
+                  <% } %>
+                </td>
+              <% } %>
               <% columns.forEach(key => { const val = item[key]; %>
                 <td>
                   <% if (typeof val === 'number' && !Number.isInteger(val)) { %>
@@ -85,7 +357,19 @@
                     <%= val != null ? val : '—' %>
                   <% } %>
                 </td>
+                <% if (key === 'date' && mainHasAge) { %>
+                  <td><%= item.ageDays != null ? `${item.ageDays} day${item.ageDays !== 1 ? 's' : ''}` : '—' %></td>
+                <% } %>
               <% }) %>
+              <% if (mainHasAccountColumn) { %>
+                <td>
+                  <% if (item.accountCode) { %>
+                    <span class="chip" style="background: <%= accountBadgeColor(mainColorByCode, item.accountCode) %>; color: white;">
+                      <%= item.accountName ? `${item.accountCode} - ${item.accountName}` : item.accountCode %>
+                    </span>
+                  <% } else { %>—<% } %>
+                </td>
+              <% } %>
               <td>
                 <% item.xero_links.forEach(link => { %>
                   <a href="<%= link.url %>" target="_blank" rel="noopener noreferrer"><%= link.label %></a><br>
@@ -112,8 +396,116 @@
                     <button class="btn btn-sm btn-primary" name="action" value="restore">Restore</button>
                   <% } %>
                 </form>
+                <% if (item.standaloneNote) { %><div class="text-muted" style="margin-top:4px;"><%= item.standaloneNote %></div><% } %>
+                <form method="post" action="/client/<%= org.xero_tenant_id %>/check/<%= checkType %>/note" style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;">
+                  <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+                  <input type="hidden" name="finding_key" value="<%= item.finding_key %>">
+                  <input type="hidden" name="return_status" value="<%= status %>">
+                  <input type="hidden" name="return_page" value="<%= pagination.page %>">
+                  <input type="text" name="notes" maxlength="500" placeholder="Note" value="<%= item.standaloneNote || '' %>" class="form-input" style="width:100px;font-size:0.75rem;">
+                  <button class="btn btn-sm btn-outlined">Add Note</button>
+                </form>
+                <% const contactName = item.contact || item.name; %>
+                <% if (contactName) { %>
+                  <form method="post" action="/client/<%= org.xero_tenant_id %>/check/<%= checkType %>/ignore-contact" style="margin-top:4px;"
+                    onsubmit="return confirm('Permanently ignore <%= contactName %> from this check? This applies from the next sync onward, for every finding on this contact.')">
+                    <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+                    <input type="hidden" name="contact_name" value="<%= contactName %>">
+                    <input type="hidden" name="return_status" value="<%= status %>">
+                    <input type="hidden" name="return_page" value="<%= pagination.page %>">
+                    <button class="btn btn-sm" style="color:#dc2626;background:none;border:none;padding:0;text-decoration:underline;cursor:pointer;">Ignore this contact</button>
+                  </form>
+                <% } %>
               </td>
             </tr>
+            <% if (item.transactions && item.transactions.length) { %>
+              <tr>
+                <td colspan="<%= columns.length + 3 + (mainHasSourceColumn ? 1 : 0) + (mainHasAccountColumn ? 1 : 0) + (mainHasAge ? 1 : 0) %>" style="padding:0; border-top:none;">
+                  <details style="margin: 0 0 8px 32px;">
+                    <summary style="cursor:pointer; color:#5D87FF; font-size:0.8rem; padding:4px 0;">
+                      Show <%= item.transactions.length %> transaction<%= item.transactions.length !== 1 ? 's' : '' %>
+                    </summary>
+                    <div class="table-wrap">
+                      <table class="data-table" style="font-size:0.8rem;">
+                        <thead>
+                          <tr>
+                            <% if (hasSourceColumn) { %><th><span class="sr-only">Type</span></th><% } %>
+                            <% transactionColumns.forEach(key => { %>
+                              <th style="text-transform: capitalize;"><%= key.replace(/_/g,' ').replace(/([A-Z])/g,' $1').trim() %></th>
+                            <% }) %>
+                            <% if (hasAccountColumn) { %><th>Account Code Used</th><% } %>
+                            <th>Xero</th>
+                            <th>Reviewed?</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <% const colorByCode = new Map(); %>
+                          <% item.transactions.forEach(tx => { %>
+                            <tr>
+                              <% if (hasSourceColumn) { %>
+                                <td>
+                                  <% const badge = SOURCE_BADGE[tx.source]; %>
+                                  <% if (badge) { %>
+                                    <span class="chip" style="background: <%= badge.color %>; color: white;"><%= badge.label %></span>
+                                  <% } else if (tx.source) { %>
+                                    <span class="chip" style="background: #4a4a4a; color: white;"><%= tx.source %></span>
+                                  <% } %>
+                                </td>
+                              <% } %>
+                              <% transactionColumns.forEach(key => { const val = tx[key]; %>
+                                <td>
+                                  <% if (typeof val === 'number' && !Number.isInteger(val)) { %>
+                                    £<%= Number(val).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}) %>
+                                  <% } else if (key === 'amount' && typeof val === 'number') { %>
+                                    £<%= Number(val).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}) %>
+                                  <% } else { %>
+                                    <%= val != null ? val : '—' %>
+                                  <% } %>
+                                </td>
+                              <% }) %>
+                              <% if (hasAccountColumn) { %>
+                                <td>
+                                  <% if (tx.accountCode) { %>
+                                    <span class="chip" style="background: <%= accountBadgeColor(colorByCode, tx.accountCode) %>; color: white;">
+                                      <%= tx.accountName ? `${tx.accountCode} - ${tx.accountName}` : tx.accountCode %>
+                                    </span>
+                                  <% } else { %>—<% } %>
+                                </td>
+                              <% } %>
+                              <td>
+                                <% (tx.xero_links || []).forEach(link => { %>
+                                  <a href="<%= link.url %>" target="_blank" rel="noopener noreferrer"><%= link.label %></a><br>
+                                <% }) %>
+                              </td>
+                              <td style="min-width:160px;">
+                                <% if (tx.lineKey) { %>
+                                  <span class="chip <%= tx.ok ? 'chip-success' : 'chip-default' %>">
+                                    <%= tx.ok ? 'OK' : 'Unreviewed' %>
+                                  </span>
+                                  <% if (tx.notes) { %><div class="text-muted"><%= tx.notes %></div><% } %>
+                                  <form method="post" action="/client/<%= org.xero_tenant_id %>/check/<%= checkType %>/line-review" style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;">
+                                    <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+                                    <input type="hidden" name="finding_key" value="<%= item.finding_key %>">
+                                    <input type="hidden" name="line_key" value="<%= tx.lineKey %>">
+                                    <input type="hidden" name="return_status" value="<%= status %>">
+                                    <input type="hidden" name="return_page" value="<%= pagination.page %>">
+                                    <input type="hidden" name="ok" value="<%= tx.ok ? '0' : '1' %>">
+                                    <input type="text" name="notes" maxlength="500" placeholder="Note" value="<%= tx.notes || '' %>" class="form-input" style="width:90px;font-size:0.75rem;">
+                                    <button class="btn btn-sm <%= tx.ok ? 'btn-outlined' : 'btn-primary' %>"><%= tx.ok ? 'Mark unreviewed' : 'Mark as OK' %></button>
+                                  </form>
+                                <% } else { %>
+                                  —
+                                <% } %>
+                              </td>
+                            </tr>
+                          <% }) %>
+                        </tbody>
+                      </table>
+                    </div>
+                  </details>
+                </td>
+              </tr>
+            <% } %>
           <% }) %>
         </tbody>
       </table>
@@ -135,5 +527,21 @@
     <% } %>
   <% } %>
 </div>
+<% } %>
+
+<script>
+function toggleSelectPage(btn) {
+  const boxes = document.querySelectorAll('[name="finding_keys"]');
+  const allChecked = Array.from(boxes).every(box => box.checked);
+  boxes.forEach(box => { box.checked = !allChecked; });
+  btn.textContent = allChecked ? 'Select page' : 'Unselect page';
+}
+
+function confirmBulkAll() {
+  const select = document.getElementById('bulkAllSelect');
+  const label = select.options[select.selectedIndex].text;
+  return confirm('Apply "' + label + '"? This affects every matching item, not just this page.');
+}
+</script>
 
 <%- include('partials/footer') %>

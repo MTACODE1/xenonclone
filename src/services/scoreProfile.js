@@ -35,7 +35,15 @@ const SCORE_PROFILE = Object.freeze({
   }),
 });
 
-const NON_SCORED_PERIODS = new Set(['out_of_scope', 'not_configured', 'needs_sync', 'unavailable']);
+// Sourced from periodStatus.js (not checkRules.js) to avoid a circular require — checkRules.js
+// already requires this file for calculateHealthScore. A check whose period_checked is 'unavailable'
+// /'not_configured'/'needs_sync' has always been excluded from scoring here; 'not_vat_registered'
+// (the not_applicable category) joins them for the same reason — a check with nothing applicable to
+// find must contribute neither a penalty nor a "clean check" reward, exactly like the others.
+const { NOT_CONFIGURED_PERIODS, UNAVAILABLE_PERIODS, NOT_APPLICABLE_PERIODS } = require('./periodStatus');
+const NON_SCORED_PERIODS = new Set([
+  ...NOT_CONFIGURED_PERIODS, ...UNAVAILABLE_PERIODS, ...NOT_APPLICABLE_PERIODS,
+]);
 const DATE_FIELDS = [
   'date', 'date1', 'date2', 'transactionDate', 'documentDate', 'dueDate',
   'evidenceDate', 'filingDate', 'xeroBalanceAsOf',

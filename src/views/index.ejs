@@ -1,40 +1,62 @@
 <%- include('partials/header', { currentPage: 'clients' }) %>
 
-<div class="page-header">
-  <h4>Client List</h4>
-  <p>Manage your connected Xero clients and monitor bookkeeping health</p>
-</div>
+<%
+  // Fixed hue per tag-name prefix, matching the practice's own tag naming convention
+  // (VAT_*, Complex_*, Non-VAT_*) — a controlled, predictable palette rather than a random hash,
+  // so the same tag always reads the same color across the whole app.
+  function tagColor(tag) {
+    if (!tag) return '#94a3b8';
+    if (/^VAT[_ ]/i.test(tag) || /^VAT Exempt$/i.test(tag)) return '#7c3aed';
+    if (/^Complex[_ ]/i.test(tag)) return '#dc2626';
+    if (/^Non-VAT[_ ]/i.test(tag)) return '#16a34a';
+    return '#2563eb';
+  }
+  const allTags = [...new Set(orgs.map(o => o.tag).filter(Boolean))];
+%>
 
-<div class="stats-grid">
-  <div class="card stat-card stat-primary hover-card fade-in">
-    <div class="stat-icon" style="background: var(--primary-light); color: var(--primary);">
-      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+<div class="page-header page-header-flex client-list-header">
+  <div>
+    <h4>Client List</h4>
+    <p>Manage your connected Xero clients and monitor bookkeeping health</p>
+  </div>
+  <div class="header-stat-chip">
+    <div class="header-stat-icon" style="background: var(--primary-light); color: var(--primary);">
+      <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
     </div>
-    <div class="stat-body">
-      <div class="stat-value"><%= totalConnected %></div>
-      <div class="stat-label">Connected Clients</div>
+    <div>
+      <div class="header-stat-value"><%= totalConnected %></div>
+      <div class="header-stat-label">Connected Clients</div>
     </div>
   </div>
-  <div class="card stat-card hover-card fade-in <%= avgScore >= 80 ? 'stat-success' : avgScore >= 60 ? 'stat-warning' : 'stat-error' %>">
-    <div class="stat-icon" style="background: <%= avgScore >= 80 ? 'var(--success-light)' : avgScore >= 60 ? 'var(--warning-light)' : 'var(--error-light)' %>; color: <%= avgScore >= 80 ? 'var(--success)' : avgScore >= 60 ? 'var(--warning)' : 'var(--error)' %>;">
-      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+  <div class="header-stat-chip">
+    <div class="header-stat-icon" style="background: <%= avgScore >= 80 ? 'var(--success-light)' : avgScore >= 60 ? 'var(--warning-light)' : 'var(--error-light)' %>; color: <%= avgScore >= 80 ? 'var(--success)' : avgScore >= 60 ? 'var(--warning)' : 'var(--error)' %>;">
+      <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
     </div>
-    <div class="stat-body">
-      <div class="stat-value"><%= avgScore != null ? avgScore + '%' : 'N/A' %></div>
-      <div class="stat-label">Average Health Score</div>
+    <div>
+      <div class="header-stat-value"><%= avgScore != null ? avgScore + '%' : 'N/A' %></div>
+      <div class="header-stat-label">Average Health Score</div>
     </div>
   </div>
+  <button type="button" class="btn btn-primary" onclick="document.getElementById('addOrgModal').style.display='flex'">+ Add Organisation</button>
 </div>
 
 <div class="card">
   <div class="table-filters">
     <input type="text" id="search" placeholder="Search clients..." class="form-input" style="width: 250px;">
-    <select id="tagFilter" class="form-select">
-      <option value="">All Tags</option>
-      <% [...new Set(orgs.map(o => o.tag).filter(Boolean))].forEach(tag => { %>
-        <option value="<%= tag %>"><%= tag %></option>
-      <% }) %>
-    </select>
+    <div class="tag-filter-wrap" style="position:relative;">
+      <button type="button" class="btn btn-outlined btn-sm" onclick="document.getElementById('tagFilterPopover').classList.toggle('open')">
+        Filter by Tag <span id="tagFilterCount"></span> ▾
+      </button>
+      <div id="tagFilterPopover" class="popover">
+        <% allTags.forEach(tag => { %>
+          <label class="popover-checkbox-row">
+            <input type="checkbox" class="tagFilterCheckbox" value="<%= tag %>">
+            <span class="chip" style="background: <%= tagColor(tag) %>1a; color: <%= tagColor(tag) %>;"><%= tag %></span>
+          </label>
+        <% }) %>
+        <% if (!allTags.length) { %><p class="text-muted" style="font-size:0.75rem; padding:8px;">No tags yet</p><% } %>
+      </div>
+    </div>
     <select id="statusFilter" class="form-select">
       <option value="">All Statuses</option>
       <option value="connected">Connected</option>
@@ -46,52 +68,92 @@
     <table class="data-table" id="clientTable">
       <thead>
         <tr>
-          <th>Ref</th>
+          <th>Client Ref.</th>
           <th>Business Name</th>
-          <th>Status</th>
-          <th>Tag</th>
-          <th>Health Score</th>
-          <th>Last Synced</th>
+          <th>Connection</th>
+          <th>Team Member Access</th>
+          <th>Tags</th>
           <th class="text-right">Actions</th>
         </tr>
       </thead>
       <tbody>
         <% if (orgs.length === 0) { %>
-          <tr><td colspan="7">
+          <tr><td colspan="6">
             <div class="empty-state">
               <h5>No clients connected yet</h5>
               <p>Connect your first Xero organisation to get started</p>
-              <a href="/auth/connect" class="btn btn-primary">Connect Client</a>
+              <button type="button" class="btn btn-primary" onclick="document.getElementById('addOrgModal').style.display='flex'">Add Organisation</button>
             </div>
           </td></tr>
         <% } %>
         <% orgs.forEach(org => { %>
           <tr class="client-row" data-name="<%= org.name.toLowerCase() %>" data-tag="<%= org.tag || '' %>" data-status="<%= org.connection_status %>">
             <td class="text-muted"><%= org.client_ref || '—' %></td>
-            <td class="font-medium"><a href="/client/<%= org.xero_tenant_id %>"><%= org.name %></a></td>
-            <td>
-              <% if (org.connection_status === 'connected') { %>
-                <span class="chip chip-success">Connected</span>
-              <% } else { %>
-                <span class="chip chip-error">Disconnected</span>
-              <% } %>
-            </td>
-            <td class="text-muted"><%= org.tag || '—' %></td>
-            <td>
+            <td class="font-medium">
+              <a href="/client/<%= org.xero_tenant_id %>"><%= org.name %></a>
               <% if (org.score != null) { %>
-                <span class="font-semibold <%= org.score >= 80 ? 'text-success' : org.score >= 60 ? 'text-warning' : 'text-error' %>"><%= org.score %>%</span>
+                <span class="chip <%= org.score >= 80 ? 'chip-success' : org.score >= 60 ? 'chip-medium' : 'chip-error' %>" style="margin-left:6px;"><%= org.score %>%</span>
               <% } else { %>
-                <span class="text-muted" style="font-size: 0.75rem;">Not synced</span>
+                <span class="text-muted" style="font-size: 0.7rem;">Not synced</span>
               <% } %>
+              <% if (org.isStale) { %><div class="text-warning" style="font-size:0.7rem;">Verified data is stale</div><% } %>
             </td>
-            <td class="text-muted" style="font-size: 0.75rem;">
-              <%= org.last_successful_sync_at ? new Date(org.last_successful_sync_at).toLocaleString('en-GB') : 'Never' %>
-              <% if (org.isStale) { %><div class="text-warning">Verified data is stale</div><% } %>
+            <td>
+              <div class="connection-icons">
+                <span class="connection-icon <%= org.connection_status === 'connected' ? 'xero-active' : 'connection-disabled' %>" title="<%= org.connection_status === 'connected' ? 'Connected via Xero' : 'Disconnected' %>">Xe</span>
+                <span class="connection-icon connection-disabled" title="Coming soon">QB</span>
+                <span class="connection-icon connection-disabled" title="Coming soon">Sg</span>
+              </div>
+            </td>
+            <td>
+              <div class="access-badges">
+                <% (org.accessBadges || []).slice(0, 3).forEach(staff => { %>
+                  <span class="avatar-badge" title="<%= staff.name %>"><%= staff.initials %></span>
+                <% }) %>
+                <% if ((org.accessBadges || []).length > 3) { %>
+                  <span class="avatar-badge avatar-badge-more">+<%= org.accessBadges.length - 3 %></span>
+                <% } %>
+                <% if (isAdmin) { %>
+                  <button type="button" class="avatar-badge avatar-badge-add" onclick="document.getElementById('accessPopover-<%= org.id %>').classList.toggle('open')">+</button>
+                  <div id="accessPopover-<%= org.id %>" class="popover">
+                    <% const assignedIds = new Set((org.accessBadges || []).map(s => s.id)); %>
+                    <% (org.accessBadges || []).forEach(staff => { %>
+                      <form method="post" action="/client/<%= org.xero_tenant_id %>/access" class="popover-row">
+                        <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+                        <input type="hidden" name="staff_id" value="<%= staff.id %>">
+                        <input type="hidden" name="grant" value="0">
+                        <span><%= staff.name %></span>
+                        <button type="submit" class="popover-remove-btn" title="Remove access">&times;</button>
+                      </form>
+                    <% }) %>
+                    <% allStaff.filter(s => !assignedIds.has(s.id)).forEach(staff => { %>
+                      <form method="post" action="/client/<%= org.xero_tenant_id %>/access" class="popover-row">
+                        <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+                        <input type="hidden" name="staff_id" value="<%= staff.id %>">
+                        <input type="hidden" name="grant" value="1">
+                        <span class="text-muted"><%= staff.name %></span>
+                        <button type="submit" class="popover-add-btn" title="Grant access">Add</button>
+                      </form>
+                    <% }) %>
+                    <% if (!allStaff.length) { %><p class="text-muted" style="font-size:0.75rem; padding:8px;"><a href="/staff">Add staff</a> first</p><% } %>
+                  </div>
+                <% } %>
+              </div>
+            </td>
+            <td>
+              <% if (org.tag) { %>
+                <span class="chip" style="background: <%= tagColor(org.tag) %>1a; color: <%= tagColor(org.tag) %>;"><%= org.tag %></span>
+              <% } else { %>
+                <span class="text-muted">—</span>
+              <% } %>
             </td>
             <td class="text-right">
               <button onclick="syncClient('<%= org.xero_tenant_id %>', this)" class="btn btn-ghost-primary btn-sm">Sync</button>
               <% if (org.connection_status === 'connected') { %>
-                <a href="/auth/disconnect/<%= org.xero_tenant_id %>" onclick="return confirm('Disconnect this client?')" class="btn btn-ghost-error btn-sm">Disconnect</a>
+                <form method="post" action="/auth/disconnect/<%= org.xero_tenant_id %>" style="display:inline" onsubmit="return confirm('Disconnect this client?')">
+                  <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+                  <button type="submit" class="btn btn-ghost-error btn-sm">Disconnect</button>
+                </form>
               <% } else { %>
                 <a href="/auth/connect" class="btn btn-ghost-success btn-sm">Reconnect</a>
               <% } %>
@@ -103,29 +165,59 @@
   </div>
 </div>
 
+<div id="addOrgModal" class="modal-backdrop" onclick="if(event.target===this)this.style.display='none'">
+  <div class="modal-card">
+    <div class="modal-card-header">
+      <h5>Add New Client</h5>
+      <button type="button" class="modal-close" onclick="document.getElementById('addOrgModal').style.display='none'">&times;</button>
+    </div>
+    <p class="text-muted" style="margin-bottom:16px;">Select your client's bookkeeping data...</p>
+    <div class="provider-grid">
+      <a href="/auth/connect" class="provider-btn provider-xero">Connect to Xero</a>
+      <button type="button" class="provider-btn provider-disabled" disabled title="Coming soon">Connect to QuickBooks</button>
+      <button type="button" class="provider-btn provider-disabled" disabled title="Coming soon">Connect to FreeAgent</button>
+      <button type="button" class="provider-btn provider-disabled" disabled title="Coming soon">Connect to Sage</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const searchEl = document.getElementById('search');
-const tagEl = document.getElementById('tagFilter');
 const statusEl = document.getElementById('statusFilter');
+const tagCheckboxes = document.querySelectorAll('.tagFilterCheckbox');
+
+function selectedTags() {
+  return new Set(Array.from(tagCheckboxes).filter(cb => cb.checked).map(cb => cb.value));
+}
 
 function filterTable() {
   const search = searchEl.value.toLowerCase();
-  const tag = tagEl.value.toLowerCase();
   const status = statusEl.value.toLowerCase();
+  const tags = selectedTags();
+  document.getElementById('tagFilterCount').textContent = tags.size ? `(${tags.size})` : '';
   document.querySelectorAll('.client-row').forEach(row => {
     const name = row.dataset.name || '';
-    const rowTag = (row.dataset.tag || '').toLowerCase();
+    const rowTag = row.dataset.tag || '';
     const rowStatus = (row.dataset.status || '').toLowerCase();
     const visible = (!search || name.includes(search)) &&
-                    (!tag || rowTag === tag) &&
+                    (tags.size === 0 || tags.has(rowTag)) &&
                     (!status || rowStatus === status);
     row.style.display = visible ? '' : 'none';
   });
 }
 
 searchEl.addEventListener('input', filterTable);
-tagEl.addEventListener('change', filterTable);
 statusEl.addEventListener('change', filterTable);
+tagCheckboxes.forEach(cb => cb.addEventListener('change', filterTable));
+
+// Close any open popover when clicking outside it.
+document.addEventListener('click', event => {
+  document.querySelectorAll('.popover.open').forEach(pop => {
+    if (!pop.contains(event.target) && !event.target.closest('.tag-filter-wrap, .avatar-badge-add')) {
+      pop.classList.remove('open');
+    }
+  });
+});
 </script>
 
 <%- include('partials/footer') %>

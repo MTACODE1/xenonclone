@@ -1,0 +1,806 @@
+<%
+/* ---- helpers ---- */
+function fmtGbp(n, dp) {
+  if (n == null || isNaN(n)) return '—';
+  const neg = n < 0;
+  dp = dp ?? 2;
+  const abs = Math.abs(n).toLocaleString('en-GB', { minimumFractionDigits: dp, maximumFractionDigits: dp });
+  return neg ? `(£${abs})` : `£${abs}`;
+}
+function fmtGbpPlain(n, dp) {
+  if (n == null || isNaN(n)) return '—';
+  dp = dp ?? 2;
+  return `£${Math.abs(n).toLocaleString('en-GB', { minimumFractionDigits: dp, maximumFractionDigits: dp })}`;
+}
+function fmtGbpSigned(n, dp) {
+  if (n == null || isNaN(n)) return '—';
+  dp = dp ?? 0;
+  const sign = n < 0 ? '-' : '';
+  return `£${sign}${Math.abs(n).toLocaleString('en-GB', { minimumFractionDigits: dp, maximumFractionDigits: dp })}`;
+}
+const FULL_MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+function fmtFyLabelFull(label) {
+  // "31/03/2027" -> "31 March 2027" — matches Xenon's Corp Tax card descriptive text.
+  const m = String(label || '').match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!m) return label;
+  return `${parseInt(m[1], 10)} ${FULL_MONTHS[parseInt(m[2], 10) - 1]} ${m[3]}`;
+}
+function shortMonth(label) {
+  const m = String(label || '').match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i);
+  return m ? m[1] : label;
+}
+
+const settingsUrl = `/client/${org.xero_tenant_id}/insight/settings`;
+const pnl  = insight && insight.pnl   ? insight.pnl.data   : null;
+const bs   = insight && insight.balance_sheet ? insight.balance_sheet.data : null;
+const ctax = insight && insight.corp_tax ? insight.corp_tax.data : null;
+const tgt  = insight && insight.target ? insight.target.data  : null;
+const ctaxOverrides = insight && insight.corp_tax_overrides ? insight.corp_tax_overrides.data : {};
+
+/* ---- health score from checkDefs ---- */
+const BANK_TYPES = ['unreconciled_bank_items', 'bank_balance'];
+const DUP_TYPES  = ['duplicate_invoices', 'duplicate_bills'];
+const OLD_TYPES  = ['old_unpaid_invoices', 'old_sales_credits', 'old_unpaid_bills', 'old_purchase_credits'];
+const sumTypes = types => checkDefs.reduce((s, c) => types.includes(c.type) ? s + (c.count || 0) : s, 0);
+const bankCount  = sumTypes(BANK_TYPES);
+const dupCount   = sumTypes(DUP_TYPES);
+const oldCount   = sumTypes(OLD_TYPES);
+const otherCount = checkDefs.reduce((s, c) => {
+  if ([...BANK_TYPES, ...DUP_TYPES, ...OLD_TYPES].includes(c.type)) return s;
+  return s + (c.count || 0);
+}, 0);
+const healthPct = Math.round(Math.max(0, Math.min(100, score ?? 100)));
+
+/* ---- current month info ---- */
+const now = new Date();
+const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const curMonthName = MONTHS[now.getMonth()];
+const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+const daysRemaining = daysInMonth - now.getDate();
+
+/* ---- current month sales ---- */
+let curMonthSales = null;
+if (pnl && pnl.headers && pnl.totalIncome) {
+  const lastIdx = pnl.headers.length - 1;
+  curMonthSales = pnl.totalIncome[lastIdx] || 0;
+}
+/* ---- sales target: basis-driven, matching the settings page's dropdown ---- */
+const pctIncrease = (tgt && tgt.pct_increase) ? tgt.pct_increase / 100 : 0;
+function avgOfLastN(n) {
+  if (!pnl || !pnl.totalIncome || pnl.totalIncome.length < n) return null;
+  const slice = pnl.totalIncome.slice(-n);
+  return slice.reduce((a, b) => a + b, 0) / n;
+}
+let monthlyTarget = null;
+const basis = tgt && tgt.basis;
+if (basis === 'fixed' && tgt.monthly_target != null) {
+  monthlyTarget = tgt.monthly_target;
+} else if (basis === 'previous_month' && pnl && pnl.totalIncome && pnl.totalIncome.length >= 2) {
+  monthlyTarget = pnl.totalIncome[pnl.totalIncome.length - 2];
+} else if (basis === 'avg3') {
+  monthlyTarget = avgOfLastN(3);
+} else if (basis === 'avg6') {
+  monthlyTarget = avgOfLastN(6);
+} else if (basis === 'avg12') {
+  monthlyTarget = avgOfLastN(12);
+} else if (basis === 'same_month_last_year') {
+  monthlyTarget = null; // needs 13+ months of history; not yet synced (trailing window is 12mo)
+}
+if (monthlyTarget != null) monthlyTarget = monthlyTarget * (1 + pctIncrease);
+
+/* ---- cash health ---- */
+// Xenon lists whichever current-liability lines are actually booked for this client (e.g. just
+// "VAT" + "Corporation Tax"), not a fixed Suppliers/PAYE/Corp Tax trio — mirror that here.
+const RELABEL = { 'VAT': 'VAT Bill' };
+const cashBal        = bs ? (bs.cashAndBank || 0) : null;
+const payItems       = bs ? (bs.liabilityLines || [])
+  .map(l => ({ name: RELABEL[l.name] || l.name, val: Math.abs(l.value) }))
+  .filter(l => l.val > 0) : [];
+const totalOutgoing  = payItems.reduce((s, l) => s + l.val, 0);
+
+/* ---- corp tax ---- */
+const fyPeriods = ctax ? ctax.periods : [];
+const fyDisplay = fyPeriods.map((p, i) => {
+  const key = `fy${i}`;
+  const override = ctaxOverrides[key];
+  return {
+    ...p,
+    displayEstimate: override != null ? parseFloat(override) : p.estimate,
+    hasOverride: override != null,
+  };
+});
+
+/* ---- directors loans ---- */
+const dirAccounts = bs ? (bs.directorAccounts || []) : [];
+// Must match the anchor date insightSync used to fetch the "since" balance (fyPeriods[1].end),
+// not a separately-computed date — otherwise the label and the figure can disagree.
+const prevFyEndLabel = fyDisplay[1] ? fyDisplay[1].label : null;
+
+/* ---- business valuation ---- */
+const kv = typeof insightKv !== 'undefined' ? insightKv : {};
+const valuationModel = kv.valuation_model || '';
+const valuationMultiple = kv.valuation_multiple != null ? parseFloat(kv.valuation_multiple) : 1;
+const VALUATION_MODEL_LABELS = {
+  current_profit: 'Current Annual Profit (last 12 months)',
+  current_sales: 'Current Annual Sales (last 12 months)',
+  net_asset_value: 'Current Net Asset Value',
+};
+let valuationBase = null;
+if (valuationModel === 'current_profit' && pnl && pnl.netProfit) {
+  valuationBase = pnl.netProfit.reduce((a, b) => a + b, 0);
+} else if (valuationModel === 'current_sales' && pnl && pnl.totalIncome) {
+  valuationBase = pnl.totalIncome.reduce((a, b) => a + b, 0);
+} else if (valuationModel === 'net_asset_value' && bs) {
+  valuationBase = bs.totalEquity != null ? bs.totalEquity : null;
+}
+const valuationEstimate = valuationBase != null ? valuationBase * valuationMultiple : null;
+
+/* ---- working capital ---- */
+// Xenon shows 0 days (not a "no data" state) when the balance sheet has no trade debtor/
+// creditor lines, so match that rather than defaulting to null.
+const tradeDebtors   = bs && bs.tradeDebtors   != null ? Math.abs(bs.tradeDebtors)   : 0;
+const tradeCreditors = bs && bs.tradeCreditors != null ? Math.abs(bs.tradeCreditors) : 0;
+const avgRevPerDay   = (pnl && pnl.totalIncome) ? pnl.totalIncome.reduce((a,b)=>a+b,0)/365 : 0;
+const debtorDays     = avgRevPerDay > 0 ? Math.round(tradeDebtors   / avgRevPerDay) : 0;
+const stockDays      = 0;
+const creditorDays   = avgRevPerDay > 0 ? Math.round(tradeCreditors / avgRevPerDay) : 0;
+const workingCapDays = debtorDays + stockDays - creditorDays;
+
+/* ---- dividend ---- */
+const retainedEarnings  = bs ? (bs.retainedEarnings || bs.totalEquity || 0) : null;
+const dividendsPaid     = bs ? Math.abs(bs.dividendsPaid || 0) : 0;
+let   dividendAvailable = retainedEarnings || 0;
+for (const fy of fyDisplay) dividendAvailable -= fy.displayEstimate;
+dividendAvailable -= dividendsPaid;
+
+/* ---- recent cash movements (last 4 months) ---- */
+// Net bank movement (closing minus opening balance) from the Bank Summary report — a different,
+// more accurate figure than P&L sales/income, which is what the Sales Tracker card shows instead.
+const cashMovementsData = insight && insight.cash_movements ? insight.cash_movements.data : null;
+const recentMonths = cashMovementsData && cashMovementsData.months
+  ? cashMovementsData.months.filter(m => m.netMovement != null).map(m => ({ label: m.label, value: m.netMovement })).reverse()
+  : [];
+
+const hasAnyData = !!(pnl || bs || ctax);
+%>
+
+<style>
+:root {
+  --ins-teal: #0d9488;
+  --ins-teal-light: #f0fdfa;
+  --ins-green: #22c55e;
+  --ins-amber: #f59e0b;
+  --ins-red: #ef4444;
+  --ins-blue: #3b82f6;
+  --ins-card-bg: var(--card-bg, #fff);
+  --ins-border: var(--divider, #e5e7eb);
+  --ins-text: var(--text-primary, #111827);
+  --ins-text-muted: var(--text-secondary, #6b7280);
+  --ins-radius: 10px;
+}
+.insight-wrap { padding: 0 0 40px; }
+.insight-no-data {
+  text-align: center; padding: 60px 20px; color: var(--ins-text-muted);
+  background: var(--ins-card-bg); border: 1px solid var(--ins-border);
+  border-radius: var(--ins-radius); margin-bottom: 24px;
+}
+.insight-no-data h3 { color: var(--ins-teal); margin-bottom: 8px; }
+.insight-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+.i-card {
+  background: var(--ins-card-bg);
+  border: 1px solid var(--ins-border);
+  border-radius: var(--ins-radius);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  min-height: 260px;
+}
+.i-card-wide { grid-column: span 2; }
+.i-card-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 14px;
+}
+.i-card-title {
+  font-size: 0.88rem; font-weight: 700;
+  color: var(--ins-teal); text-transform: uppercase; letter-spacing: 0.02em;
+}
+.i-card-icons { color: var(--ins-text-muted); font-size: 0.9rem; display: flex; gap: 6px; cursor: pointer; }
+.i-card-icons a { color: inherit; text-decoration: none; }
+.i-card-body { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.chart-box { position: relative; width: 100%; height: 190px; flex-shrink: 0; }
+.chart-box.chart-box-sm { height: 140px; }
+.chart-box.chart-box-xs { height: 120px; }
+
+.donut-wrap { display: flex; align-items: center; gap: 20px; margin-bottom: 14px; }
+.donut-label { font-size: 2rem; font-weight: 700; color: var(--ins-text); }
+.donut-heart { font-size: 1.2rem; display: block; text-align: center; margin-top: 4px; }
+.donut-sub { font-size: 0.8rem; color: var(--ins-text-muted); }
+
+.cash-balance-lbl { font-size: 0.8rem; color: var(--ins-text-muted); margin-bottom: 2px; }
+.cash-balance-val { font-size: 1.2rem; font-weight: 700; color: var(--ins-teal); margin-bottom: 14px; }
+.pay-section-title { font-size: 0.78rem; font-weight: 600; color: var(--ins-text); margin-bottom: 6px; }
+.pay-row { display: flex; align-items: center; justify-content: space-between; font-size: 0.8rem; padding: 3px 0; }
+.pay-row-name { color: var(--ins-text); }
+.pay-row-val  { font-weight: 600; color: var(--ins-text); }
+.pay-check { color: var(--ins-green); font-size: 1rem; margin-left: 8px; }
+.pay-cross { color: var(--ins-red); font-size: 1rem; margin-left: 8px; }
+.pay-divider { border-top: 1px solid var(--ins-border); margin: 6px 0; }
+.pay-total-row { display: flex; justify-content: space-between; font-size: 0.8rem; font-weight: 600; padding: 4px 0; color: var(--ins-text); }
+.recent-title { font-size: 0.75rem; font-weight: 600; color: var(--ins-text-muted); margin: 12px 0 6px; text-transform: uppercase; letter-spacing: 0.05em; }
+.recent-row { display: flex; justify-content: space-between; font-size: 0.8rem; padding: 2px 0; }
+.recent-row-month { color: var(--ins-text); font-weight: 500; }
+.recent-row-val { font-weight: 600; color: var(--ins-text); }
+.recent-row-val.positive { color: var(--ins-green); }
+.recent-row-val.negative { color: var(--ins-red); }
+
+.bk-issues { font-size: 0.78rem; color: var(--ins-text-muted); margin-bottom: 6px; font-weight: 600; }
+.bk-total { font-size: 2.4rem; font-weight: 700; color: var(--ins-teal); line-height: 1; margin-bottom: 2px; }
+.bk-total-lbl { font-size: 0.75rem; color: var(--ins-text-muted); margin-bottom: 8px; }
+.bk-issue-row { display: flex; align-items: baseline; gap: 5px; font-size: 0.82rem; padding: 2px 0; }
+.bk-issue-count { font-weight: 700; color: var(--ins-teal); min-width: 20px; }
+.bk-issue-name { color: var(--ins-text); }
+.btn-outline-teal {
+  border: 1px solid var(--ins-teal); color: var(--ins-teal);
+  background: transparent; border-radius: 6px; padding: 5px 14px;
+  font-size: 0.78rem; font-weight: 600; cursor: pointer; text-decoration: none;
+  display: inline-block; margin-top: auto;
+}
+.btn-outline-teal:hover { background: var(--ins-teal-light); }
+
+.ctax-current-lbl { font-size: 0.75rem; color: var(--ins-text-muted); margin-bottom: 2px; }
+.ctax-estimate { font-size: 1.1rem; font-weight: 700; color: var(--ins-text); margin-bottom: 2px; }
+.ctax-basis { font-size: 0.75rem; color: var(--ins-text-muted); margin-bottom: 8px; }
+.ctax-calc-link { font-size: 0.75rem; color: var(--ins-teal); text-decoration: none; }
+.ctax-calc-link:hover { text-decoration: underline; }
+
+.dla-section-title { font-size: 0.78rem; color: var(--ins-text); margin-bottom: 8px; font-weight: 500; }
+.dla-row { display: flex; align-items: flex-start; gap: 8px; background: #fff8f0; border: 1px solid #fed7aa; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
+.dla-icon { font-size: 1rem; flex-shrink: 0; margin-top: 1px; }
+.dla-name { font-size: 0.82rem; font-weight: 600; color: var(--ins-text); }
+.dla-meta { font-size: 0.78rem; color: var(--ins-text-muted); }
+.dla-none { font-size: 0.8rem; color: var(--ins-text-muted); font-style: italic; padding: 4px 0; }
+
+.wc-summary { font-size: 0.82rem; color: var(--ins-text); margin: 10px 0 8px; line-height: 1.5; }
+.wc-days-row { display: flex; justify-content: space-between; font-size: 0.8rem; padding: 2px 0; }
+.wc-days-name { color: var(--ins-text); }
+.wc-days-val  { font-weight: 700; color: var(--ins-teal); }
+.chart-empty { display:flex; align-items:center; justify-content:center; flex:1; color:var(--ins-text-muted); font-size:0.8rem; font-style:italic; min-height:100px; }
+
+.div-row { display: flex; justify-content: space-between; align-items: center; font-size: 0.82rem; padding: 4px 0; }
+.div-row-label { color: var(--ins-text); }
+.div-row-val { font-weight: 600; color: var(--ins-text); }
+.div-row-val.deduction { color: var(--ins-red); }
+.div-row-edit { font-size: 0.75rem; cursor: pointer; color: var(--ins-text-muted); border: none; background: none; padding: 0 0 0 4px; }
+.div-divider { border-top: 2px solid var(--ins-text); margin: 6px 0; }
+.div-total-row { display: flex; justify-content: space-between; font-size: 0.9rem; font-weight: 700; padding: 4px 0; }
+.div-total-val { color: var(--ins-teal); }
+
+.sales-layout { display: flex; gap: 16px; }
+.sales-chart-wrap { flex: 1; min-width: 0; }
+.sales-sidebar {
+  width: 160px; flex-shrink: 0; display: flex; flex-direction: column;
+  border-left: 1px solid var(--ins-border); padding-left: 14px; gap: 10px;
+}
+.sales-month-lbl { font-size: 0.75rem; color: var(--ins-text-muted); }
+.sales-month-val { font-size: 0.95rem; font-weight: 700; color: var(--ins-text); }
+.sales-days-remaining { font-size: 0.78rem; color: var(--ins-teal); font-weight: 600; }
+.sales-actual-lbl { font-size: 0.75rem; color: var(--ins-text-muted); }
+.sales-actual-val { font-size: 0.9rem; font-weight: 700; color: var(--ins-text); }
+.sales-target-form { display: flex; flex-direction: column; gap: 4px; }
+.sales-target-input { border: 1px solid var(--ins-border); border-radius: 4px; padding: 4px 6px; font-size: 0.78rem; width: 100%; box-sizing: border-box; }
+
+.ctax-edit-modal { display:none; position:fixed; inset:0; z-index:9999; align-items:center; justify-content:center; background:rgba(0,0,0,0.4); }
+.ctax-edit-modal.open { display:flex; }
+.ctax-edit-box { background:#fff; border-radius:10px; padding:24px; width:340px; box-shadow:0 8px 32px rgba(0,0,0,0.2); }
+.ctax-edit-box h4 { margin:0 0 12px; color:var(--ins-teal); font-size:1rem; }
+.ctax-edit-box label { font-size:0.82rem; display:block; margin-bottom:4px; }
+.ctax-edit-box input { width:100%; box-sizing:border-box; border:1px solid var(--ins-border); border-radius:6px; padding:8px; font-size:0.9rem; margin-bottom:12px; }
+.ctax-edit-btns { display:flex; gap:8px; justify-content:flex-end; }
+.ctax-edit-btns button { border-radius:6px; padding:6px 16px; font-size:0.82rem; cursor:pointer; border:1px solid var(--ins-teal); }
+.ctax-edit-cancel { background:transparent; color:var(--ins-teal); }
+.ctax-edit-save { background:var(--ins-teal); color:#fff; }
+</style>
+
+<div class="insight-wrap">
+<% if (!hasAnyData) { %>
+<div class="insight-no-data">
+  <h3>No Insight data yet</h3>
+  <p>Run a Sync to generate KPI data. This will fetch your Profit &amp; Loss and Balance Sheet from Xero.</p>
+  <form method="POST" action="/client/<%= org.xero_tenant_id %>/sync" style="display:inline;">
+    <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+    <button type="submit" class="btn-outline-teal" style="margin-top:12px;">Sync Now</button>
+  </form>
+</div>
+<% } else { %>
+
+<div class="insight-grid">
+
+<!-- 1. SALES TRACKER -->
+<div class="i-card">
+  <div class="i-card-head">
+    <span class="i-card-title">Sales Tracker</span>
+    <span class="i-card-icons">👁 <a href="<%= settingsUrl %>">⚙️</a></span>
+  </div>
+  <div class="i-card-body">
+    <div class="sales-layout">
+      <div class="sales-chart-wrap">
+        <% if (pnl) { %>
+        <div class="chart-box"><canvas id="chartSales"></canvas></div>
+        <% } else { %>
+        <div class="chart-empty" style="min-height:180px;">Sync to load sales data</div>
+        <% } %>
+      </div>
+      <div class="sales-sidebar">
+        <div>
+          <div class="sales-month-val"><%= curMonthName %> <%= now.getFullYear() %>...</div>
+        </div>
+        <% if (basis && basis !== 'none' && basis !== 'fixed') { %>
+        <div style="font-size:0.75rem;color:var(--ins-text-muted);">
+          Target: <strong style="color:var(--ins-teal);"><%= monthlyTarget != null ? fmtGbpPlain(monthlyTarget, 0) : 'not enough data yet' %></strong>
+          <br>(<a href="<%= settingsUrl %>#sales-tracker" style="color:var(--ins-teal);">basis set in Settings</a>)
+        </div>
+        <% } else { %>
+        <form method="POST" action="/client/<%= org.xero_tenant_id %>/insight/target" class="sales-target-form">
+          <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+          <% if (monthlyTarget != null) { %>
+          <input type="number" name="monthly_target" class="sales-target-input"
+                 value="<%= monthlyTarget %>">
+          <% } %>
+          <button type="submit" class="btn-outline-teal" style="width:100%;margin-top:0;"><%= monthlyTarget != null ? 'Update Target' : 'Set Target' %></button>
+          <% if (!monthlyTarget) { %>
+          <input type="number" name="monthly_target" placeholder="Enter £ target" class="sales-target-input" style="margin-top:4px;">
+          <% } %>
+        </form>
+        <% } %>
+        <div>
+          <div style="font-size:1.5rem;font-weight:700;color:var(--ins-teal);"><%= fmtGbpPlain(curMonthSales != null ? curMonthSales : 0, 0) %></div>
+          <div class="sales-actual-lbl">Actual Sales (so far)</div>
+        </div>
+        <div class="sales-days-remaining"><%= daysRemaining %> Days Remaining</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 2. CASH HEALTH CHECK -->
+<div class="i-card">
+  <div class="i-card-head">
+    <span class="i-card-title">Cash Health Check</span>
+    <span class="i-card-icons">👁 <a href="<%= settingsUrl %>#cash-health">⚙️</a></span>
+  </div>
+  <div class="i-card-body" style="flex-direction:row;gap:14px;align-items:flex-start;">
+    <div style="display:flex;flex-direction:column;align-items:center;flex-shrink:0;">
+      <div style="position:relative;width:90px;height:90px;"><canvas id="chartCash"></canvas></div>
+      <span class="donut-heart">❤️</span>
+      <div style="font-size:0.7rem;color:var(--ins-text-muted);text-align:center;margin-top:2px;">Health Indicator</div>
+      <div style="font-size:0.9rem;font-weight:700;color:var(--ins-text);margin-top:4px;" id="cashPctLabel">—</div>
+    </div>
+    <div style="flex:1;display:flex;flex-direction:column;">
+    <div class="cash-balance-lbl">Cash &amp; Bank Balance</div>
+    <div class="cash-balance-val" style="font-size:1.4rem;<%= cashBal != null && cashBal < 0 ? 'color:var(--ins-red)' : '' %>">
+      <%= cashBal != null ? (cashBal < 0 ? '-' : '') + fmtGbpPlain(cashBal, 0) : '—' %>
+    </div>
+    <div class="pay-section-title">Enough cash to pay?...</div>
+    <% const effectiveCash = (cashBal != null && cashBal > 0) ? cashBal : 0; %>
+    <% if (payItems.length === 0) { %>
+    <div style="font-size:0.78rem;color:var(--ins-text-muted);font-style:italic;">No outstanding liabilities on the balance sheet</div>
+    <% } %>
+    <% for (const item of payItems) { %>
+    <div class="pay-row">
+      <span class="pay-row-name"><%- item.name %></span>
+      <span>
+        <span class="pay-row-val"><%= fmtGbpPlain(item.val, 0) %> </span>
+        <% if (item.name === 'Corporation Tax') { %>
+        <a href="<%= settingsUrl %>#cash-health" style="text-decoration:none;font-size:0.72rem;" title="Edit in Settings">✏️</a>
+        <% } %>
+        <span class="<%= effectiveCash >= item.val ? 'pay-check' : 'pay-cross' %>"><%= effectiveCash >= item.val ? '✓' : '✗' %></span>
+      </span>
+    </div>
+    <% } %>
+    <div class="pay-divider"></div>
+    <div class="pay-total-row">
+      <span>Total Expected Outgoings</span>
+      <span><%= fmtGbpPlain(totalOutgoing, 0) %></span>
+    </div>
+    <div class="recent-title">Recent Cash Movements...</div>
+    <% for (const rm of recentMonths) { %>
+    <div class="recent-row">
+      <span class="recent-row-month"><%= rm.label %></span>
+      <span class="recent-row-val<%= rm.value > 0 ? ' positive' : (rm.value < 0 ? ' negative' : '') %>"><%= fmtGbpPlain(rm.value, 0) %></span>
+    </div>
+    <% } %>
+    <% if (recentMonths.length === 0) { %>
+    <div style="font-size:0.78rem;color:var(--ins-text-muted);font-style:italic;">No monthly data available</div>
+    <% } %>
+    </div><!-- /right col -->
+  </div>
+</div>
+
+<!-- 3. BOOKKEEPING HEALTH CHECK -->
+<div class="i-card">
+  <div class="i-card-head">
+    <span class="i-card-title">Bookkeeping Health Check</span>
+    <span class="i-card-icons">👁 <a href="<%= settingsUrl %>">⚙️</a></span>
+  </div>
+  <div class="i-card-body" style="flex-direction:row;gap:14px;align-items:flex-start;">
+    <div style="display:flex;flex-direction:column;align-items:center;flex-shrink:0;">
+      <div style="position:relative;width:90px;height:90px;"><canvas id="chartHealth"></canvas></div>
+      <span class="donut-heart">❤️</span>
+      <div style="font-size:0.7rem;color:var(--ins-text-muted);text-align:center;margin-top:2px;">Health Indicator</div>
+    </div>
+    <div style="flex:1;display:flex;flex-direction:column;">
+    <div style="font-size:1.4rem;font-weight:700;color:var(--ins-text);margin-bottom:10px;"><%= healthPct %>%</div>
+    <div class="bk-issues">Issues identified include:</div>
+    <div class="bk-issue-row"><span class="bk-issue-count"><%= bankCount %></span><span class="bk-issue-name">Bank Transactions</span></div>
+    <div class="bk-issue-row"><span class="bk-issue-count"><%= dupCount %></span><span class="bk-issue-name">Duplicate Invoices &amp; Bills</span></div>
+    <div class="bk-issue-row"><span class="bk-issue-count"><%= oldCount %></span><span class="bk-issue-name">Old Invoices &amp; Bills</span></div>
+    <div class="bk-issue-row"><span class="bk-issue-count"><%= otherCount %></span><span class="bk-issue-name">Other Items</span></div>
+    <div style="margin:8px 0 2px;">
+      <div style="font-size:0.75rem;font-weight:600;color:var(--ins-text);">Issues Identified:</div>
+      <div class="bk-total"><%= bankCount + dupCount + oldCount + otherCount %></div>
+      <div class="bk-total-lbl">(up to <%= now.getDate().toString().padStart(2,'0') %>/<%= (now.getMonth()+1).toString().padStart(2,'0') %>/<%= now.getFullYear() %>)</div>
+    </div>
+    <div style="margin-top:auto;padding-top:4px;">
+      <a href="#" class="btn-outline-teal" onclick="showTab('health');return false;">Review Issues</a>
+    </div>
+    </div><!-- /right col -->
+  </div>
+</div>
+
+<!-- 4. PROFITABILITY -->
+<div class="i-card">
+  <div class="i-card-head">
+    <span class="i-card-title">Profitability</span>
+    <span class="i-card-icons">👁 <a href="<%= settingsUrl %>">⚙️</a></span>
+  </div>
+  <div class="i-card-body">
+    <% if (pnl) { %>
+    <div class="chart-box"><canvas id="chartProfit"></canvas></div>
+    <% } else { %>
+    <div class="chart-empty">Sync to load profitability data</div>
+    <% } %>
+  </div>
+</div>
+
+<!-- 5. CORPORATION TAX ESTIMATE -->
+<div class="i-card">
+  <div class="i-card-head">
+    <span class="i-card-title">Corporation Tax Estimate</span>
+    <span class="i-card-icons">👁 <a href="<%= settingsUrl %>">⚙️</a></span>
+  </div>
+  <div class="i-card-body">
+    <% if (fyDisplay.length > 0) { %>
+    <div class="chart-box chart-box-xs"><canvas id="chartCorpTax"></canvas></div>
+    <% } else { %>
+    <div class="chart-empty">Sync to load corporation tax data</div>
+    <% } %>
+    <% if (fyDisplay.length > 0) { const cur = fyDisplay[0]; %>
+    <div style="margin-top:10px;">
+      <div class="ctax-current-lbl">Year ending <%= fmtFyLabelFull(cur.label) %><%= cur.isCurrent ? ' (to date)' : '' %></div>
+      <div class="ctax-estimate">Estimate of Corporation Tax Bill: <%= fmtGbpPlain(cur.displayEstimate, 2) %></div>
+      <div class="ctax-basis">Based upon taxable profits<%= cur.isCurrent ? ' to date.' : '.' %></div>
+      <a href="#" class="ctax-calc-link" onclick="var e=document.getElementById('ctaxExplain');e.style.display=e.style.display==='none'?'block':'none';return false;">How is this calculated?</a>
+      <div id="ctaxExplain" style="display:none;font-size:0.75rem;color:var(--ins-text-muted);margin-top:6px;line-height:1.5;">
+        The estimate applies HMRC's small-profits rate (19% up to £50,000 taxable profit) with marginal relief
+        tapering to the main rate (25% from £250,000), unless custom rate bands are configured in Settings — applied
+        to the net profit for the period shown in Xero's Profit &amp; Loss report, after any configured add-backs and
+        deductions.
+      </div>
+    </div>
+    <% } %>
+  </div>
+</div>
+
+<!-- 6. DIRECTORS' LOAN ACCOUNTS -->
+<div class="i-card">
+  <div class="i-card-head">
+    <span class="i-card-title">Directors' Loan Accounts</span>
+    <span class="i-card-icons">👁 <a href="<%= settingsUrl %>#directors-loan">⚙️</a></span>
+  </div>
+  <div class="i-card-body">
+    <div class="dla-section-title">The following director(s) currently owe money to the company <a href="https://www.gov.uk/directors-loans" target="_blank" class="ctax-calc-link">(so what?)</a>:</div>
+    <% const owedToCompany = dirAccounts.filter(d => d.balance < 0); %>
+    <% if (owedToCompany.length === 0) { %>
+    <div class="dla-none">No directors currently owe money to the company.</div>
+    <% } else { for (const d of owedToCompany) { %>
+    <div class="dla-row">
+      <span class="dla-icon">⚠️</span>
+      <div>
+        <div class="dla-name"><%= d.name %> | Balance: <%= fmtGbpSigned(d.balance) %></div>
+        <% if (d.prevBalance != null) { %><div class="dla-meta">Since <%= prevFyEndLabel %>: <%= fmtGbpSigned(d.prevBalance) %></div><% } %>
+      </div>
+    </div>
+    <% } } %>
+    <div class="dla-section-title" style="margin-top:12px;">The company currently owes money to the following director(s) <a href="https://www.gov.uk/directors-loans" target="_blank" class="ctax-calc-link">(so what?)</a>:</div>
+    <% const owedToDirector = dirAccounts.filter(d => d.balance > 0); %>
+    <% if (owedToDirector.length === 0) { %>
+    <div class="dla-none">The company does not currently owe money to any directors.</div>
+    <% } else { for (const d of owedToDirector) { %>
+    <div class="dla-row" style="background:#f0fdf4;border-color:#bbf7d0;">
+      <span class="dla-icon">ℹ️</span>
+      <div>
+        <div class="dla-name"><%= d.name %> | Balance: <%= fmtGbp(d.balance, 2) %></div>
+      </div>
+    </div>
+    <% } } %>
+    <div style="margin-top:auto;padding-top:10px;">
+      <a href="https://www.gov.uk/directors-loans" target="_blank" class="btn-outline-teal">View HMRC Guidance</a>
+    </div>
+  </div>
+</div>
+
+<!-- 6b. BUSINESS VALUATION -->
+<div class="i-card">
+  <div class="i-card-head">
+    <span class="i-card-title">Business Valuation</span>
+    <span class="i-card-icons">👁 <a href="<%= settingsUrl %>">⚙️</a></span>
+  </div>
+  <div class="i-card-body">
+    <div class="chart-box chart-box-sm"><canvas id="chartValuation"></canvas></div>
+    <div style="margin-top:10px;">
+      <div class="ctax-current-lbl">Valuation Estimate</div>
+      <% if (!valuationModel) { %>
+      <div style="font-size:1.05rem;font-weight:700;color:var(--ins-teal);line-height:1.3;margin:2px 0 10px;">No valuation model selected</div>
+      <% } else if (valuationEstimate == null) { %>
+      <div style="font-size:0.85rem;color:var(--ins-text-muted);margin:2px 0 10px;">Not enough synced data for <%= VALUATION_MODEL_LABELS[valuationModel] %> yet</div>
+      <% } else { %>
+      <div style="font-size:1.3rem;font-weight:700;color:var(--ins-teal);line-height:1.3;margin:2px 0 2px;"><%= fmtGbpPlain(valuationEstimate, 0) %></div>
+      <div style="font-size:0.72rem;color:var(--ins-text-muted);margin-bottom:10px;"><%= VALUATION_MODEL_LABELS[valuationModel] %> × <%= valuationMultiple %></div>
+      <% } %>
+      <a href="<%= settingsUrl %>#business-valuation" class="btn-outline-teal">Edit Valuation Model</a>
+    </div>
+  </div>
+</div>
+
+<!-- 7. WORKING CAPITAL CYCLE -->
+<div class="i-card">
+  <div class="i-card-head">
+    <span class="i-card-title">Working Capital Cycle</span>
+    <span class="i-card-icons">👁 <a href="<%= settingsUrl %>#working-capital">⚙️</a></span>
+  </div>
+  <div class="i-card-body">
+    <div class="chart-box chart-box-sm"><canvas id="chartWC"></canvas></div>
+    <div class="wc-summary">
+      It is taking...
+      <div style="font-size:1.6rem;font-weight:700;color:var(--ins-teal);line-height:1.2;margin:2px 0;"><%= workingCapDays %> Day<%= workingCapDays === 1 ? '' : 's' %></div>
+      to turn the business' cash outflows into cash inflows.
+    </div>
+    <div class="wc-days-row"><span class="wc-days-name">Debtor Days:</span><span class="wc-days-val"><%= debtorDays %></span></div>
+    <div class="wc-days-row"><span class="wc-days-name">Stock Days:</span><span class="wc-days-val"><%= stockDays %></span></div>
+    <div class="wc-days-row"><span class="wc-days-name">Creditor Days:</span><span class="wc-days-val">(<%= creditorDays %>)</span></div>
+  </div>
+</div>
+
+<!-- 8. DIVIDEND AVAILABILITY -->
+<div class="i-card">
+  <div class="i-card-head">
+    <span class="i-card-title">Dividend Availability</span>
+    <span class="i-card-icons">👁 <a href="<%= settingsUrl %>#dividend">⚙️</a></span>
+  </div>
+  <div class="i-card-body">
+    <div>
+      <div class="div-row">
+        <span class="div-row-label">Current profit reserves (per balance sheet)</span>
+        <span class="div-row-val"><%= retainedEarnings != null ? fmtGbpPlain(retainedEarnings, 2) : '—' %></span>
+      </div>
+      <% // Xenon lists oldest FY first, current FY last — reverse fyDisplay (which is newest-first)
+         // for display while keeping each row's original index for the edit button/override key. %>
+      <% for (let i = fyDisplay.length - 1; i >= 0; i--) { const fy = fyDisplay[i]; %>
+      <div class="div-row">
+        <span class="div-row-label">Less Corporation tax estimate (y.e. <%= fy.label %>)</span>
+        <span style="display:flex;align-items:center;gap:4px;">
+          <span class="div-row-val deduction"><%= fmtGbp(fy.displayEstimate, 2) %></span>
+          <button class="div-row-edit" onclick="openCtaxEdit(<%= i %>, '<%= fy.label %>', <%= fy.displayEstimate.toFixed(2) %>)">✏️</button>
+        </span>
+      </div>
+      <% } %>
+      <% if (dividendsPaid > 0) { %>
+      <div class="div-row">
+        <span class="div-row-label">Less dividends already paid</span>
+        <span class="div-row-val deduction"><%= fmtGbp(dividendsPaid, 2) %></span>
+      </div>
+      <% } %>
+      <div class="div-divider"></div>
+      <div class="div-total-row">
+        <span>Maximum Dividend Available</span>
+        <span class="div-total-val"><%= fmtGbpPlain(Math.max(0, dividendAvailable), 2) %></span>
+      </div>
+      <div style="margin-top:12px;">
+        <a href="https://www.gov.uk/guidance/dividends-paid-on-or-after-6-april-1999-what-they-are" target="_blank" class="btn-outline-teal">View HMRC Guidance</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div><!-- /insight-grid -->
+
+<!-- Corp Tax Edit Modal -->
+<div class="ctax-edit-modal" id="ctaxEditModal">
+  <div class="ctax-edit-box">
+    <h4>Override Corp Tax Estimate</h4>
+    <form id="ctaxEditForm" method="POST" action="/client/<%= org.xero_tenant_id %>/insight/ctax-override">
+      <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+      <input type="hidden" name="fy_index" id="editFyIndex">
+      <label id="editFyLabel">Financial Year</label>
+      <input type="number" name="estimate" id="editEstimate" step="0.01" min="0" placeholder="Enter corp tax estimate £">
+      <div class="ctax-edit-btns">
+        <button type="button" class="ctax-edit-cancel" onclick="closeCtaxEdit()">Cancel</button>
+        <button type="submit" class="ctax-edit-save">Save</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<% } %><!-- /hasAnyData -->
+</div><!-- /insight-wrap -->
+
+<script>
+(function() {
+  const D = {
+    pnl:       <%- JSON.stringify(pnl)       %>,
+    bs:        <%- JSON.stringify(bs)        %>,
+    fyDisplay: <%- JSON.stringify(fyDisplay) %>,
+    healthPct: <%= healthPct %>,
+    cashBal:   <%- cashBal != null ? cashBal : 'null' %>,
+    totalOut:  <%= totalOutgoing %>,
+    wc: {
+      days: <%- workingCapDays != null ? workingCapDays : 'null' %>,
+      debtor: <%- debtorDays != null ? debtorDays : 'null' %>,
+      stock: <%- stockDays != null ? stockDays : 'null' %>,
+      creditor: <%- creditorDays != null ? creditorDays : 'null' %>,
+    },
+  };
+
+  function fmtK(n) {
+    if (n == null) return '—';
+    const abs = Math.abs(n);
+    if (abs >= 1000) return (n < 0 ? '-' : '') + '£' + (abs / 1000).toFixed(0) + 'k';
+    return (n < 0 ? '-' : '') + '£' + Math.round(abs);
+  }
+
+  const TEAL  = '#0d9488', TEAL_A = 'rgba(13,148,136,0.12)';
+  const BLUE  = '#3b82f6', BLUE_A = 'rgba(59,130,246,0.12)';
+  const GREEN = '#22c55e', GREEN_A= 'rgba(34,197,94,0.10)';
+  const AMBER = '#f59e0b', RED    = '#ef4444';
+
+  function donut(id, pct, color) {
+    const c = document.getElementById(id); if (!c) return;
+    new Chart(c, {
+      type: 'doughnut',
+      data: { datasets: [{ data: [pct, 100 - pct], backgroundColor: [color, '#e5e7eb'], borderWidth: 0 }] },
+      options: { cutout: '72%', plugins: { legend: { display: false }, tooltip: { enabled: false } }, animation: false },
+    });
+  }
+
+  function renderInsightCharts() {
+    /* 1. Sales bar — trailing 5 months only, matching Xenon */
+    if (D.pnl) {
+      const allLabels = (D.pnl.headers || []).map(h => { const m = String(h).match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[\s-]?(\d{2})?/i); return m ? (m[1] + (m[2] ? '-' + m[2] : '')) : h; });
+      const allVals   = D.pnl.totalIncome || [];
+      const labels = allLabels.slice(-5);
+      const vals   = allVals.slice(-5);
+      const sc = document.getElementById('chartSales');
+      if (sc) new Chart(sc, {
+        type: 'bar',
+        data: { labels, datasets: [{ label: 'Sales', data: vals, backgroundColor: TEAL, borderRadius: 3 }] },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => '£' + ctx.parsed.y.toLocaleString('en-GB', {minimumFractionDigits:0}) } } },
+          scales: { x: { grid: { display: false }, ticks: { font: { size: 10 } } }, y: { ticks: { callback: fmtK, font: { size: 10 } }, grid: { color: '#f3f4f6' } } },
+        },
+      });
+    }
+
+    /* 2. Cash donut */
+    const cashPct = D.cashBal != null && D.totalOut > 0 ? Math.max(1, Math.min(100, Math.round(D.cashBal / D.totalOut * 100))) : (D.cashBal != null ? 100 : 0);
+    const cashCol = cashPct >= 100 ? GREEN : (cashPct >= 50 ? AMBER : RED);
+    donut('chartCash', cashPct, cashCol);
+    const lbl = document.getElementById('cashPctLabel');
+    if (lbl) lbl.textContent = cashPct + '%';
+
+    /* 3. Health donut */
+    const hp = D.healthPct;
+    donut('chartHealth', hp, hp >= 80 ? GREEN : hp >= 50 ? AMBER : RED);
+
+    /* 4. Profitability area */
+    const pc = document.getElementById('chartProfit');
+    if (pc && D.pnl) {
+      const allLabels = (D.pnl.headers || []).map(h => { const m = String(h).match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[\s-]?(\d{2})?/i); return m ? (m[1] + (m[2] ? '-' + m[2] : '')) : h; });
+      const labels = allLabels.slice(-7);
+      new Chart(pc, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            { label: 'Total Income', data: (D.pnl.totalIncome || []).slice(-7), borderColor: BLUE, backgroundColor: BLUE_A, fill: true, tension: 0.3, pointRadius: 2, borderWidth: 2 },
+            { label: 'Gross Profit', data: (D.pnl.grossProfit || []).slice(-7), borderColor: GREEN, backgroundColor: GREEN_A, fill: true, tension: 0.3, pointRadius: 2, borderWidth: 2 },
+            { label: 'Net Profit',   data: (D.pnl.netProfit   || []).slice(-7), borderColor: TEAL, backgroundColor: TEAL_A, fill: true, tension: 0.3, pointRadius: 2, borderWidth: 2 },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { position: 'top', labels: { boxWidth: 10, font: { size: 11 } } }, tooltip: { callbacks: { label: ctx => ctx.dataset.label + ': £' + ctx.parsed.y.toLocaleString('en-GB', {minimumFractionDigits:0}) } } },
+          scales: { x: { grid: { display: false }, ticks: { font: { size: 10 } } }, y: { ticks: { callback: fmtK, font: { size: 10 } }, grid: { color: '#f3f4f6' } } },
+        },
+      });
+    }
+
+    /* 5. Corp Tax bar */
+    const cc = document.getElementById('chartCorpTax');
+    if (cc && D.fyDisplay && D.fyDisplay.length) {
+      const rev = [...D.fyDisplay].reverse();
+      const SHORT_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      const shortFyLabel = label => {
+        const m = String(label || '').match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+        return m ? `${parseInt(m[1],10)} ${SHORT_MONTHS[parseInt(m[2],10)-1]} ${m[3]}` : label;
+      };
+      new Chart(cc, {
+        type: 'bar',
+        data: { labels: rev.map(f => shortFyLabel(f.label)), datasets: [{ data: rev.map(f => f.displayEstimate || 0), backgroundColor: rev.map((_, i) => i === rev.length - 1 ? TEAL : BLUE), borderRadius: 4 }] },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => '£' + ctx.parsed.y.toLocaleString('en-GB', {minimumFractionDigits:2}) } } },
+          scales: { x: { grid: { display: false }, ticks: { font: { size: 10 } } }, y: { ticks: { callback: fmtK, font: { size: 10 } }, grid: { color: '#f3f4f6' } } },
+        },
+      });
+    }
+
+    /* Trailing 6-month labels, shared by Working Capital and Business Valuation (Xenon shows
+       both against the same window) */
+    const monthLabels6 = D.pnl
+      ? (D.pnl.headers || []).map(h => { const m = String(h).match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[\s-]?(\d{2})?/i); return m ? (m[1] + (m[2] ? '-' + m[2] : '')) : h; }).slice(-6)
+      : ['6m', '5m', '4m', '3m', '2m', 'Now'];
+
+    /* 7. Working capital line */
+    const wc = document.getElementById('chartWC');
+    if (wc) {
+      new Chart(wc, {
+        type: 'line',
+        data: {
+          labels: monthLabels6,
+          datasets: [{ data: monthLabels6.map(() => D.wc.days), borderColor: TEAL, backgroundColor: TEAL_A, fill: true, tension: 0.2, pointRadius: 2, borderWidth: 2 }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ctx.parsed.y + ' days' } } },
+          scales: { x: { grid: { display: false }, ticks: { font: { size: 9 } } }, y: { ticks: { callback: v => v + 'd', font: { size: 9 } }, grid: { color: '#f3f4f6' } } },
+        },
+      });
+    }
+
+    /* 7b. Business Valuation — placeholder flat-zero line (no valuation model configured) */
+    const val = document.getElementById('chartValuation');
+    if (val) {
+      new Chart(val, {
+        type: 'line',
+        data: {
+          labels: monthLabels6,
+          datasets: [{ data: monthLabels6.map(() => 0), borderColor: BLUE, backgroundColor: BLUE_A, fill: false, tension: 0.2, pointRadius: 2, borderWidth: 2 }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: false }, tooltip: { enabled: false } },
+          scales: { x: { grid: { display: false }, ticks: { font: { size: 9 } } }, y: { ticks: { font: { size: 9 } }, grid: { color: '#f3f4f6' } } },
+        },
+      });
+    }
+  }
+
+  window.renderInsightCharts = renderInsightCharts;
+
+  window.openCtaxEdit = function(idx, label, current) {
+    document.getElementById('editFyIndex').value = idx;
+    document.getElementById('editFyLabel').textContent = 'Financial Year ending ' + label;
+    document.getElementById('editEstimate').value = current;
+    document.getElementById('ctaxEditModal').classList.add('open');
+  };
+  window.closeCtaxEdit = function() { document.getElementById('ctaxEditModal').classList.remove('open'); };
+
+  const modal = document.getElementById('ctaxEditModal');
+  if (modal) modal.addEventListener('click', function(e) { if (e.target === this) window.closeCtaxEdit(); });
+})();
+</script>

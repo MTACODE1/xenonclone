@@ -13,10 +13,21 @@ const {
   findDuplicates,
   excludeDuplicateDrafts,
   findUnexpectedDefaultLines,
+  findMisallocatedLines,
+  resolveCapitalReviewCandidateCodes,
   isOldDocument,
   isPurchaseTaxExemptAccount,
   resolvePeriodChecked,
+  resolveCheckDisplayStatus,
   resolveSupplierPatternLookbackMonths,
+  resolveMultiAccountPatternLookbackMonths,
+  resolveMultiAccountSuppliersMinValue,
+  resolveMultiTaxSuppliersMinValue,
+  resolveCapitalReviewDefaultThreshold,
+  resolveMisallocatedItemsDefaultThreshold,
+  resolvePurchaseTaxMissingExcludeCodes,
+  resolveDuplicateInvoiceWindowDays,
+  resolveDuplicateBillWindowDays,
   selectAuthorisedUnreconciled,
   selectOldCredits,
   sumAbsoluteExposure,
@@ -37,7 +48,7 @@ test('documented defaults remain explicit and stable', () => {
     duplicateBillWindowDays: 3,
     oldDocumentDays: 60,
     directMatchWindowDays: 30,
-    contactSimilarityThreshold: 0.7,
+    contactSimilarityThreshold: 0.9,
   });
 });
 
@@ -67,6 +78,20 @@ test('unreconciled payments are restricted to genuine bank accounts', () => {
   assert.equal(selectAuthorisedUnreconciled([], payments).length, 3);
 });
 
+test('bankAccountIds also excludes specific bank accounts on the bank-transaction side — Xenon\'s per-account exclusion', () => {
+  const bankTransactions = [
+    { bankTransactionID: 'kept', status: 'AUTHORISED', isReconciled: false, bankAccount: { accountID: 'bank-1' }, total: 50 },
+    { bankTransactionID: 'excluded', status: 'AUTHORISED', isReconciled: false, bankAccount: { accountID: 'bank-2' }, total: 75 },
+  ];
+  // A practice excludes bank-2 (e.g. a dormant account) by passing only the remaining accounts.
+  const selected = selectAuthorisedUnreconciled(bankTransactions, [], new Set(['bank-1']));
+  assert.deepEqual(selected.map(item => item.bankTransactionID), ['kept']);
+
+  // With no bankAccountIds at all (no exclusions configured), nothing is filtered — every
+  // currently-validated client's behaviour is unchanged by this filter existing.
+  assert.equal(selectAuthorisedUnreconciled(bankTransactions, []).length, 2);
+});
+
 test('unreconciled selection is scoped to the selected period, not to all history', () => {
   const { resolvePeriod, isWithinPeriod } = require('../src/services/periodResolver');
   const period = resolvePeriod(
@@ -84,6 +109,17 @@ test('unreconciled selection is scoped to the selected period, not to all histor
   assert.deepEqual(selected.map(item => item.bankTransactionID), ['in-period']);
   assert.equal(isWithinPeriod('2025-10-31', period), false);
   assert.equal(isWithinPeriod('2025-11-01', period), true);
+});
+
+test('reanalysis fetches fresh Xero data for the active period and uses cache for a preview period', () => {
+  const { shouldUseCacheOnlyForReanalysis } = require('../src/services/periodResolver');
+  const active = 'since_lock_date:2025-10-31:2026-08-07';
+  assert.equal(shouldUseCacheOnlyForReanalysis(active, active), false);
+  assert.equal(
+    shouldUseCacheOnlyForReanalysis(active, 'rolling_12_months:2025-08-08:2026-08-07'),
+    true
+  );
+  assert.equal(shouldUseCacheOnlyForReanalysis(null, active), false);
 });
 
 test('absolute exposure prevents credits from cancelling debits', () => {
@@ -250,9 +286,15 @@ test('direct matching consumes each document once and prefers the nearest date',
   assert.equal(matches[1].document.invoiceID, 'far');
 });
 
-test('duplicate contacts use normalized 70 percent similarity', () => {
-  assert.ok(contactNameSimilarity(fixture.contactNames[0].name, fixture.contactNames[1].name) >= 0.7);
+// Threshold raised from 70% to 90% on 7 Sep 2026, cross-checked against the practice's own real
+// Xenon general settings ("Contact name similarity score is at least 90%") — see CHECK_DEFAULTS.
+test('duplicate contacts use normalized 90 percent similarity', () => {
+  assert.ok(contactNameSimilarity(fixture.contactNames[0].name, fixture.contactNames[1].name) >= 0.9);
   assert.equal(findDuplicateContacts(fixture.contactNames).length, 1);
+  // A pair that would have been flagged at the old 70% threshold (differs by "Ltd" vs "Limited",
+  // ~83% similar) must NOT be flagged at 90% — proves the threshold actually moved, not just the
+  // fixture getting easier to pass.
+  assert.ok(contactNameSimilarity('Northstar Supplies Ltd', 'Northstar Supplies Limited') < 0.9);
 });
 
 test('bank wrong-direction tax findings are display-only', () => {
@@ -334,7 +376,7 @@ test('a normal calculated check still receives the real period key', () => {
   );
   // A dated label a check sets itself (e.g. opening_balance_differences' own
   // "filed_accounts_2025-10-31") is NOT a reserved label, so it still yields to the active
-  // period key exactly as before this fix — only the four reserved strings are protected.
+  // period key exactly as before this fix — only the five reserved strings are protected.
   assert.equal(
     resolvePeriodChecked('filed_accounts_2025-10-31', 'since_lock_date:2025-10-31:2026-08-13'),
     'since_lock_date:2025-10-31:2026-08-13'
@@ -346,10 +388,70 @@ test('with no active period key, a non-reserved label falls back to itself rathe
   assert.equal(resolvePeriodChecked(undefined, null), undefined);
 });
 
-test('RESERVED_PERIOD_LABELS contains exactly the four semantic states, nothing else', () => {
+test('RESERVED_PERIOD_LABELS contains exactly the five semantic states, nothing else', () => {
+  // 'not_vat_registered' (the not_applicable category) joined the other four this session — see
+  // periodStatus.js for the full model. This test exists specifically to catch a future label
+  // being added without updating resolveCheckDisplayStatus to handle it.
   assert.deepEqual([...RESERVED_PERIOD_LABELS].sort(), [
-    'needs_sync', 'not_configured', 'out_of_scope', 'unavailable',
+    'needs_sync', 'not_configured', 'not_vat_registered', 'out_of_scope', 'unavailable',
   ]);
+});
+
+// Confirmed bug this fixes: sales_tax_missing/purchase_tax_missing write
+// period_checked: 'not_vat_registered' for a client whose Xero salesTaxBasis is 'NONE', but before
+// it was added to RESERVED_PERIOD_LABELS it was silently overwritten by the sync's real period key
+// — a non-VAT-registered client's zero-findings result was then indistinguishable in storage from
+// a VAT-registered client that was checked and genuinely found nothing.
+test('not_vat_registered survives resolvePeriodChecked across every kind of active period key', () => {
+  // The active period key differs between a full sync (a real since_lock_date/custom/etc. key) and
+  // a single-check reanalysis (still a real key, just resolved from a possibly different selected
+  // period) — resolvePeriodChecked has no branch that behaves differently between those two
+  // callers, so proving preservation holds for several distinct key shapes covers both paths.
+  for (const activeKey of [
+    'since_lock_date:2025-10-31:2026-09-07',
+    'custom:2019-11-30:2026-08-07',
+    'rolling_12_months:2025-09-08:2026-09-07',
+    null,
+  ]) {
+    assert.equal(resolvePeriodChecked('not_vat_registered', activeKey), 'not_vat_registered');
+  }
+});
+
+// --- resolveCheckDisplayStatus ---
+// The single source of truth the dashboard UI and the health score both read from, so the two can
+// never disagree about what a persisted issue means.
+
+test('resolveCheckDisplayStatus: not_applicable is distinct from ok, even though both carry count: 0', () => {
+  assert.equal(
+    resolveCheckDisplayStatus({ period_checked: 'not_vat_registered', count: 0 }),
+    'not_applicable'
+  );
+  assert.equal(
+    resolveCheckDisplayStatus({ period_checked: 'since_lock_date:2025-10-31:2026-09-07', count: 0 }),
+    'ok'
+  );
+});
+
+test('resolveCheckDisplayStatus: issues, not_configured, unavailable, and not_synced resolve correctly', () => {
+  assert.equal(
+    resolveCheckDisplayStatus({ period_checked: 'since_lock_date:2025-10-31:2026-09-07', count: 5 }),
+    'issues'
+  );
+  assert.equal(resolveCheckDisplayStatus({ period_checked: 'not_configured', count: null }), 'not_configured');
+  assert.equal(resolveCheckDisplayStatus({ period_checked: 'needs_sync', count: null }), 'not_configured');
+  assert.equal(resolveCheckDisplayStatus({ period_checked: 'unavailable', count: null }), 'unavailable');
+  assert.equal(resolveCheckDisplayStatus({ period_checked: 'out_of_scope', count: null }), 'unavailable');
+  assert.equal(
+    resolveCheckDisplayStatus({ period_checked: 'since_lock_date:2025-10-31:2026-09-07', count: null }),
+    'not_synced'
+  );
+});
+
+test('resolveCheckDisplayStatus: unavailable/not_configured take precedence if a check ever wrote both a reserved label and a null count', () => {
+  // Defensive ordering test: unavailable and not_configured checks always carry count: null in
+  // practice, so they must be resolved before the null-count fallback claims them as "not_synced".
+  assert.equal(resolveCheckDisplayStatus({ period_checked: 'unavailable', count: null }), 'unavailable');
+  assert.equal(resolveCheckDisplayStatus({ period_checked: 'not_configured', count: null }), 'not_configured');
 });
 
 // grossLineAmount/netLineAmount — shared so every check reading line.lineAmount for a total or
@@ -402,6 +504,104 @@ test('resolveSupplierPatternLookbackMonths uses a configured positive value, mat
   assert.equal(resolveSupplierPatternLookbackMonths({ supplier_pattern_lookback_months: 6 }), 6);
 });
 
+// resolveMultiAccountPatternLookbackMonths — multi-account documents the identical "3 months
+// prior, changeable per client" rule as multi-tax above, but must not share multi-tax's column:
+// widening one client's multi-tax lookback (e.g. Handymanz to 18 months) must not also widen
+// their separately-validated multi-account default.
+
+test('resolveMultiAccountPatternLookbackMonths defaults to 12 when unset, null, or invalid', () => {
+  assert.equal(resolveMultiAccountPatternLookbackMonths({}), 12);
+  assert.equal(resolveMultiAccountPatternLookbackMonths({ multi_account_pattern_lookback_months: null }), 12);
+  assert.equal(resolveMultiAccountPatternLookbackMonths({ multi_account_pattern_lookback_months: 0 }), 12);
+  assert.equal(resolveMultiAccountPatternLookbackMonths({ multi_account_pattern_lookback_months: -3 }), 12);
+  assert.equal(resolveMultiAccountPatternLookbackMonths(undefined), 12);
+});
+
+test('resolveMultiAccountPatternLookbackMonths uses a configured positive value independent of supplier_pattern_lookback_months', () => {
+  assert.equal(resolveMultiAccountPatternLookbackMonths({ multi_account_pattern_lookback_months: 3 }), 3);
+  assert.equal(resolveMultiAccountPatternLookbackMonths({
+    multi_account_pattern_lookback_months: 3, supplier_pattern_lookback_months: 18,
+  }), 3);
+});
+
+// Config-isolation resolvers (2026-09) — each takes (org, practiceDefault) and must fall through to
+// the practice default unchanged when the organisation has no override, so every currently-validated
+// client's behaviour is untouched by these columns simply existing.
+
+test('resolveMultiAccountSuppliersMinValue falls through to the practice default when unset', () => {
+  assert.equal(resolveMultiAccountSuppliersMinValue({}, 0), 0);
+  assert.equal(resolveMultiAccountSuppliersMinValue({ multi_account_suppliers_min_value_gbp: null }, 25), 25);
+  assert.equal(resolveMultiAccountSuppliersMinValue(undefined, 25), 25);
+});
+
+test('resolveMultiAccountSuppliersMinValue uses a configured organisation override, including zero', () => {
+  assert.equal(resolveMultiAccountSuppliersMinValue({ multi_account_suppliers_min_value_gbp: 50 }, 0), 50);
+  assert.equal(resolveMultiAccountSuppliersMinValue({ multi_account_suppliers_min_value_gbp: 0 }, 25), 0);
+});
+
+test('resolveMultiTaxSuppliersMinValue falls through to the practice default when unset', () => {
+  assert.equal(resolveMultiTaxSuppliersMinValue({}, 0), 0);
+  assert.equal(resolveMultiTaxSuppliersMinValue({ multi_tax_suppliers_min_value_gbp: null }, 10), 10);
+  assert.equal(resolveMultiTaxSuppliersMinValue(undefined, 10), 10);
+});
+
+test('resolveMultiTaxSuppliersMinValue uses a configured organisation override, independent of multi-account\'s', () => {
+  assert.equal(resolveMultiTaxSuppliersMinValue({ multi_tax_suppliers_min_value_gbp: 15 }, 0), 15);
+  assert.equal(resolveMultiTaxSuppliersMinValue(
+    { multi_tax_suppliers_min_value_gbp: 15, multi_account_suppliers_min_value_gbp: 999 }, 0
+  ), 15);
+});
+
+test('resolveCapitalReviewDefaultThreshold falls through to the practice default when unset or invalid', () => {
+  assert.equal(resolveCapitalReviewDefaultThreshold({}, 500), 500);
+  assert.equal(resolveCapitalReviewDefaultThreshold({ capital_review_default_threshold_gbp: null }, 500), 500);
+  assert.equal(resolveCapitalReviewDefaultThreshold({ capital_review_default_threshold_gbp: -10 }, 500), 500);
+});
+
+test('resolveCapitalReviewDefaultThreshold uses a configured organisation override', () => {
+  assert.equal(resolveCapitalReviewDefaultThreshold({ capital_review_default_threshold_gbp: 200 }, 500), 200);
+  assert.equal(resolveCapitalReviewDefaultThreshold({ capital_review_default_threshold_gbp: 0 }, 500), 0);
+});
+
+test('resolveMisallocatedItemsDefaultThreshold falls through to the practice default when unset', () => {
+  assert.equal(resolveMisallocatedItemsDefaultThreshold({}, 100), 100);
+  assert.equal(resolveMisallocatedItemsDefaultThreshold({ misallocated_items_default_threshold_gbp: null }, 100), 100);
+});
+
+test('resolveMisallocatedItemsDefaultThreshold uses a configured organisation override', () => {
+  assert.equal(resolveMisallocatedItemsDefaultThreshold({ misallocated_items_default_threshold_gbp: 250 }, 100), 250);
+});
+
+test('resolvePurchaseTaxMissingExcludeCodes falls through to the practice default when null/absent', () => {
+  assert.equal(resolvePurchaseTaxMissingExcludeCodes({}, '404,501'), '404,501');
+  assert.equal(resolvePurchaseTaxMissingExcludeCodes(undefined, '404,501'), '404,501');
+});
+
+test('resolvePurchaseTaxMissingExcludeCodes treats an explicit empty-string override as "no exclusions", not "unset"', () => {
+  assert.equal(resolvePurchaseTaxMissingExcludeCodes({ purchase_tax_missing_exclude_codes: '' }, '404,501'), '');
+  assert.equal(resolvePurchaseTaxMissingExcludeCodes({ purchase_tax_missing_exclude_codes: '999' }, '404,501'), '999');
+});
+
+test('resolveDuplicateInvoiceWindowDays defaults to the practice value (CHECK_DEFAULTS.duplicateWindowDays) when unset', () => {
+  assert.equal(resolveDuplicateInvoiceWindowDays({}), CHECK_DEFAULTS.duplicateWindowDays);
+  assert.equal(resolveDuplicateInvoiceWindowDays({ duplicate_invoice_window_days: null }), CHECK_DEFAULTS.duplicateWindowDays);
+  assert.equal(resolveDuplicateInvoiceWindowDays(undefined), CHECK_DEFAULTS.duplicateWindowDays);
+});
+
+test('resolveDuplicateInvoiceWindowDays uses a configured organisation override, including Xenon\'s documented 1-day default', () => {
+  assert.equal(resolveDuplicateInvoiceWindowDays({ duplicate_invoice_window_days: 1 }), 1);
+  assert.equal(resolveDuplicateInvoiceWindowDays({ duplicate_invoice_window_days: 0 }), 0);
+});
+
+test('resolveDuplicateBillWindowDays defaults to the practice value (CHECK_DEFAULTS.duplicateBillWindowDays) when unset', () => {
+  assert.equal(resolveDuplicateBillWindowDays({}), CHECK_DEFAULTS.duplicateBillWindowDays);
+  assert.equal(resolveDuplicateBillWindowDays({ duplicate_bill_window_days: null }), CHECK_DEFAULTS.duplicateBillWindowDays);
+});
+
+test('resolveDuplicateBillWindowDays uses a configured organisation override independent of the invoice window', () => {
+  assert.equal(resolveDuplicateBillWindowDays({ duplicate_bill_window_days: 1, duplicate_invoice_window_days: 5 }), 1);
+});
+
 test('a VAT-only Inclusive line nets to zero while remaining a real, non-zero gross amount', () => {
   // Regression guard for the bug this shape caused: a line that is entirely VAT (e.g. an
   // import-VAT adjustment) has net=0 but must not be mistaken for a genuinely empty £0.00 line —
@@ -410,4 +610,289 @@ test('a VAT-only Inclusive line nets to zero while remaining a real, non-zero gr
   const vatOnlyLine = { lineAmount: 24, taxAmount: 24 };
   assert.equal(netLineAmount('Inclusive', vatOnlyLine), 0);
   assert.notEqual(vatOnlyLine.lineAmount, 0);
+});
+
+// --- Cross-client isolation ---
+// The completion audit's #1 architectural risk: a setting change intended for one client must
+// never alter another client's result. Every config-isolation resolver takes the organisation row
+// as a plain argument (no shared/global lookup keyed by anything other than that argument), so
+// isolation is structural — these tests exist to prove and lock that in, not to discover it.
+
+test('organisation-scoped overrides cannot leak between two different organisations', () => {
+  const clientA = { id: 1, multi_account_suppliers_min_value_gbp: 500 };
+  const clientB = { id: 2 }; // no override at all
+
+  assert.equal(resolveMultiAccountSuppliersMinValue(clientA, 0), 500);
+  // Client B must still see the practice default, completely unaffected by client A's override,
+  // even though both calls happen in the same process using the same practiceDefault argument.
+  assert.equal(resolveMultiAccountSuppliersMinValue(clientB, 0), 0);
+});
+
+test('a per-account override for one organisation cannot alter the same account code for another', () => {
+  // account_override lives in chart_of_accounts_cache keyed by (org_id, account_code) — the
+  // resolvers here only ever see the org-level fields already scoped to a single organisation's
+  // row, so there is no code path by which reading org A's columns could return org B's values.
+  const orgA = { id: 1, capital_review_default_threshold_gbp: 200 };
+  const orgB = { id: 2, capital_review_default_threshold_gbp: 750 };
+  assert.equal(resolveCapitalReviewDefaultThreshold(orgA, 500), 200);
+  assert.equal(resolveCapitalReviewDefaultThreshold(orgB, 500), 750);
+  assert.notEqual(
+    resolveCapitalReviewDefaultThreshold(orgA, 500),
+    resolveCapitalReviewDefaultThreshold(orgB, 500)
+  );
+});
+
+test('duplicate window overrides are independent per organisation and per check', () => {
+  const orgA = { id: 1, duplicate_invoice_window_days: 1 }; // Xenon's documented default
+  const orgB = { id: 2, duplicate_invoice_window_days: 3 }; // this practice's calibrated default
+  assert.equal(resolveDuplicateInvoiceWindowDays(orgA), 1);
+  assert.equal(resolveDuplicateInvoiceWindowDays(orgB), 3);
+  // Neither organisation configured a bill window, so both fall through to the same practice
+  // default — that's the correct SHARED fallback behaviour, not leakage between organisations.
+  assert.equal(resolveDuplicateBillWindowDays(orgA), CHECK_DEFAULTS.duplicateBillWindowDays);
+  assert.equal(resolveDuplicateBillWindowDays(orgB), CHECK_DEFAULTS.duplicateBillWindowDays);
+});
+
+// --- Misallocated Items (findMisallocatedLines) ---
+// Xenon's Misallocated Items documentation covers four sources: Supplier Bill Line Items, Customer
+// Invoice Line Items, Money Out, and Money In. This was a confirmed coverage gap — the check only
+// ever scanned bills and Money Out. findMisallocatedLines is called once per source with that
+// source's own monitored-codes set, so these tests exercise it directly rather than through a live
+// sync (the calling logic in xeroSync.js is inline and not itself independently testable).
+
+test('findMisallocatedLines flags a line on a monitored account at or above threshold', () => {
+  const documents = [{
+    invoiceID: 'inv-1', contact: { name: 'Acme Ltd' }, date: '2026-01-15', lineAmountTypes: 'Exclusive',
+    lineItems: [{ accountCode: '260', description: 'trailer sale', lineAmount: 1000, taxAmount: 0 }],
+  }];
+  const findings = findMisallocatedLines(documents, new Set(['260']), () => 500, 'invoice');
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].source, 'invoice');
+  assert.equal(findings[0].accountCode, '260');
+  assert.equal(findings[0].amount, 1000);
+});
+
+test('findMisallocatedLines excludes lines below threshold, on unmonitored accounts, or with no account code', () => {
+  const documents = [{
+    invoiceID: 'inv-2', contact: { name: 'Acme Ltd' }, date: '2026-01-15', lineAmountTypes: 'Exclusive',
+    lineItems: [
+      { accountCode: '260', lineAmount: 10, taxAmount: 0 }, // below threshold
+      { accountCode: '429', lineAmount: 1000, taxAmount: 0 }, // not in monitoredCodes
+      { accountCode: null, lineAmount: 1000, taxAmount: 0 }, // no account code at all
+    ],
+  }];
+  const findings = findMisallocatedLines(documents, new Set(['260']), () => 500, 'invoice');
+  assert.equal(findings.length, 0);
+});
+
+test('findMisallocatedLines applies a per-account threshold override over the shared default', () => {
+  const documents = [{
+    invoiceID: 'inv-3', contact: { name: 'Acme Ltd' }, date: '2026-01-15', lineAmountTypes: 'Exclusive',
+    lineItems: [{ accountCode: '260', lineAmount: 150, taxAmount: 0 }],
+  }];
+  const getThreshold = code => (code === '260' ? 100 : 500);
+  assert.equal(findMisallocatedLines(documents, new Set(['260']), getThreshold, 'invoice').length, 1);
+  assert.equal(findMisallocatedLines(documents, new Set(['260']), () => 500, 'invoice').length, 0);
+});
+
+test('findMisallocatedLines keeps expense-side (bill/Money Out) and revenue-side (invoice/Money In) monitored sets independent', () => {
+  const expenseDoc = [{
+    invoiceID: 'bill-1', contact: { name: 'Supplier' }, date: '2026-01-15', lineAmountTypes: 'Exclusive',
+    lineItems: [{ accountCode: '429', lineAmount: 1000, taxAmount: 0 }], // General Expenses
+  }];
+  const revenueDoc = [{
+    invoiceID: 'inv-4', contact: { name: 'Customer' }, date: '2026-01-15', lineAmountTypes: 'Exclusive',
+    lineItems: [{ accountCode: '260', lineAmount: 1000, taxAmount: 0 }], // Other Revenue
+  }];
+  const expenseCodes = new Set(['429']);
+  const revenueCodes = new Set(['260']);
+  // A bill on a revenue-only monitored code is not flagged, and vice versa — the two sides don't
+  // cross-contaminate each other's candidate set.
+  assert.equal(findMisallocatedLines(expenseDoc, revenueCodes, () => 500, 'bill').length, 0);
+  assert.equal(findMisallocatedLines(revenueDoc, expenseCodes, () => 500, 'invoice').length, 0);
+  assert.equal(findMisallocatedLines(expenseDoc, expenseCodes, () => 500, 'bill').length, 1);
+  assert.equal(findMisallocatedLines(revenueDoc, revenueCodes, () => 500, 'invoice').length, 1);
+});
+
+test('findMisallocatedLines computes net (ex-VAT) amount consistently regardless of Inclusive/Exclusive basis', () => {
+  const inclusiveDoc = [{
+    invoiceID: 'txn-1', contact: { name: 'X' }, date: '2026-01-15', lineAmountTypes: 'Inclusive',
+    lineItems: [{ accountCode: '260', lineAmount: 120, taxAmount: 20 }], // gross 120, net 100
+  }];
+  const findings = findMisallocatedLines(inclusiveDoc, new Set(['260']), () => 50, 'bank_receive');
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].amount, 100);
+});
+
+// --- Capital Item Review defaults + opt-out (resolveCapitalReviewCandidateCodes) ---
+// Confirmed gap: 461/473 were auto-added unconditionally on every sync, so an accountant could
+// never deliberately exclude either one — is_capital_candidate=0 looked identical whether it meant
+// "never touched" or "explicitly unchecked." accountSettingsInitialised is the tri-state that
+// makes an opt-out possible once the Per-account Check Settings page has been saved at least once.
+
+test('a never-configured organisation gets Xenon\'s documented 461/473 default automatically', () => {
+  const codes = resolveCapitalReviewCandidateCodes(
+    [], { '461': 'Printing & Stationery', '473': 'Repairs & Maintenance' }, false
+  );
+  assert.deepEqual([...codes].sort(), ['461', '473']);
+});
+
+test('461/473 are only added when the account actually exists in the chart of accounts', () => {
+  const codes = resolveCapitalReviewCandidateCodes([], { '473': 'Repairs & Maintenance' }, false);
+  assert.deepEqual([...codes], ['473']);
+});
+
+test('an explicit account-level override is always respected, initialised or not', () => {
+  const configs = [{ account_code: '325', is_capital_candidate: 1 }];
+  const codes = resolveCapitalReviewCandidateCodes(configs, {}, false);
+  assert.ok(codes.has('325'));
+});
+
+test('once the settings page has been saved, an explicit opt-out on 461 genuinely excludes it — no auto-add override', () => {
+  // The accountant saved the form with 461 left unchecked and 473 checked: both store
+  // is_capital_candidate, but only accountSettingsInitialised=true tells us 461's 0 was deliberate.
+  const configs = [
+    { account_code: '461', is_capital_candidate: 0 },
+    { account_code: '473', is_capital_candidate: 1 },
+  ];
+  const names = { '461': 'Printing & Stationery', '473': 'Repairs & Maintenance' };
+  assert.deepEqual([...resolveCapitalReviewCandidateCodes(configs, names, true)], ['473']);
+});
+
+test('before the settings page is ever saved, the SAME explicit-zero-on-461 data still gets auto-added back', () => {
+  // Contrast with the test above: identical is_capital_candidate data, but accountSettingsInitialised
+  // is still false (this org has genuinely never saved the form) — 461 having 0 here is coincidental
+  // (perhaps a stale default row), not a deliberate choice, so the documented default still applies.
+  const configs = [
+    { account_code: '461', is_capital_candidate: 0 },
+    { account_code: '473', is_capital_candidate: 1 },
+  ];
+  const names = { '461': 'Printing & Stationery', '473': 'Repairs & Maintenance' };
+  assert.deepEqual([...resolveCapitalReviewCandidateCodes(configs, names, false)].sort(), ['461', '473']);
+});
+
+// --- findDuplicates: requireExactReference (Xenon's documented "Exact Reference" toggle) ---
+// Off by default (this function's existing behaviour already matches that — no reference check at
+// all), but a client can turn it on to additionally require a shared reference before two same-
+// contact/same-amount/same-window documents count as a suspected duplicate.
+
+test('requireExactReference is off by default — matching by contact/amount/date alone, ignoring reference', () => {
+  const items = [
+    { invoiceID: 'a', contact: { contactID: 'c1' }, date: '2026-01-10', total: 100, invoiceNumber: 'INV-001' },
+    { invoiceID: 'b', contact: { contactID: 'c1' }, date: '2026-01-10', total: 100, invoiceNumber: 'INV-002' },
+  ];
+  assert.equal(findDuplicates(items).length, 1);
+});
+
+test('requireExactReference excludes a same-contact/amount/date pair whose references differ', () => {
+  const items = [
+    { invoiceID: 'a', contact: { contactID: 'c1' }, date: '2026-01-10', total: 100, invoiceNumber: 'INV-001' },
+    { invoiceID: 'b', contact: { contactID: 'c1' }, date: '2026-01-10', total: 100, invoiceNumber: 'INV-002' },
+  ];
+  assert.equal(findDuplicates(items, 3, { requireExactReference: true }).length, 0);
+});
+
+test('requireExactReference includes a pair that genuinely shares the same reference', () => {
+  const items = [
+    { invoiceID: 'a', contact: { contactID: 'c1' }, date: '2026-01-10', total: 100, invoiceNumber: 'INV-001' },
+    { invoiceID: 'b', contact: { contactID: 'c1' }, date: '2026-01-10', total: 100, invoiceNumber: 'INV-001' },
+  ];
+  const groups = findDuplicates(items, 3, { requireExactReference: true });
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].documentCount, 2);
+});
+
+test('requireExactReference treats two blank references as NOT a match — absence of a reference is not a shared one', () => {
+  const items = [
+    { invoiceID: 'a', contact: { contactID: 'c1' }, date: '2026-01-10', total: 100 },
+    { invoiceID: 'b', contact: { contactID: 'c1' }, date: '2026-01-10', total: 100 },
+  ];
+  assert.equal(findDuplicates(items, 3, { requireExactReference: true }).length, 0);
+});
+
+test('requireUnpaidPair: false reproduces Xenon\'s "Also check paid invoices/bills" toggle — fully-paid groups are included', () => {
+  const items = [
+    { invoiceID: 'a', contact: { contactID: 'c1' }, date: '2026-01-10', total: 100, amountDue: 0 },
+    { invoiceID: 'b', contact: { contactID: 'c1' }, date: '2026-01-10', total: 100, amountDue: 0 },
+  ];
+  assert.equal(findDuplicates(items, 3, { requireUnpaidPair: true }).length, 0);
+  assert.equal(findDuplicates(items, 3, { requireUnpaidPair: false }).length, 1);
+});
+
+// --- resolveDuplicate*RequireExactReference / IncludeFullyPaid ---
+
+test('duplicate invoice/bill exact-reference and fully-paid resolvers default to Xenon\'s documented off, independently of each other', () => {
+  const { resolveDuplicateInvoiceRequireExactReference, resolveDuplicateInvoiceIncludeFullyPaid,
+    resolveDuplicateBillRequireExactReference, resolveDuplicateBillIncludeFullyPaid } = require('../src/services/checkRules');
+  assert.equal(resolveDuplicateInvoiceRequireExactReference({}), false);
+  assert.equal(resolveDuplicateInvoiceIncludeFullyPaid({}), false);
+  assert.equal(resolveDuplicateBillRequireExactReference({}), false);
+  assert.equal(resolveDuplicateBillIncludeFullyPaid({}), false);
+  assert.equal(resolveDuplicateInvoiceRequireExactReference(undefined), false);
+});
+
+test('duplicate invoice/bill toggles are trusted verbatim once configured, invoice and bill independent', () => {
+  const { resolveDuplicateInvoiceRequireExactReference, resolveDuplicateBillRequireExactReference } = require('../src/services/checkRules');
+  const org = { duplicate_invoice_require_exact_reference: 1, duplicate_bill_require_exact_reference: 0 };
+  assert.equal(resolveDuplicateInvoiceRequireExactReference(org), true);
+  assert.equal(resolveDuplicateBillRequireExactReference(org), false);
+});
+
+// --- findDuplicates: requireExactTotal (Xenon's documented "Exact Total" toggle) ---
+// Defaults to TRUE here — the opposite of Xenon's own documented "off" default — because Xenon's
+// documentation explicitly does not disclose what the baseline match looks like without it, only
+// that both Exact Reference and Exact Total are optional "further narrowing." Defaulting to true
+// preserves every currently-validated client's existing grouping; requireExactTotal: false is only
+// for a specific client confirmed (via their real Xenon export) to have the setting off.
+
+test('requireExactTotal defaults to true — different-amount documents for the same contact/date never group', () => {
+  const items = [
+    { invoiceID: 'a', contact: { contactID: 'c1' }, date: '2026-01-10', total: 100 },
+    { invoiceID: 'b', contact: { contactID: 'c1' }, date: '2026-01-10', total: 150 },
+  ];
+  assert.equal(findDuplicates(items).length, 0);
+});
+
+test('requireExactTotal: false groups by contact + date window alone, regardless of amount', () => {
+  const items = [
+    { invoiceID: 'a', contact: { contactID: 'c1' }, date: '2026-01-10', total: 100 },
+    { invoiceID: 'b', contact: { contactID: 'c1' }, date: '2026-01-10', total: 150 },
+  ];
+  const groups = findDuplicates(items, 3, { requireExactTotal: false });
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].documentCount, 2);
+});
+
+test('requireExactTotal: false still respects the date window and a different contact', () => {
+  const items = [
+    { invoiceID: 'a', contact: { contactID: 'c1' }, date: '2026-01-10', total: 100 },
+    { invoiceID: 'b', contact: { contactID: 'c1' }, date: '2026-01-20', total: 150 }, // outside a 3-day window
+    { invoiceID: 'c', contact: { contactID: 'c2' }, date: '2026-01-10', total: 100 }, // different contact
+  ];
+  assert.equal(findDuplicates(items, 3, { requireExactTotal: false }).length, 0);
+});
+
+test('requireExactTotal: false composes correctly with requireExactReference — reference still narrows the looser amount-agnostic match', () => {
+  const items = [
+    { invoiceID: 'a', contact: { contactID: 'c1' }, date: '2026-01-10', total: 100, invoiceNumber: 'REF-1' },
+    { invoiceID: 'b', contact: { contactID: 'c1' }, date: '2026-01-10', total: 150, invoiceNumber: 'REF-1' },
+    { invoiceID: 'c', contact: { contactID: 'c1' }, date: '2026-01-10', total: 200, invoiceNumber: 'REF-2' },
+  ];
+  const groups = findDuplicates(items, 3, { requireExactTotal: false, requireExactReference: true });
+  assert.equal(groups.length, 1);
+  assert.deepEqual(groups[0].documentIds.sort(), ['a', 'b']);
+});
+
+test('duplicate invoice/bill exact-total resolvers default to true (this practice\'s calibrated default), not Xenon\'s documented off', () => {
+  const { resolveDuplicateInvoiceRequireExactTotal, resolveDuplicateBillRequireExactTotal } = require('../src/services/checkRules');
+  assert.equal(resolveDuplicateInvoiceRequireExactTotal({}), true);
+  assert.equal(resolveDuplicateBillRequireExactTotal({}), true);
+  assert.equal(resolveDuplicateInvoiceRequireExactTotal(undefined), true);
+});
+
+test('duplicate invoice/bill exact-total resolvers are trusted verbatim once explicitly configured', () => {
+  const { resolveDuplicateInvoiceRequireExactTotal, resolveDuplicateBillRequireExactTotal } = require('../src/services/checkRules');
+  const org = { duplicate_invoice_require_exact_total: 0, duplicate_bill_require_exact_total: 1 };
+  assert.equal(resolveDuplicateInvoiceRequireExactTotal(org), false);
+  assert.equal(resolveDuplicateBillRequireExactTotal(org), true);
 });

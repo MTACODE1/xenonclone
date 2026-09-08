@@ -38,8 +38,11 @@ test('bounded transforms and per-check cap stabilize extreme clients', () => {
   assert.ok(capped.rawDeduction <= SCORE_PROFILE.maxCheckDeduction);
 });
 
-test('unavailable, unconfigured, non-scored and display-only observations deduct zero', () => {
-  for (const period_checked of ['out_of_scope', 'not_configured', 'needs_sync']) {
+test('unavailable, unconfigured, not_applicable, non-scored and display-only observations deduct zero', () => {
+  // 'not_vat_registered' (the not_applicable category) is included alongside the pre-existing four
+  // — a check with nothing applicable to find must not be penalised, same as one with no evidence
+  // configured yet.
+  for (const period_checked of ['out_of_scope', 'unavailable', 'not_configured', 'needs_sync', 'not_vat_registered']) {
     assert.equal(scoreObservation(issue({ period_checked, count: 100, potential_value_gbp: 1e9 })).deduction, 0);
   }
   const breakdown = calculateScoreBreakdown([
@@ -47,6 +50,34 @@ test('unavailable, unconfigured, non-scored and display-only observations deduct
     issue({ findings: [{ displayOnly: true, date: '2020-01-01', potential_value_gbp: 100000 }] }),
   ], { nonScoredChecks: NON_SCORED_CHECKS });
   assert.equal(breakdown.score, 100);
+});
+
+// Confirmed bug this fixes: a non-VAT-registered client's sales_tax_missing/purchase_tax_missing
+// checks must contribute neither a penalty NOR a false "clean check" reward — this scoring model
+// has no reward mechanic at all (score = 100 minus deductions from active issues), so a genuinely
+// clean check and a not-applicable check both already deduct zero; what must additionally hold is
+// that the two are distinguishable by *reason*, not silently conflated into the same generic
+// "nothing to score" bucket, so a future consumer of scoreObservation's output can tell them apart.
+test('a not-applicable VAT check and a genuinely clean VAT check both deduct zero, but for different, distinguishable reasons', () => {
+  const notApplicable = scoreObservation(issue({
+    check_type: 'sales_tax_missing', period_checked: 'not_vat_registered', count: 0,
+  }));
+  const genuinelyClean = scoreObservation(issue({
+    check_type: 'sales_tax_missing', period_checked: 'since_lock_date:2025-10-31:2026-09-07', count: 0,
+  }));
+  assert.equal(notApplicable.deduction, 0);
+  assert.equal(genuinelyClean.deduction, 0);
+  assert.equal(notApplicable.excludedReason, 'not_vat_registered');
+  assert.notEqual(notApplicable.excludedReason, genuinelyClean.excludedReason);
+});
+
+test('a VAT-registered client with real findings still scores normally — the fix only suppresses the not_vat_registered label itself', () => {
+  const withFindings = scoreObservation(issue({
+    check_type: 'purchase_tax_missing', period_checked: 'since_lock_date:2025-10-31:2026-09-07',
+    count: 50, potential_value_gbp: 5000, importance: 'medium',
+  }));
+  assert.ok(withFindings.deduction > 0);
+  assert.equal(withFindings.excludedReason, null);
 });
 
 test('normalized active findings override stale aggregate count and exposure', () => {

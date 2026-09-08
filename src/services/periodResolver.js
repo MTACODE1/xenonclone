@@ -127,4 +127,15 @@ function periodInput(query = {}, fallback = 'since_lock_date') {
   };
 }
 
-module.exports = { PERIOD_TYPES, isoDate, isWithinPeriod, periodInput, resolvePeriod };
+function shouldUseCacheOnlyForReanalysis(activePeriodKey, selectedPeriodKey) {
+  return Boolean(activePeriodKey) && Boolean(selectedPeriodKey) && selectedPeriodKey !== activePeriodKey;
+}
+
+module.exports = {
+  PERIOD_TYPES,
+  isoDate,
+  isWithinPeriod,
+  periodInput,
+  resolvePeriod,
+  shouldUseCacheOnlyForReanalysis,
+};

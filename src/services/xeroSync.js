@@ -1,9 +1,11 @@
 const { apiCall } = require('./xeroClient');
+const { syncInsight } = require('./insightSync');
 const {
   upsertOrganisation, upsertHealthScore,
   deleteIssuesForOrg, insertIssue: insertIssueDb, replaceIssueForCheck, getOrganisationByTenantId, getIssuesForOrg, getScoringObservations,
   upsertTransactionCounts, getSetting, upsertBankReconciliationXeroBalance,
   getBankReconciliationForOrg, upsertChartOfAccountsCache, getAccountCheckConfigurationForOrg,
+  getExcludedBankAccountIds,
   getFiledAccountsForOrg, getLatestStatementImportsForOrg, getStatementLinesForOrg,
   getXeroBankItemsForOrg, replaceXeroBankItemsCache, updateFiledAccountsXeroBalance,
   updateStatementLineMatches, updateOrganisationAccountingSettings,
@@ -17,7 +19,15 @@ const { getDb: getDatabase } = require('../db/schema');
 const {
   CHECK_DEFAULTS, CHECK_DEFINITIONS, NON_SCORED_CHECKS, calculateHealthScore, findDirectMatches,
   findDuplicateContacts, findDuplicates, excludeDuplicateDrafts, findUnexpectedDefaultLines,
+  findMisallocatedLines, resolveCapitalReviewCandidateCodes,
   isOldDocument, isPurchaseTaxExemptAccount, resolvePeriodChecked, resolveSupplierPatternLookbackMonths,
+  resolveMultiAccountPatternLookbackMonths,
+  resolveMultiAccountSuppliersMinValue, resolveMultiTaxSuppliersMinValue,
+  resolveCapitalReviewDefaultThreshold, resolveMisallocatedItemsDefaultThreshold,
+  resolvePurchaseTaxMissingExcludeCodes, resolveDuplicateInvoiceWindowDays, resolveDuplicateBillWindowDays,
+  resolveDuplicateInvoiceRequireExactReference, resolveDuplicateInvoiceIncludeFullyPaid,
+  resolveDuplicateBillRequireExactReference, resolveDuplicateBillIncludeFullyPaid,
+  resolveDuplicateInvoiceRequireExactTotal, resolveDuplicateBillRequireExactTotal,
   selectAuthorisedUnreconciled, selectOldCredits, sumAbsoluteExposure,
   grossLineAmount, netLineAmount, toDateString,
   withDisplayOnlyBankFindings
@@ -51,6 +61,27 @@ async function fetchAllInvoices(tenantId, ifModifiedSince = undefined) {
     await pageDelay();
   }
   return allInvoices;
+}
+
+// Xero's paginated list endpoint occasionally returns invoices without lineItems even with
+// summaryOnly=false — a known API quirk. Fetch those individually using the IDs filter, which
+// always returns full records. Batched in 100s to stay within Xero's payload limits.
+async function fetchInvoicesByIds(tenantId, ids) {
+  const results = [];
+  for (let i = 0; i < ids.length; i += 100) {
+    const batch = ids.slice(i, i + 100);
+    const invoices = await apiCall(tenantId, async (xero, tid) => {
+      const resp = await xero.accountingApi.getInvoices(
+        tid, undefined, undefined, undefined,
+        batch, undefined, undefined, undefined,
+        undefined, undefined, undefined, undefined, false
+      );
+      return resp.body.invoices || [];
+    });
+    results.push(...invoices);
+    if (i + 100 < ids.length) await pageDelay();
+  }
+  return results;
 }
 
 // Xero's own per-document History log (created/approved/edited, by whom, when) — fetched ONLY for
@@ -392,6 +423,19 @@ async function runSync(tenantId, progressCallback, options = {}) {
     orgId, tenantId, runId, 'invoice',
     since => fetchAllInvoices(tenantId, since), options
   );
+  if (!options.cacheOnly) {
+    const needsHydration = allInvoices.filter(i => !i.lineItems || i.lineItems.length === 0);
+    if (needsHydration.length > 0) {
+      emit({ step: 'hydrate_invoices', message: `Re-fetching ${needsHydration.length} invoice(s) returned without line items...` });
+      const hydrated = await fetchInvoicesByIds(tenantId, needsHydration.map(i => i.invoiceID));
+      mergeEntityCache(orgId, 'invoice', hydrated, { runId });
+      const hydratedMap = new Map(hydrated.map(i => [i.invoiceID, i]));
+      for (let idx = 0; idx < allInvoices.length; idx++) {
+        const h = hydratedMap.get(allInvoices[idx].invoiceID);
+        if (h) allInvoices[idx] = h;
+      }
+    }
+  }
   const accrecAuthorised = allInvoices.filter(item =>
     item.type === 'ACCREC' && ['AUTHORISED', 'PAID'].includes(item.status)
   );
@@ -443,6 +487,14 @@ async function runSync(tenantId, progressCallback, options = {}) {
       .map(a => a.code)
       .filter(Boolean)
   );
+  // Xenon's purchase-tax-missing doc lists prepayment accounts as in scope by default — not
+  // something that needed a per-client opt-in flag. Xero's own PREPAYMENT account type identifies
+  // these directly, so they're auto-included like FIXED, with the manual
+  // purchase_tax_include_asset_prepayment flag left in place for any account Xero doesn't
+  // classify as PREPAYMENT but the accountant wants covered anyway.
+  const prepaymentAccountCodes = new Set(
+    (chartOfAccounts || []).filter(a => a.type === 'PREPAYMENT').map(a => a.code).filter(Boolean)
+  );
   const expenseAccountCodes = new Set((chartOfAccounts || []).filter(a => a._class === 'EXPENSE').map(a => a.code).filter(Boolean));
   const revenueAccountCodes = new Set((chartOfAccounts || []).filter(a => a._class === 'REVENUE').map(a => a.code).filter(Boolean));
   const accountNameByCode = {};
@@ -452,22 +504,34 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // Which accounts count as capital-item candidates is an accountant judgment call, not something
   // a keyword rule can generalize across industries (an excavation company's asset account might
   // be named "Equipment hire", which a generic rule would wrongly treat as a rental cost). Set via
-  // the per-client account picker; empty until the accountant configures it for this client.
+  // the per-client account picker, on top of Xenon's own documented out-of-the-box defaults —
+  // account codes 461 (Printing & Stationery) and 473 (Repairs & Maintenance) "if they exist" —
+  // so a freshly connected client isn't stuck showing "not configured" for codes Xenon would
+  // already be monitoring. See resolveCapitalReviewCandidateCodes for the opt-out tri-state.
   const accountCheckConfigurations = getAccountCheckConfigurationForOrg(orgId);
   const accountConfigByCode = new Map(accountCheckConfigurations.map(account => [account.account_code, account]));
-  const capitalReviewCandidateCodes = new Set(
-    accountCheckConfigurations.filter(account => account.is_capital_candidate).map(account => account.account_code)
+  const capitalReviewCandidateCodes = resolveCapitalReviewCandidateCodes(
+    accountCheckConfigurations, accountNameByCode, org.account_settings_initialised
   );
-  const defaultCapitalReviewThreshold = parseFloat(getSetting('capital_review_threshold')) || 500;
+  // £200, not the old unexplained £500 fallback — cross-checked against the practice's own real
+  // Xenon general settings (7 Sep 2026): Low Cost Assets and Capital Item Review's two default
+  // accounts (Repairs & Maintenance, Printing & Stationery) all show £200, matching the sibling
+  // low_cost_fixed_assets check's own hardcoded LOW_COST_THRESHOLD and MBX's independently
+  // confirmed per-account £200 (XENON_PARITY_SPEC.md's "Capital settings reconstructed" entry).
+  const defaultCapitalReviewThreshold = resolveCapitalReviewDefaultThreshold(
+    org, parseFloat(getSetting('capital_review_threshold')) || 200
+  );
 
   const purchaseTaxExemptOverrideCodes = new Set(
-    (getSetting('purchase_tax_missing_exclude_codes') || '').split(',').map(s => s.trim()).filter(Boolean)
+    resolvePurchaseTaxMissingExcludeCodes(org, getSetting('purchase_tax_missing_exclude_codes') || '')
+      .split(',').map(s => s.trim()).filter(Boolean)
   );
   const shouldCheckPurchaseTaxAccount = accountCode => {
     const config = accountConfigByCode.get(accountCode);
     if (config?.purchase_tax_ignore) return false;
     if (config?.purchase_tax_include_asset_prepayment) return true;
-    const inScope = expenseAccountCodes.has(accountCode) || fixedAssetAccountCodes.has(accountCode);
+    const inScope = expenseAccountCodes.has(accountCode) || fixedAssetAccountCodes.has(accountCode) ||
+      prepaymentAccountCodes.has(accountCode);
     return inScope &&
       !isPurchaseTaxExemptAccount(accountNameByCode[accountCode], purchaseTaxExemptOverrideCodes, accountCode);
   };
@@ -726,8 +790,12 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // date report 0 here while still carrying thousands of older unreconciled items, so an
   // open-ended backlog count overstates them by orders of magnitude.
   try {
+    // Xenon supports excluding individual bank accounts from this check — e.g. a dormant account
+    // or a PayPal-style clearing account that would otherwise generate permanent false-positive
+    // noise. Organisation-scoped, so excluding one client's account can never affect another's.
+    const excludedBankAccountIds = getExcludedBankAccountIds(orgId);
     const bankAccountIds = new Set((chartOfAccounts || [])
-      .filter(account => account.type === 'BANK')
+      .filter(account => account.type === 'BANK' && !excludedBankAccountIds.has(account.accountID))
       .map(account => account.accountID));
     const items = selectAuthorisedUnreconciled(allBankTransactions, matchingPayments, bankAccountIds)
       .filter(item => isWithinPeriod(toDateString(item.date), period))
@@ -758,7 +826,18 @@ async function runSync(tenantId, progressCallback, options = {}) {
       ...accrecAuthorised.filter(i => i.status === 'AUTHORISED'),
       ...accrecDraft.filter(i => i.status === 'SUBMITTED'),
     ]);
-    const duplicates = findDuplicates(duplicateInvoicePool);
+    // Xenon's documented default requires at least one unpaid invoice in a match (same as
+    // duplicate_bills below) — previously missing here, so fully-paid duplicate pairs were
+    // incorrectly counted as issues.
+    const duplicates = findDuplicates(
+      duplicateInvoicePool,
+      resolveDuplicateInvoiceWindowDays(org),
+      {
+        requireUnpaidPair: !resolveDuplicateInvoiceIncludeFullyPaid(org),
+        requireExactReference: resolveDuplicateInvoiceRequireExactReference(org),
+        requireExactTotal: resolveDuplicateInvoiceRequireExactTotal(org),
+      }
+    );
     const issue = {
       org_id: orgId, check_type: 'duplicate_invoices', importance: 'high',
       count: duplicates.length, potential_value_gbp: sumAbsoluteExposure(duplicates),
@@ -781,8 +860,12 @@ async function runSync(tenantId, progressCallback, options = {}) {
     ]);
     const duplicates = findDuplicates(
       duplicateBillPool,
-      CHECK_DEFAULTS.duplicateBillWindowDays,
-      { requireUnpaidPair: true }
+      resolveDuplicateBillWindowDays(org),
+      {
+        requireUnpaidPair: !resolveDuplicateBillIncludeFullyPaid(org),
+        requireExactReference: resolveDuplicateBillRequireExactReference(org),
+        requireExactTotal: resolveDuplicateBillRequireExactTotal(org),
+      }
     );
     const issue = {
       org_id: orgId, check_type: 'duplicate_bills', importance: 'high',
@@ -939,17 +1022,45 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // remains the default for any client without an explicit value so nothing already-validated
   // changes, but `supplier_pattern_lookback_months` lets a new client be set to match its own real
   // Xenon configuration instead of assuming this one guess fits everyone.
+  // Multi-account and multi-tax document the identical "3 months prior, changeable per client"
+  // rule, so each gets its own independently-configurable lookback column rather than sharing
+  // one — widening multi-tax for a client (e.g. Handymanz to 18 months) must not also widen
+  // multi-account, which is validated separately against its own 12-month default.
   const supplierPatternLookbackMonths = resolveSupplierPatternLookbackMonths(org);
+  const multiAccountLookbackMonths = resolveMultiAccountPatternLookbackMonths(org);
+  const multiAccountLookbackFloor = new Date(`${period.end}T00:00:00Z`);
+  multiAccountLookbackFloor.setUTCMonth(multiAccountLookbackFloor.getUTCMonth() - multiAccountLookbackMonths);
+  const multiAccountPatternStart = [period.start, multiAccountLookbackFloor.toISOString().slice(0, 10)]
+    .filter(Boolean).sort()[0];
   const lookbackFloorDate = new Date(`${period.end}T00:00:00Z`);
   lookbackFloorDate.setUTCMonth(lookbackFloorDate.getUTCMonth() - supplierPatternLookbackMonths);
-  const supplierPatternStart = [period.start, lookbackFloorDate.toISOString().slice(0, 10)]
+  const multiTaxPatternStart = [period.start, lookbackFloorDate.toISOString().slice(0, 10)]
     .filter(Boolean).sort()[0];
+  const withinMultiAccountWindow = items => items.filter(item => {
+    const date = toDateString(item.date);
+    return date && date >= multiAccountPatternStart && date <= period.end;
+  });
   const withinPatternWindow = items => items.filter(item => {
     const date = toDateString(item.date);
-    return date && date >= supplierPatternStart && date <= period.end;
+    return date && date >= multiTaxPatternStart && date <= period.end;
   });
   // Drafts are excluded: they are not posted, and including them overcounted MBX (89 v 81).
-  const allBillsForSupplierChecks = withinPatternWindow(accpayAuthorised);
+  // Purchase credit notes are included: a credit note coded to a different account (or tax code)
+  // than the supplier's bills is exactly the inconsistency these checks exist to surface.
+  // Confirmed on Handymanz: Plumbfix has credit notes on accounts 325 and 473, making it the 4th
+  // multi-account supplier that Xenon finds but we missed when checking bills only.
+  // Multi-account uses a 12-month window; multi-tax uses the configurable lookback.
+  const allBillsForMultiAccount = withinMultiAccountWindow([
+    ...accpayAuthorised,
+    ...purchaseCredits.filter(item => ['AUTHORISED', 'PAID'].includes(item.status)),
+  ]);
+  const bankSpendForMultiAccount = withinMultiAccountWindow(allBankTransactions.filter(item =>
+    item.type === 'SPEND' && item.status === 'AUTHORISED'
+  ));
+  const allBillsForSupplierChecks = withinPatternWindow([
+    ...accpayAuthorised,
+    ...purchaseCredits.filter(item => ['AUTHORISED', 'PAID'].includes(item.status)),
+  ]);
   const bankSpendForSupplierChecks = withinPatternWindow(allBankTransactions.filter(item =>
     item.type === 'SPEND' && item.status === 'AUTHORISED'
   ));
@@ -967,27 +1078,40 @@ async function runSync(tenantId, progressCallback, options = {}) {
   try {
     const allTime = {};
     const sinceLDByContact = {};
-    const record = (contactId, name, lineAmount, accountCode, isSinceLD) => {
+    // txMeta carries what the drill-down UI needs to show each underlying transaction (date,
+    // reference, which account it hit, and the raw Xero id for an "Open in Xero" link) — kept
+    // separate from the aggregate totals above, which drive the actual count/value calculation.
+    const record = (contactId, name, lineAmount, accountCode, isSinceLD, txMeta) => {
       if (!contactId || !accountCode) return;
-      if (!allTime[contactId]) allTime[contactId] = { name, accountAmounts: {} };
-      allTime[contactId].accountAmounts[accountCode] = (allTime[contactId].accountAmounts[accountCode] || 0) + Math.abs(lineAmount || 0);
+      if (!allTime[contactId]) allTime[contactId] = { name, accountAmounts: {}, transactions: [] };
+      const amount = Math.abs(lineAmount || 0);
+      allTime[contactId].accountAmounts[accountCode] = (allTime[contactId].accountAmounts[accountCode] || 0) + amount;
+      allTime[contactId].transactions.push({ ...txMeta, accountCode, accountName: accountNameByCode[accountCode] || null, amount });
       if (isSinceLD) {
         if (!sinceLDByContact[contactId]) sinceLDByContact[contactId] = {};
-        sinceLDByContact[contactId][accountCode] = (sinceLDByContact[contactId][accountCode] || 0) + Math.abs(lineAmount || 0);
+        sinceLDByContact[contactId][accountCode] = (sinceLDByContact[contactId][accountCode] || 0) + amount;
       }
     };
-    for (const bill of allBillsForSupplierChecks) {
+    for (const bill of allBillsForMultiAccount) {
       const isSinceLD = isWithinPeriod(toDateString(bill.date), period);
-      for (const line of (bill.lineItems || [])) record(bill.contact?.contactID, bill.contact?.name, grossLineAmount(bill.lineAmountTypes, line), line.accountCode, isSinceLD);
+      for (const line of (bill.lineItems || [])) record(
+        bill.contact?.contactID, bill.contact?.name, grossLineAmount(bill.lineAmountTypes, line), line.accountCode, isSinceLD,
+        { date: toDateString(bill.date), reference: bill.reference || bill.invoiceNumber || null, description: line.description || null, source: 'bill', invoiceId: bill.invoiceID }
+      );
     }
-    for (const txn of bankSpendForSupplierChecks) {
+    for (const txn of bankSpendForMultiAccount) {
       const isSinceLD = isWithinPeriod(toDateString(txn.date), period);
-      for (const line of (txn.lineItems || [])) record(txn.contact?.contactID, txn.contact?.name, grossLineAmount(txn.lineAmountTypes, line), line.accountCode, isSinceLD);
+      for (const line of (txn.lineItems || [])) record(
+        txn.contact?.contactID, txn.contact?.name, grossLineAmount(txn.lineAmountTypes, line), line.accountCode, isSinceLD,
+        { date: toDateString(txn.date), reference: txn.reference || null, description: line.description || null, source: 'bank_spend', bankTransactionId: txn.bankTransactionID }
+      );
     }
     // Xenon applies no materiality floor here: a £25 floor dropped this to 70 against its 81 on
     // the reference client and to 1 against 5 and 4 on two others. The setting stays available
     // for practices that want to suppress trivial patterns, but it is off by default.
-    const multiAccountMinValue = parseFloat(getSetting('multi_account_suppliers_min_value')) || 0;
+    const multiAccountMinValue = resolveMultiAccountSuppliersMinValue(
+      org, parseFloat(getSetting('multi_account_suppliers_min_value')) || 0
+    );
     const multi = [];
     for (const [id, v] of Object.entries(allTime)) {
       const accountCodes = Object.keys(v.accountAmounts);
@@ -1001,14 +1125,15 @@ async function runSync(tenantId, progressCallback, options = {}) {
       const dominantCode = accountCodes.reduce((a, b) => v.accountAmounts[a] >= v.accountAmounts[b] ? a : b);
       const potentialValue = Object.keys(sinceLDAmounts).reduce((s, c) => c !== dominantCode ? s + sinceLDAmounts[c] : s, 0);
       if (potentialValue < multiAccountMinValue) continue;
-      multi.push({ contactId: id, name: v.name, accountCodes, dominantCode, potentialValue });
+      const transactions = [...v.transactions].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+      multi.push({ contactId: id, name: v.name, accountCodes, dominantCode, potentialValue, transactions });
     }
     const issue = {
       org_id: orgId, check_type: 'multi_account_suppliers', importance: 'medium',
       count: multi.length,
       potential_value_gbp: multi.reduce((s, m) => s + m.potentialValue, 0),
-      detail_json: JSON.stringify(multi.map(m => ({ contactId: m.contactId, name: m.name, accountCodes: m.accountCodes, potentialValue: m.potentialValue }))),
-      period_checked: `supplier_pattern_from_${supplierPatternStart}_value_since_lock_date`
+      detail_json: JSON.stringify(multi.map(m => ({ contactId: m.contactId, name: m.name, accountCodes: m.accountCodes, potentialValue: m.potentialValue, transactions: m.transactions }))),
+      period_checked: `supplier_pattern_from_${multiAccountPatternStart}_value_since_lock_date`
     };
     insertIssue(issue); issueResults.push(issue);
   } catch (err) {
@@ -1024,9 +1149,9 @@ async function runSync(tenantId, progressCallback, options = {}) {
   try {
     const allTimeTax = {};
     const sinceLDTaxByContact = {};
-    const processTaxSource = (contactId, contactName, lines, isSinceLD, lineAmountTypes) => {
+    const processTaxSource = (contactId, contactName, lines, isSinceLD, lineAmountTypes, txMeta) => {
       if (!contactId || isMileageReimbursementContact(contactName)) return;
-      if (!allTimeTax[contactId]) allTimeTax[contactId] = { name: contactName, taxAmounts: {} };
+      if (!allTimeTax[contactId]) allTimeTax[contactId] = { name: contactName, taxAmounts: {}, transactions: [] };
       for (const line of lines) {
         const tax = line.taxType || 'NONE';
         // A £0.00 line does not "use" a tax code — checked on the RAW line amount, before net
@@ -1044,6 +1169,11 @@ async function runSync(tenantId, progressCallback, options = {}) {
         // from +132% over Xenon's value to +2.6%.
         const amt = Math.abs(netLineAmount(lineAmountTypes, line));
         allTimeTax[contactId].taxAmounts[tax] = (allTimeTax[contactId].taxAmounts[tax] || 0) + amt;
+        allTimeTax[contactId].transactions.push({
+          ...txMeta, taxCode: tax, accountCode: line.accountCode,
+          accountName: accountNameByCode[line.accountCode] || null,
+          description: line.description || null, amount: amt,
+        });
         if (isSinceLD) {
           if (!sinceLDTaxByContact[contactId]) sinceLDTaxByContact[contactId] = {};
           sinceLDTaxByContact[contactId][tax] = (sinceLDTaxByContact[contactId][tax] || 0) + amt;
@@ -1052,14 +1182,18 @@ async function runSync(tenantId, progressCallback, options = {}) {
     };
     for (const bill of allBillsForSupplierChecks) {
       const isSinceLD = isWithinPeriod(toDateString(bill.date), period);
-      processTaxSource(bill.contact?.contactID, bill.contact?.name, bill.lineItems || [], isSinceLD, bill.lineAmountTypes);
+      processTaxSource(bill.contact?.contactID, bill.contact?.name, bill.lineItems || [], isSinceLD, bill.lineAmountTypes,
+        { date: toDateString(bill.date), reference: bill.reference || bill.invoiceNumber || null, source: 'bill', invoiceId: bill.invoiceID });
     }
     for (const txn of bankSpendForSupplierChecks) {
       processTaxSource(txn.contact?.contactID, txn.contact?.name, txn.lineItems || [],
-        isWithinPeriod(toDateString(txn.date), period), txn.lineAmountTypes);
+        isWithinPeriod(toDateString(txn.date), period), txn.lineAmountTypes,
+        { date: toDateString(txn.date), reference: txn.reference || null, source: 'bank_spend', bankTransactionId: txn.bankTransactionID });
     }
     // Same as Multi-Account Suppliers above: no floor by default.
-    const multiTaxMinValue = parseFloat(getSetting('multi_tax_suppliers_min_value')) || 0;
+    const multiTaxMinValue = resolveMultiTaxSuppliersMinValue(
+      org, parseFloat(getSetting('multi_tax_suppliers_min_value')) || 0
+    );
     const multi = [];
     for (const [id, v] of Object.entries(allTimeTax)) {
       // "No VAT" counts as a tax code: a supplier billed at 20% on some lines and no VAT on
@@ -1083,14 +1217,15 @@ async function runSync(tenantId, progressCallback, options = {}) {
       // and dominant selection) closed Fast Track Excavations from +132% over Xenon's value to +2.6%.
       const nonDominantValue = Object.keys(sinceLDAmounts).reduce((s, t) => (t !== dominantTax && t !== 'NONE') ? s + sinceLDAmounts[t] : s, 0);
       if (nonDominantValue < multiTaxMinValue) continue;
-      multi.push({ contactId: id, name: v.name, taxCodes, dominantTax, nonDominantValue });
+      const transactions = [...v.transactions].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+      multi.push({ contactId: id, name: v.name, taxCodes, dominantTax, nonDominantValue, transactions });
     }
     const issue = {
       org_id: orgId, check_type: 'multi_tax_suppliers', importance: 'medium',
       count: multi.length,
       potential_value_gbp: multi.reduce((s, m) => s + m.nonDominantValue, 0),
-      detail_json: JSON.stringify(multi.map(m => ({ contactId: m.contactId, name: m.name, taxCodes: m.taxCodes, dominantTax: m.dominantTax, nonDominantValue: m.nonDominantValue }))),
-      period_checked: `supplier_pattern_from_${supplierPatternStart}_value_since_lock_date`
+      detail_json: JSON.stringify(multi.map(m => ({ contactId: m.contactId, name: m.name, taxCodes: m.taxCodes, dominantTax: m.dominantTax, nonDominantValue: m.nonDominantValue, transactions: m.transactions }))),
+      period_checked: `supplier_pattern_from_${multiTaxPatternStart}_value_since_lock_date`
     };
     insertIssue(issue); issueResults.push(issue);
   } catch (err) {
@@ -1322,13 +1457,15 @@ async function runSync(tenantId, progressCallback, options = {}) {
     console.error('contact_defaults check failed — skipping (will show as "Not synced"):', err.message);
   }
 
-  // --- LOW: Inactive Contacts (active customer/supplier with no transaction in 12+ months) ---
-  // Xenon's definition is "no transactions in the last 12 months". Xero's contact.updatedDateUTC
-  // is a record-edit timestamp, not trading activity: it moves when anyone touches the contact
-  // (or when a merge/bulk edit runs) and it stays stale for contacts that trade through
-  // repeating invoices, so it both missed and invented inactivity. Last activity is now derived
-  // from the cached documents themselves; updatedDateUTC is only a fallback for contacts that
-  // have never transacted, so a contact created last week is not reported as inactive.
+  // --- LOW: Inactive Contacts (active customer/supplier with no transaction in last 18 months) ---
+  // Xenon's threshold is 18 months from sync date (confirmed from Xenon UI: "contacts that have
+  // a most recent transaction of 18 months or older"). A Xenon "OK" may reflect dismissed findings
+  // (the "Show dismissed" toggle hides previously reviewed contacts), not genuinely zero inactives.
+  // Xero's contact.updatedDateUTC is a record-edit timestamp, not trading activity: it moves when
+  // anyone touches the contact (or when a merge/bulk edit runs) and it stays stale for contacts
+  // that trade through repeating invoices, so it both missed and invented inactivity. Last activity
+  // is derived from the cached documents themselves; updatedDateUTC is only a fallback for contacts
+  // that have never transacted, so a contact created last week is not reported as inactive.
   try {
     const lastActivityByContact = new Map();
     const activityBasisByContact = new Map();
@@ -1364,8 +1501,11 @@ async function runSync(tenantId, progressCallback, options = {}) {
       noteActivity(contactId, toDateString(payment.date), 'last payment');
     }
 
+    // Xenon flags contacts with no transaction in the last 18 months (from sync date).
+    // The "Show dismissed" toggle in Xenon hides previously-reviewed contacts, so a Xenon
+    // "OK" for an active client may simply reflect dismissed findings, not zero inactive contacts.
     const cutoffDate = new Date(`${period.end}T00:00:00.000Z`);
-    cutoffDate.setUTCMonth(cutoffDate.getUTCMonth() - 12);
+    cutoffDate.setUTCMonth(cutoffDate.getUTCMonth() - 18);
     const cutoff = cutoffDate.toISOString().slice(0, 10);
     const inactive = [];
     for (const contact of contacts) {
@@ -1386,7 +1526,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       org_id: orgId, check_type: 'inactive_contacts', importance: 'low',
       count: inactive.length, potential_value_gbp: 0,
       detail_json: JSON.stringify(inactive),
-      period_checked: 'no_transaction_12_months'
+      period_checked: `no_transaction_in_18_months_before_${period.end}`
     };
     insertIssue(issue); issueResults.push(issue);
   } catch (err) {
@@ -1441,44 +1581,35 @@ async function runSync(tenantId, progressCallback, options = {}) {
   try {
     if (!chartOfAccountsAvailable) throw new Error('chart of accounts unavailable this sync — cannot classify accounts');
     const VAGUE_ACCOUNT_NAME = /\b(general|miscellaneous|misc|sundry|other|various)\b/i;
-    const defaultMisallocatedThreshold = parseFloat(getSetting('misallocated_items_threshold')) || 100;
+    const defaultMisallocatedThreshold = resolveMisallocatedItemsDefaultThreshold(
+      org, parseFloat(getSetting('misallocated_items_threshold')) || 100
+    );
     const configuredMisallocatedCodes = accountCheckConfigurations
       .filter(account => account.monitor_misallocated)
       .map(account => account.account_code);
-    const monitoredAccountCodes = new Set(configuredMisallocatedCodes.length
+    // Xenon's Misallocated Items documentation covers four sources: Supplier Bill Line Items,
+    // Customer Invoice Line Items, Money Out, and Money In — this previously only ever checked the
+    // first and third (bills + Money Out), a confirmed coverage gap. An explicit accountant
+    // configuration (monitor_misallocated ticked on a specific account) applies to whichever side
+    // that account is naturally used on, so both sides share the SAME configured list unfiltered;
+    // only the "nothing configured" vague-name fallback is split by account class, so the fallback
+    // change here is purely additive for a never-configured client — expense-side detection on
+    // bills/Money Out is completely unchanged, and revenue-side vague accounts (e.g. "Other Income")
+    // are now ALSO monitored on invoices/Money In where they were never checked before.
+    const monitoredExpenseCodes = new Set(configuredMisallocatedCodes.length
       ? configuredMisallocatedCodes
       : [...expenseAccountCodes].filter(code => VAGUE_ACCOUNT_NAME.test(accountNameByCode[code])));
-    const misallocated = [];
-    const billsSinceLD = inPeriod(accpayAuthorised);
-    for (const bill of billsSinceLD) {
-      for (const line of (bill.lineItems || [])) {
-        // Net (ex-VAT), consistent with the other threshold-based checks (capital_item_review,
-        // low_cost_fixed_assets) — raw lineAmount mixes gross (bank spend, usually Inclusive) and
-        // net (bills, usually Exclusive), so a fixed £ threshold would compare like against unlike.
-        const amount = Math.abs(netLineAmount(bill.lineAmountTypes, line));
-        const threshold = accountConfigByCode.get(line.accountCode)?.misallocated_threshold || defaultMisallocatedThreshold;
-        if (amount >= threshold && line.accountCode && monitoredAccountCodes.has(line.accountCode)) {
-          misallocated.push({
-            invoiceId: bill.invoiceID, contact: bill.contact?.name,
-            date: toDateString(bill.date), accountCode: line.accountCode,
-            description: line.description, amount
-          });
-        }
-      }
-    }
-    for (const txn of inPeriod(bankSpendTxns || [])) {
-      for (const line of (txn.lineItems || [])) {
-        const amount = Math.abs(netLineAmount(txn.lineAmountTypes, line));
-        const threshold = accountConfigByCode.get(line.accountCode)?.misallocated_threshold || defaultMisallocatedThreshold;
-        if (amount >= threshold && line.accountCode && monitoredAccountCodes.has(line.accountCode)) {
-          misallocated.push({
-            invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
-            date: toDateString(txn.date), accountCode: line.accountCode,
-            description: line.description, amount, source: 'bank_spend'
-          });
-        }
-      }
-    }
+    const monitoredRevenueCodes = new Set(configuredMisallocatedCodes.length
+      ? configuredMisallocatedCodes
+      : [...revenueAccountCodes].filter(code => VAGUE_ACCOUNT_NAME.test(accountNameByCode[code])));
+    const getThresholdForAccount = code =>
+      accountConfigByCode.get(code)?.misallocated_threshold || defaultMisallocatedThreshold;
+    const misallocated = [
+      ...findMisallocatedLines(inPeriod(accpayAuthorised), monitoredExpenseCodes, getThresholdForAccount, 'bill'),
+      ...findMisallocatedLines(inPeriod(accrecAuthorised), monitoredRevenueCodes, getThresholdForAccount, 'invoice'),
+      ...findMisallocatedLines(inPeriod(bankSpendTxns || []), monitoredExpenseCodes, getThresholdForAccount, 'bank_spend'),
+      ...findMisallocatedLines(inPeriod(bankReceiveTxns || []), monitoredRevenueCodes, getThresholdForAccount, 'bank_receive'),
+    ];
     const issue = {
       org_id: orgId, check_type: 'misallocated_items', importance: 'medium',
       count: misallocated.length,
@@ -1959,6 +2090,18 @@ async function runSync(tenantId, progressCallback, options = {}) {
   }
 
   activateSyncRun(orgId, runId, options.checkType || null);
+
+  // Refresh Insight KPI data (P&L + Balance Sheet) in the background — failure does not block sync
+  try {
+    emit({ step: 'insight', message: 'Refreshing Insight KPIs…' });
+    await syncInsight(tenantId, orgId, {
+      toDate: period.end,
+      fyEndMonth: orgInfo?.financialYearEndMonth || 3,
+      fyEndDay:   orgInfo?.financialYearEndDay   || 31,
+    });
+  } catch (e) {
+    console.warn('[syncOrganisation] insightSync failed (non-fatal):', e.message);
+  }
 
   emit({ step: 'done', message: 'Sync complete!' });
   return { score, totalIssues, totalPotentialErrors, period };

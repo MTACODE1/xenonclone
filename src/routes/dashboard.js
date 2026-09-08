@@ -2,10 +2,13 @@ const express = require('express');
 const router = express.Router();
 const {
   getAllOrganisations, getOrganisationByTenantId, getSetting, getAllTransactionCounts,
-  getPanoramaOrganisations,
+  getPanoramaOrganisations, getOrgIdsForStaff, getStaffForOrg, getAllStaff,
 } = require('../db/queries');
+const { isStaffManager } = require('../services/staffPermissions');
 const { syncOrganisation } = require('../services/xeroSync');
-const { periodInput, PERIOD_TYPES, resolvePeriod } = require('../services/periodResolver');
+const {
+  periodInput, PERIOD_TYPES, resolvePeriod, shouldUseCacheOnlyForReanalysis,
+} = require('../services/periodResolver');
 const { cancelJob, getJob, startJob, subscribe } = require('../services/syncJobs');
 
 function requestedPeriod(query) {
@@ -28,8 +31,8 @@ function startOrganisationJob(tenantId, query = {}, checkType = null) {
       financialYearEndDay: org?.financial_year_end_day,
       financialYearEndMonth: org?.financial_year_end_month,
     });
-    cacheOnly = Boolean(org?.period_key) && resolvedPeriod.key === org.period_key;
-    asOf = org?.period_end || undefined;
+    cacheOnly = shouldUseCacheOnlyForReanalysis(org?.period_key, resolvedPeriod.key);
+    asOf = resolvedPeriod.end;
   }
   return startJob(key, progress =>
     syncOrganisation(tenantId, progress, { period, checkType, cacheOnly, asOf }),
@@ -39,16 +42,27 @@ function startOrganisationJob(tenantId, query = {}, checkType = null) {
 
 router.get('/', (req, res) => {
   const staleBefore = Date.now() - 36 * 60 * 60 * 1000;
-  const orgs = getAllOrganisations().map(org => ({
+  const managesStaff = isStaffManager(req.session.staffRole);
+  let orgs = getAllOrganisations();
+  if (!managesStaff) {
+    const allowed = new Set(getOrgIdsForStaff(req.session.staffId));
+    orgs = orgs.filter(o => allowed.has(o.id));
+  }
+  orgs = orgs.map(org => ({
     ...org,
     isStale: !org.last_successful_sync_at ||
       new Date(org.last_successful_sync_at).getTime() < staleBefore,
+    accessBadges: getStaffForOrg(org.id),
   }));
   const connected = orgs.filter(o => o.connection_status === 'connected');
   const avgScore = connected.length
     ? Math.round(connected.filter(o => o.score != null).reduce((s, o) => s + o.score, 0) / (connected.filter(o => o.score != null).length || 1))
     : null;
-  res.render('index', { orgs, avgScore, totalConnected: connected.length });
+  res.render('index', {
+    orgs, avgScore, totalConnected: connected.length,
+    isAdmin: managesStaff,
+    allStaff: managesStaff ? getAllStaff().filter(s => s.is_active) : [],
+  });
 });
 
 router.get('/panorama', (req, res) => {
@@ -82,8 +96,18 @@ router.get('/panorama', (req, res) => {
   res.render('panorama', { orgs, totalIssues, totalErrors, totalUnreconciled, avgScore, allTags, query: req.query });
 });
 
-router.post('/sync/:tenantId', async (req, res) => {
+function verifyAjaxCsrf(req, res, next) {
+  if (!req.session.csrfToken || req.get('x-csrf-token') !== req.session.csrfToken) {
+    return res.status(403).json({ error: 'Invalid request token' });
+  }
+  next();
+}
+
+router.post('/sync/:tenantId', verifyAjaxCsrf, async (req, res) => {
   const { tenantId } = req.params;
+  if (!getOrganisationByTenantId(tenantId)) {
+    return res.status(404).json({ error: 'Organisation not found' });
+  }
   try {
     const started = startOrganisationJob(tenantId, req.query);
     return res.status(started.existing ? 200 : 202).json({
@@ -94,7 +118,7 @@ router.post('/sync/:tenantId', async (req, res) => {
   }
 });
 
-router.post('/sync-all', async (req, res) => {
+router.post('/sync-all', verifyAjaxCsrf, async (req, res) => {
   const orgs = getAllOrganisations().filter(o => o.connection_status === 'connected');
   const period = requestedPeriod(req.query);
   const results = [];
@@ -148,7 +172,7 @@ router.get('/sync-jobs/:jobId', (req, res) => {
   res.json(job);
 });
 
-router.post('/sync-jobs/:jobId/cancel', (req, res) => {
+router.post('/sync-jobs/:jobId/cancel', verifyAjaxCsrf, (req, res) => {
   const job = cancelJob(req.params.jobId);
   if (!job) return res.status(409).json({ error: 'Only queued jobs can be cancelled safely' });
   res.json(job);

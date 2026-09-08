@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Akrio Verify</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css?v=<%= typeof cssVersion !== 'undefined' ? cssVersion : '1' %>">
+</head>
+<body>
+  <div class="login-page">
+    <div class="login-card">
+      <div class="login-logo">
+        <div class="sidebar-logo-icon" style="background: var(--mta-dark-blue);">A</div>
+        <div>
+          <div style="font-size:1.125rem; font-weight:600; color: var(--text-primary);"><%= practiceName || 'Akrio Verify' %></div>
+          <div style="font-size:0.7rem; color: var(--text-muted);">Bookkeeping Dashboard</div>
+        </div>
+      </div>
+      <h4 style="margin: 20px 0 4px;">Sign in</h4>
+      <p style="color: var(--text-secondary); font-size: 0.8rem; margin-bottom: 20px;">Use your MTAKPI staff login.</p>
+      <% if (error) { %>
+        <div class="alert alert-error" style="margin-bottom: 16px;"><%= error %></div>
+      <% } %>
+      <form method="post" action="/login">
+        <div class="form-group" style="margin-bottom: 14px;">
+          <label class="form-label">Staff Name</label>
+          <input type="text" name="staff_name" class="form-input" required autofocus style="width:100%;">
+        </div>
+        <div class="form-group" style="margin-bottom: 20px;">
+          <label class="form-label">Password</label>
+          <input type="password" name="password" class="form-input" required style="width:100%;">
+        </div>
+        <button type="submit" class="btn btn-primary" style="width:100%;">Sign in</button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>

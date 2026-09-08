@@ -6,23 +6,45 @@ const path = require('path');
 const multer = require('multer');
 const {
   getOrganisationByTenantId, getIssuesForOrg, getIssueByCheckType, updateOrganisationMeta,
-  updateOrganisationSupplierPatternLookback,
+  updateOrganisationSupplierPatternLookback, updateOrganisationMultiAccountPatternLookback,
+  updateOrganisationCheckConfig,
   getTransactionCountsForOrg, getBankReconciliationForOrg, updateStatementBalance,
+  getExcludedBankAccountIds, setBankAccountExcluded,
   getExpenseAccountsForOrg, getAccountCheckConfigurationForOrg,
   setAccountCheckConfiguration, getIssueFindings, getIssueFindingSummary, setFindingReviewStates,
+  setLineReviewState, getLineReviewStates, setFindingNote, getFindingNotes, getAllFindingKeysForIssue,
+  addContactExclusion,
   createStatementImport, deleteStatementImport, getStatementImportByHash, getStatementImportsForOrg,
   getXeroBankItemsForOrg, getFiledAccountsForOrg, getFiledAccountsExtractionsForOrg,
   upsertFiledAccounts, getReportFindings, getSetting,
-  getCompaniesHouseProfileForOrg, updateOrganisationCompanyNumber, upsertCompaniesHouseProfile
+  getCompaniesHouseProfileForOrg, updateOrganisationCompanyNumber, upsertCompaniesHouseProfile,
+  toggleStaffOrgAccess, getAllInsightData, saveInsightData, getInsightData,
+  getInsightAccountMappings, setInsightAccountMapping, getInsightCategorySettings, setInsightCategorySetting,
+  getInsightWidgetVisibility, setInsightWidgetVisibility,
+  getInsightSettingsKv, setInsightSettingsKv,
+  getInsightCorpTaxRateBands, addInsightCorpTaxRateBand, deleteInsightCorpTaxRateBand,
+  getInsightCorpTaxAdjustments, setInsightCorpTaxAdjustment, deleteInsightCorpTaxAdjustment,
 } = require('../db/queries');
 const { syncOrganisation, CHECK_DEFINITIONS } = require('../services/xeroSync');
+const { CASH_HEALTH_CATEGORIES } = require('../services/insightSync');
+const { resolveCheckDisplayStatus } = require('../services/checkRules');
 const { fetchCompanyProfile, normalizeCompanyNumber } = require('../services/companiesHouse');
-const { periodInput, resolvePeriod } = require('../services/periodResolver');
+const {
+  periodInput, resolvePeriod, shouldUseCacheOnlyForReanalysis,
+} = require('../services/periodResolver');
 const { startJob } = require('../services/syncJobs');
+const checkDescriptions = require('../data/checkDescriptions');
 const {
   matchStatementLines, normalizeStatementLines, recomputeEvidenceIssues, sha256
 } = require('../services/statementEvidence');
 const puppeteer = require('puppeteer');
+const { resolveOrgAccess } = require('../middleware/orgAccess');
+const { isStaffManager } = require('../services/staffPermissions');
+
+// Mounted with an explicit ':tenantId' path segment (not app.js's bare '/client' prefix) —
+// Express only populates req.params from a path pattern that actually contains the named
+// param, so this must live here rather than as plain middleware in app.js's app.use('/client', ...).
+router.use('/:tenantId', resolveOrgAccess);
 
 function parseScoreBreakdown(org) {
   try {
@@ -61,7 +83,10 @@ function clientViewData(org, query = {}) {
   const issues = getIssuesForOrg(org.id);
   const checkDefs = CHECK_DEFINITIONS.map(def => {
     const issue = issues.find(i => i.check_type === def.type);
-    return { ...def, ...(issue || { count: null, potential_value_gbp: 0 }) };
+    const merged = { ...def, ...(issue || { count: null, potential_value_gbp: 0 }) };
+    // Single source of truth for what this check's state means — the template must never re-derive
+    // this from its own period_checked string comparisons (see checkRules.js/periodStatus.js).
+    return { ...merged, displayStatus: resolveCheckDisplayStatus(merged) };
   });
   return {
     org, issues, checkDefs, selectedPeriod, periodQuery,
@@ -69,6 +94,7 @@ function clientViewData(org, query = {}) {
       Date.now() - new Date(org.last_successful_sync_at).getTime() > 36 * 60 * 60 * 1000,
     txCounts: getTransactionCountsForOrg(org.id, selectedPeriod.type, selectedPeriod.start, selectedPeriod.end),
     bankReconciliation: getBankReconciliationForOrg(org.id),
+    excludedBankAccountIds: getExcludedBankAccountIds(org.id),
     statementImports: getStatementImportsForOrg(org.id),
     filedAccounts: getFiledAccountsForOrg(org.id),
     filedAccountsExtractions: getFiledAccountsExtractionsForOrg(org.id),
@@ -77,6 +103,11 @@ function clientViewData(org, query = {}) {
     expenseAccounts: getExpenseAccountsForOrg(org.id),
     accountConfigurations: getAccountCheckConfigurationForOrg(org.id),
     scoreBreakdown: parseScoreBreakdown(org),
+    insight: getAllInsightData(org.id),
+    insightKv: getInsightSettingsKv(org.id),
+    insightMappings: getInsightAccountMappings(org.id),
+    insightWidgetVisibility: getInsightWidgetVisibility(org.id),
+    checkDescriptions,
   };
 }
 
@@ -153,7 +184,8 @@ function xeroLinks(checkType, item) {
 }
 
 function verifyCsrf(req, res, next) {
-  if (!req.session.csrfToken || req.body.csrf_token !== req.session.csrfToken) {
+  const supplied = req.body?.csrf_token || req.get('x-csrf-token');
+  if (!req.session.csrfToken || supplied !== req.session.csrfToken) {
     return res.status(403).send('Invalid form token');
   }
   next();
@@ -178,7 +210,7 @@ router.get('/:tenantId/score-breakdown', (req, res) => {
   res.json(breakdown);
 });
 
-router.post('/:tenantId/account-check-configuration', express.urlencoded({ extended: true }), (req, res) => {
+router.post('/:tenantId/account-check-configuration', express.urlencoded({ extended: true }), verifyCsrf, (req, res) => {
   const { tenantId } = req.params;
   const org = getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).send('Organisation not found');
@@ -214,16 +246,68 @@ router.post('/:tenantId/supplier-pattern-lookback', express.urlencoded({ extende
   }
   const months = parseInt(req.body.supplier_pattern_lookback_months, 10);
   updateOrganisationSupplierPatternLookback(org.id, Number.isFinite(months) ? months : null);
+  const multiAccountMonths = parseInt(req.body.multi_account_pattern_lookback_months, 10);
+  updateOrganisationMultiAccountPatternLookback(org.id, Number.isFinite(multiAccountMonths) ? multiAccountMonths : null);
   res.redirect(`/client/${tenantId}#supplier-pattern-lookback`);
 });
 
-router.post('/:tenantId/bank-reconciliation', express.urlencoded({ extended: true }), (req, res) => {
+router.post('/:tenantId/check-config', express.urlencoded({ extended: true }), (req, res) => {
+  const { tenantId } = req.params;
+  const org = getOrganisationByTenantId(tenantId);
+  if (!org) return res.status(404).send('Organisation not found');
+  if (!req.session.csrfToken || req.body.csrf_token !== req.session.csrfToken) {
+    return res.status(403).send('Invalid form token');
+  }
+  // A blank form field means "clear this override, fall back to the practice default" — an empty
+  // string must become a real null before it reaches the query layer, since Number('') is 0 (a
+  // real, wrong value), not "unset". The resolver layer (resolvePurchaseTaxMissingExcludeCodes)
+  // does support a deliberate empty-string override ("no exclusions") distinct from null ("not
+  // configured"), but this form has no way to express that distinction cleanly, so a blank field
+  // here means "no override" like every other field — the rarer case stays reachable directly in
+  // the database if ever needed, just not from this form.
+  const blankToNull = value => (value === '' || value == null ? null : value);
+  updateOrganisationCheckConfig(org.id, {
+    opening_balance_threshold_gbp: blankToNull(req.body.opening_balance_threshold_gbp),
+    capital_review_default_threshold_gbp: blankToNull(req.body.capital_review_default_threshold_gbp),
+    misallocated_items_default_threshold_gbp: blankToNull(req.body.misallocated_items_default_threshold_gbp),
+    multi_account_suppliers_min_value_gbp: blankToNull(req.body.multi_account_suppliers_min_value_gbp),
+    multi_tax_suppliers_min_value_gbp: blankToNull(req.body.multi_tax_suppliers_min_value_gbp),
+    purchase_tax_missing_exclude_codes: blankToNull(req.body.purchase_tax_missing_exclude_codes),
+    duplicate_invoice_window_days: blankToNull(req.body.duplicate_invoice_window_days),
+    duplicate_bill_window_days: blankToNull(req.body.duplicate_bill_window_days),
+    // Tri-state selects ('', '1', '0') — updateOrganisationCheckConfig's triStateBoolOrNull handles
+    // the '' -> null (not configured) mapping itself, so the raw value passes through unchanged.
+    duplicate_invoice_require_exact_reference: req.body.duplicate_invoice_require_exact_reference,
+    duplicate_invoice_include_fully_paid: req.body.duplicate_invoice_include_fully_paid,
+    duplicate_bill_require_exact_reference: req.body.duplicate_bill_require_exact_reference,
+    duplicate_bill_include_fully_paid: req.body.duplicate_bill_include_fully_paid,
+    duplicate_invoice_require_exact_total: req.body.duplicate_invoice_require_exact_total,
+    duplicate_bill_require_exact_total: req.body.duplicate_bill_require_exact_total,
+  });
+  res.redirect(`/client/${tenantId}#check-config`);
+});
+
+router.post('/:tenantId/bank-reconciliation', express.urlencoded({ extended: true }), verifyCsrf, (req, res) => {
   const { tenantId } = req.params;
   const { bank_account_id, statement_balance } = req.body;
   const org = getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   const parsed = parseFloat(statement_balance);
   updateStatementBalance(org.id, bank_account_id, isNaN(parsed) ? null : parsed);
+  recomputeEvidenceIssues(org.id);
+  res.redirect(`/client/${tenantId}#bank-reconciliation`);
+});
+
+router.post('/:tenantId/bank-account-exclusion', express.urlencoded({ extended: true }), verifyCsrf, (req, res) => {
+  const { tenantId } = req.params;
+  const { bank_account_id, excluded } = req.body;
+  const org = getOrganisationByTenantId(tenantId);
+  if (!org) return res.status(404).send('Organisation not found');
+  if (!bank_account_id) return res.status(400).send('bank_account_id is required');
+  // Xenon supports excluding individual bank accounts from Bank Balance and Unreconciled Bank
+  // Items — organisation-scoped, so this can never affect another client's account, even one that
+  // happens to share the same Xero bank_account_id (accounts are keyed by (org_id, account_id)).
+  setBankAccountExcluded(org.id, bank_account_id, excluded === '1' || excluded === 'true');
   recomputeEvidenceIssues(org.id);
   res.redirect(`/client/${tenantId}#bank-reconciliation`);
 });
@@ -344,10 +428,10 @@ router.get('/:tenantId/check/:checkType', (req, res) => {
   let pagination = { items: [], page: 1, pageSize: 50, total: 0, totalPages: 1 };
   let summary = { active: 0, dismissed: 0, ignored: 0, ok: 0 };
   const status = ['active', 'dismissed', 'ignored', 'ok', 'all'].includes(req.query.status)
-    ? req.query.status : 'active';
+    ? req.query.status : 'all';
   if (issue) {
-    pagination = getIssueFindings(issue.id, req.query.page, 50, status);
-    summary = getIssueFindingSummary(issue.id);
+    pagination = getIssueFindings(issue.id, org.id, req.query.page, 50, status);
+    summary = getIssueFindingSummary(issue.id, org.id);
     if (pagination.total === 0 && issue.detail_json) {
       try {
         pagination.items = JSON.parse(issue.detail_json);
@@ -357,8 +441,55 @@ router.get('/:tenantId/check/:checkType', (req, res) => {
       }
     }
   }
-  const items = pagination.items.map(item => ({ ...item, xero_links: xeroLinks(checkType, item) }));
-  res.render('checkDetail', { org, issue, def, items, pagination, summary, status, checkType });
+  // Attached at display time, not stored on the finding — this way every check whose findings
+  // already carry a raw accountCode (misallocated_items, purchase_tax_missing, sales_tax_missing,
+  // unexpected_account_used, etc. — most of the 29) picks up the friendly account name for its
+  // colored badge immediately, for findings already synced, with no re-sync required anywhere.
+  const accountNameByCode = {};
+  for (const account of getAccountCheckConfigurationForOrg(org.id)) {
+    if (account.account_code) accountNameByCode[account.account_code] = account.account_name;
+  }
+  // A note attached to a finding independent of its dismiss/ignore/ok state (Xenon's "Add Note" is
+  // its own action, not tied to those three) — see setFindingNote's comment.
+  const findingNotes = getFindingNotes(org.id, checkType);
+  // multi_account_suppliers/multi_tax_suppliers findings carry the underlying transactions behind
+  // the aggregate contact-level total (added for the drill-down view) — each one needs its own
+  // "Open in Xero" link, same mechanism as the top-level finding, just computed per transaction,
+  // plus its own reviewed/note state (finding_line_reviews — a separate, lighter-weight audit trail
+  // from the contact-level dismiss/ignore/OK above; see setLineReviewState's comment).
+  // "Age" (days since document date) only makes sense for the old_* family (old_unpaid_invoices,
+  // old_sales_credits, old_unpaid_bills, old_purchase_credits) — matches what Xenon itself shows
+  // this column for. Computed at render time against the real current date, same as a user reading
+  // "how old is this right now" would expect, not the sync's own as-of date used to DECIDE it's old.
+  const showAge = checkType.startsWith('old_');
+  const items = pagination.items.map(item => {
+    const lineReviews = Array.isArray(item.transactions) && item.transactions.length
+      ? getLineReviewStates(org.id, checkType, item.finding_key)
+      : {};
+    return {
+      ...item,
+      xero_links: xeroLinks(checkType, item),
+      standaloneNote: findingNotes[item.finding_key] || null,
+      ageDays: (showAge && item.date) ? Math.floor((Date.now() - new Date(item.date).getTime()) / 86400000) : undefined,
+      accountName: item.accountCode ? (item.accountName || accountNameByCode[item.accountCode] || null) : item.accountName,
+      transactions: Array.isArray(item.transactions)
+        ? item.transactions.map(tx => {
+            const lineKey = tx.bankTransactionId || tx.invoiceId || null;
+            return {
+              ...tx,
+              accountName: tx.accountCode ? (tx.accountName || accountNameByCode[tx.accountCode] || null) : tx.accountName,
+              xero_links: xeroLinks(checkType, tx), lineKey, ...(lineKey ? lineReviews[lineKey] : {}),
+            };
+          })
+        : undefined,
+    };
+  });
+  const extraData = {};
+  if (checkType === 'bank_balance') {
+    extraData.bankReconciliation = getBankReconciliationForOrg(org.id);
+    extraData.excludedBankAccountIds = getExcludedBankAccountIds(org.id);
+  }
+  res.render('checkDetail', { org, issue, def, items, pagination, summary, status, checkType, checkDescriptions, ...extraData });
 });
 
 router.post(
@@ -369,7 +500,18 @@ router.post(
     const { tenantId, checkType } = req.params;
     const org = getOrganisationByTenantId(tenantId);
     if (!org) return res.status(404).send('Organisation not found');
-    const findingKeys = [req.body.finding_key || req.body.finding_keys].flat().filter(Boolean);
+    // "Ignore/Dismiss all N items" applies to every finding matching the current status filter,
+    // not just the ones visible on this page — matches Xenon's own bulk buttons, which state the
+    // full count regardless of pagination.
+    let findingKeys;
+    if (req.body.select_all === '1') {
+      const issue = getIssueByCheckType(org.id, checkType);
+      const bulkStatus = ['active', 'dismissed', 'ignored', 'ok', 'all'].includes(req.body.return_status)
+        ? req.body.return_status : 'active';
+      findingKeys = issue ? getAllFindingKeysForIssue(issue.id, org.id, bulkStatus) : [];
+    } else {
+      findingKeys = [req.body.finding_key || req.body.finding_keys].flat().filter(Boolean);
+    }
     try {
       setFindingReviewStates(org.id, checkType, findingKeys, req.body.action, req.body.notes);
     } catch (error) {
@@ -381,7 +523,217 @@ router.post(
   }
 );
 
-router.post('/:tenantId/sync', async (req, res) => {
+// Marks one underlying transaction (within a multi_account_suppliers/multi_tax_suppliers contact
+// finding) reviewed — a lightweight audit trail only; never touches the parent finding's
+// count/value/score, since those are computed per contact, not per transaction (see
+// finding_line_reviews in schema.js).
+router.post(
+  '/:tenantId/check/:checkType/line-review',
+  express.urlencoded({ extended: true }),
+  verifyCsrf,
+  (req, res) => {
+    const { tenantId, checkType } = req.params;
+    const org = getOrganisationByTenantId(tenantId);
+    if (!org) return res.status(404).send('Organisation not found');
+    try {
+      setLineReviewState(org.id, checkType, req.body.finding_key, req.body.line_key, req.body.ok === '1', req.body.notes);
+    } catch (error) {
+      return res.status(400).send(error.message);
+    }
+    const status = encodeURIComponent(req.body.return_status || 'active');
+    const page = Math.max(1, Number(req.body.return_page) || 1);
+    res.redirect(`/client/${encodeURIComponent(tenantId)}/check/${encodeURIComponent(checkType)}?status=${status}&page=${page}`);
+  }
+);
+
+// Attaches a note to a finding without changing its dismiss/ignore/ok state — see setFindingNote's
+// comment for why this is deliberately a separate table/action from the review-state form above.
+router.post(
+  '/:tenantId/check/:checkType/note',
+  express.urlencoded({ extended: true }),
+  verifyCsrf,
+  (req, res) => {
+    const { tenantId, checkType } = req.params;
+    const org = getOrganisationByTenantId(tenantId);
+    if (!org) return res.status(404).send('Organisation not found');
+    try {
+      setFindingNote(org.id, checkType, req.body.finding_key, req.body.notes);
+    } catch (error) {
+      return res.status(400).send(error.message);
+    }
+    const status = encodeURIComponent(req.body.return_status || 'active');
+    const page = Math.max(1, Number(req.body.return_page) || 1);
+    res.redirect(`/client/${encodeURIComponent(tenantId)}/check/${encodeURIComponent(checkType)}?status=${status}&page=${page}`);
+  }
+);
+
+// "Ignore this contact" — a PERMANENT exclusion (contact_exclusions) applied on the NEXT
+// sync/reanalyse of this check, not immediately; see addContactExclusion's comment for why.
+router.post(
+  '/:tenantId/check/:checkType/ignore-contact',
+  express.urlencoded({ extended: true }),
+  verifyCsrf,
+  (req, res) => {
+    const { tenantId, checkType } = req.params;
+    const org = getOrganisationByTenantId(tenantId);
+    if (!org) return res.status(404).send('Organisation not found');
+    try {
+      addContactExclusion(org.id, checkType, req.body.contact_name);
+    } catch (error) {
+      return res.status(400).send(error.message);
+    }
+    const status = encodeURIComponent(req.body.return_status || 'active');
+    const page = Math.max(1, Number(req.body.return_page) || 1);
+    res.redirect(`/client/${encodeURIComponent(tenantId)}/check/${encodeURIComponent(checkType)}?status=${status}&page=${page}`);
+  }
+);
+
+router.post('/:tenantId/insight/target', express.urlencoded({ extended: true }), verifyCsrf, (req, res) => {
+  const org = getOrganisationByTenantId(req.params.tenantId);
+  if (!org) return res.status(404).send('Organisation not found');
+  const val = parseFloat(req.body.monthly_target);
+  if (Number.isFinite(val) && val >= 0) saveInsightData(org.id, 'target', { basis: 'fixed', monthly_target: val });
+  res.redirect(`/client/${encodeURIComponent(req.params.tenantId)}?panel=insight`);
+});
+
+router.post('/:tenantId/insight/ctax-override', express.urlencoded({ extended: true }), verifyCsrf, (req, res) => {
+  const org = getOrganisationByTenantId(req.params.tenantId);
+  if (!org) return res.status(404).send('Organisation not found');
+  const idx = parseInt(req.body.fy_index, 10);
+  const val = parseFloat(req.body.estimate);
+  if (Number.isFinite(idx) && idx >= 0 && Number.isFinite(val) && val >= 0) {
+    const existing = (() => {
+      const row = getInsightData(org.id, 'corp_tax_overrides');
+      return (row && row.data) ? row.data : {};
+    })();
+    existing[`fy${idx}`] = val;
+    saveInsightData(org.id, 'corp_tax_overrides', existing);
+  }
+  res.redirect(`/client/${encodeURIComponent(req.params.tenantId)}?panel=insight`);
+});
+
+const INSIGHT_MAPPING_CATEGORIES = [
+  { key: 'directors_loan', section: 'directors_loan' },
+  { key: 'dividend', section: 'dividend' },
+  { key: 'wc_trade_debtors', section: 'working_capital' },
+  { key: 'wc_trade_creditors', section: 'working_capital' },
+  { key: 'wc_stock', section: 'working_capital' },
+  { key: 'cash_disregard_banks', section: 'cash_health' },
+  { key: 'valuation_disregard', section: 'business_valuation' },
+  ...CASH_HEALTH_CATEGORIES.map(c => ({ key: c.key, section: 'cash_health', label: c.label })),
+];
+
+const INSIGHT_WIDGET_KEYS = [
+  'sales_tracker', 'cash_health', 'bookkeeping_health', 'profitability', 'corp_tax_estimate',
+  'directors_loan', 'business_valuation', 'working_capital', 'dividend_availability',
+];
+
+const TARGET_BASIS_VALUES = ['none', 'fixed', 'previous_month', 'avg3', 'avg6', 'avg12', 'same_month_last_year'];
+const VALUATION_MODEL_VALUES = ['', 'current_profit', 'current_sales', 'net_asset_value'];
+
+router.get('/:tenantId/insight/settings', (req, res) => {
+  const org = getOrganisationByTenantId(req.params.tenantId);
+  if (!org) return res.status(404).send('Organisation not found');
+  const targetRow = getInsightData(org.id, 'target');
+  const kv = getInsightSettingsKv(org.id);
+  const accounts = getAccountCheckConfigurationForOrg(org.id);
+  const codeToName = {};
+  for (const acc of accounts) codeToName[acc.account_code] = acc.account_name;
+  res.render('insightSettings', {
+    org,
+    query: req.query,
+    accounts,
+    codeToName,
+    mappings: getInsightAccountMappings(org.id),
+    categorySettings: getInsightCategorySettings(org.id),
+    widgetVisibility: getInsightWidgetVisibility(org.id),
+    widgetKeys: INSIGHT_WIDGET_KEYS,
+    target: (targetRow && targetRow.data) ? targetRow.data : {},
+    cashHealthCategories: CASH_HEALTH_CATEGORIES,
+    kv,
+    rateBands: getInsightCorpTaxRateBands(org.id),
+    addbacks: getInsightCorpTaxAdjustments(org.id, 'addback'),
+    deductions: getInsightCorpTaxAdjustments(org.id, 'deduct_other'),
+    capitalAllowances: getInsightCorpTaxAdjustments(org.id, 'capital_allowance'),
+    csrfToken: res.locals.csrfToken,
+  });
+});
+
+router.post('/:tenantId/insight/settings', express.urlencoded({ extended: true }), verifyCsrf, (req, res) => {
+  const org = getOrganisationByTenantId(req.params.tenantId);
+  if (!org) return res.status(404).send('Organisation not found');
+
+  for (const cat of INSIGHT_MAPPING_CATEGORIES) {
+    const raw = req.body[`accounts_${cat.key}`];
+    const codes = raw == null ? [] : (Array.isArray(raw) ? raw : [raw]);
+    setInsightAccountMapping(org.id, cat.key, codes);
+  }
+
+  for (const cat of CASH_HEALTH_CATEGORIES) {
+    const enabled = req.body[`enabled_${cat.key}`] === 'on';
+    const overrideEnabled = req.body[`override_enabled_${cat.key}`] === 'on';
+    const overrideRaw = req.body[`override_value_${cat.key}`];
+    const overrideValue = overrideRaw !== '' && overrideRaw != null && Number.isFinite(parseFloat(overrideRaw))
+      ? parseFloat(overrideRaw) : null;
+    setInsightCategorySetting(org.id, cat.key, { enabled, overrideEnabled, overrideValue });
+  }
+
+  for (const key of INSIGHT_WIDGET_KEYS) {
+    setInsightWidgetVisibility(org.id, key, req.body[`widget_${key}`] === 'on', req.body[`widget_pdf_${key}`] === 'on');
+  }
+
+  const targetBasis = TARGET_BASIS_VALUES.includes(req.body.target_basis) ? req.body.target_basis : 'none';
+  const fixedAmountRaw = req.body.target_fixed_amount;
+  const fixedAmount = fixedAmountRaw !== '' && Number.isFinite(parseFloat(fixedAmountRaw)) ? parseFloat(fixedAmountRaw) : null;
+  const pctIncreaseRaw = req.body.target_pct_increase;
+  const pctIncrease = pctIncreaseRaw !== '' && Number.isFinite(parseFloat(pctIncreaseRaw)) ? parseFloat(pctIncreaseRaw) : 0;
+  saveInsightData(org.id, 'target', {
+    basis: targetBasis,
+    monthly_target: targetBasis === 'fixed' ? fixedAmount : null,
+    pct_increase: pctIncrease,
+  });
+
+  const valuationModel = VALUATION_MODEL_VALUES.includes(req.body.valuation_model) ? req.body.valuation_model : '';
+  setInsightSettingsKv(org.id, 'valuation_model', valuationModel);
+  const multipleRaw = req.body.valuation_multiple;
+  setInsightSettingsKv(org.id, 'valuation_multiple', (multipleRaw !== '' && Number.isFinite(parseFloat(multipleRaw))) ? parseFloat(multipleRaw) : 1);
+
+  // Corp tax rate bands: existing rows can be deleted (checkbox), plus one optional new row.
+  const deleteIds = new Set((Array.isArray(req.body.delete_rate_band) ? req.body.delete_rate_band : [req.body.delete_rate_band]).filter(Boolean).map(Number));
+  for (const id of deleteIds) deleteInsightCorpTaxRateBand(org.id, id);
+  if (req.body.new_rate_band_date && req.body.new_rate_band_pct !== '') {
+    const pct = parseFloat(req.body.new_rate_band_pct);
+    if (Number.isFinite(pct)) addInsightCorpTaxRateBand(org.id, req.body.new_rate_band_date, pct);
+  }
+
+  // Corp tax addback / deduct-other / capital-allowance lists: each submitted as parallel arrays.
+  const syncAdjustmentList = (type, codesField, pctField, treatmentField) => {
+    const codes = req.body[codesField];
+    const codeList = codes == null ? [] : (Array.isArray(codes) ? codes : [codes]);
+    const pcts = req.body[pctField];
+    const pctList = pcts == null ? [] : (Array.isArray(pcts) ? pcts : [pcts]);
+    const treatments = treatmentField ? req.body[treatmentField] : null;
+    const treatmentList = treatments == null ? [] : (Array.isArray(treatments) ? treatments : [treatments]);
+    const keep = new Set(codeList);
+    for (const existing of getInsightCorpTaxAdjustments(org.id, type)) {
+      if (!keep.has(existing.account_code)) deleteInsightCorpTaxAdjustment(org.id, type, existing.account_code);
+    }
+    codeList.forEach((code, i) => {
+      const pct = parseFloat(pctList[i]);
+      setInsightCorpTaxAdjustment(org.id, type, code, {
+        pct: Number.isFinite(pct) ? pct : 100,
+        treatment: treatmentField ? (treatmentList[i] || null) : null,
+      });
+    });
+  };
+  syncAdjustmentList('addback', 'addback_code', 'addback_pct');
+  syncAdjustmentList('deduct_other', 'deduct_code', 'deduct_pct');
+  syncAdjustmentList('capital_allowance', 'capallow_code', 'capallow_pct', 'capallow_treatment');
+
+  res.redirect(`/client/${encodeURIComponent(req.params.tenantId)}/insight/settings?saved=1`);
+});
+
+router.post('/:tenantId/sync', verifyCsrf, async (req, res) => {
   const { tenantId } = req.params;
   const org = getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).json({ error: 'Organisation not found' });
@@ -402,7 +754,7 @@ router.post('/:tenantId/sync', async (req, res) => {
   });
 });
 
-router.post('/:tenantId/check/:checkType/reanalyse', async (req, res) => {
+router.post('/:tenantId/check/:checkType/reanalyse', verifyCsrf, async (req, res) => {
   const { tenantId, checkType } = req.params;
   const org = getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).json({ error: 'Organisation not found' });
@@ -422,15 +774,21 @@ router.post('/:tenantId/check/:checkType/reanalyse', async (req, res) => {
   // SAME period this dashboard already shows is this button's original, more common use — e.g.
   // after fixing a mis-coded transaction in Xero, or changing a threshold setting — and must still
   // do a real fetch, or it silently keeps showing the pre-fix result with no way to force a retry.
-  const cacheOnly = Boolean(org.period_key) && resolvedPeriod.key === org.period_key;
+  const cacheOnly = shouldUseCacheOnlyForReanalysis(org.period_key, resolvedPeriod.key);
+  // Escape hatch for a suspected-stale cache: incrementalSince (xeroSync.js) only re-fetches
+  // entities Xero itself reports as modified since the last watermark, so a record whose content
+  // changed WITHOUT bumping its own UpdatedDateUTC (confirmed happening for at least one bank
+  // transaction's reconciliation flag) would never be picked up by an ordinary reanalyse. This
+  // bypasses that and re-fetches everything live, same as a brand-new client's first sync.
+  const forceFullRefresh = req.query.forceFullRefresh === '1';
   const started = startJob(
     `${tenantId}:${checkType}:${period.type}:${period.from || ''}:${period.to || ''}`,
     progress => syncOrganisation(tenantId, progress, {
-      period, checkType, cacheOnly, asOf: org.period_end || undefined,
+      period, checkType, cacheOnly, asOf: resolvedPeriod.end, forceFullRefresh,
     }),
     {
       tenantId, orgId: org.id, mode: `check:${checkType}`,
-      payload: { period, checkType, cacheOnly, asOf: org.period_end || undefined },
+      payload: { period, checkType, cacheOnly, asOf: resolvedPeriod.end, forceFullRefresh },
     }
   );
   return res.status(started.existing ? 200 : 202).json({
@@ -438,11 +796,28 @@ router.post('/:tenantId/check/:checkType/reanalyse', async (req, res) => {
   });
 });
 
-router.post('/:tenantId/update', express.urlencoded({ extended: true }), (req, res) => {
+router.post('/:tenantId/update', express.urlencoded({ extended: true }), verifyCsrf, (req, res) => {
   const { tenantId } = req.params;
-  const { client_ref, tag } = req.body;
+  const org = getOrganisationByTenantId(tenantId);
+  if (!org) return res.status(404).send('Organisation not found');
+  const client_ref = 'client_ref' in req.body ? req.body.client_ref : org.client_ref;
+  const tag = 'tag' in req.body ? req.body.tag : org.tag;
   updateOrganisationMeta(tenantId, { client_ref, tag });
   res.redirect(`/client/${tenantId}`);
+});
+
+// The client-list "Team Member Access" +/- popover's quick single-pair toggle — a convenience
+// shortcut over /staff/:id/edit's full-page "replace the whole set" editor, writing to the same
+// staff_org_access join table via toggleStaffOrgAccess. Admin-only: only admins manage access.
+router.post('/:tenantId/access', express.urlencoded({ extended: true }), verifyCsrf, (req, res) => {
+  if (!isStaffManager(req.session.staffRole)) return res.status(403).send('Admin access required');
+  const { tenantId } = req.params;
+  const org = getOrganisationByTenantId(tenantId);
+  if (!org) return res.status(404).send('Organisation not found');
+  const staffId = Number(req.body.staff_id);
+  if (!Number.isFinite(staffId)) return res.status(400).send('Missing staff_id');
+  toggleStaffOrgAccess(staffId, org.id, req.body.grant === '1');
+  res.redirect('/');
 });
 
 router.get('/:tenantId/report', (req, res) => {
@@ -456,7 +831,7 @@ router.get('/:tenantId/report', (req, res) => {
       reportFindings,
       generatedAt: new Date().toISOString(),
       practiceLogo: getSetting('practice_logo') || '',
-      practiceName: getSetting('practice_name') || 'Xero Health Dashboard',
+      practiceName: getSetting('practice_name') || 'Akrio Verify',
     });
   } catch (error) {
     res.status(400).send(error.message);

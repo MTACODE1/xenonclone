@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { RESERVED_PERIOD_LABELS, resolvePeriodChecked } = require('./checkRules');
+const { getSetting } = require('../db/queries');
 
 const COLUMN_ALIASES = {
   date: ['date', 'transaction date', 'posted date', 'value date'],
@@ -285,19 +286,44 @@ function balanceDiscrepancy(statementBalance, xeroBalance) {
   return Math.abs(Number(statementBalance) - Number(xeroBalance));
 }
 
-// Statutory accounts are filed to the nearest pound, so a filed figure carrying no pence cannot be
-// held to penny precision against Xero: 4X4 (£0.25), Handymanz (£0.12) and Rose (£0.99) were each
-// reported as an opening-balance difference that is purely the filing's own rounding, and Xenon
-// reports all three as clean. MBX's genuine £114,390 difference is unaffected by a £1 tolerance.
-function filedRoundingTolerance(filedNetAssets) {
+// Xenon's opening-balance-differences doc states a flat, per-client-configurable default:
+// "a difference of £1 or more will result in an issue being flagged." That's the real default
+// threshold now — not a rule that depends on whether the filed figure happens to carry pence.
+// Statutory accounts are filed to the nearest pound, so a filed figure with no pence still can't
+// be held to penny precision against Xero: 4X4 (£0.25), Handymanz (£0.12) and Rose (£0.99) were
+// each purely the filing's own rounding, and Xenon reports all three as clean. That rounding case
+// is folded in as a floor underneath the configured threshold (never lower than it), so it keeps
+// those three clients clean without silently reintroducing a £0.01 default for anyone else.
+const DEFAULT_OPENING_BALANCE_THRESHOLD_GBP = 1;
+function filedRoundingFloor(filedNetAssets) {
   return Number.isInteger(Number(filedNetAssets)) ? 1 : 0.01;
 }
 
-function filedAccountsComparison(filedNetAssets, xeroNetAssets, tolerance = null) {
+// Config-isolation (2026-09): an organisation-level override sits above the practice-wide
+// `opening_balance_threshold_gbp` setting, which in turn falls back to Xenon's documented £1
+// default. A NULL/absent org column changes nothing for a client already using the practice
+// setting or the documented default.
+function resolveOpeningBalanceThreshold(org) {
+  // Number(null) is 0, not NaN — an unset column (the real value SQLite returns) must be checked
+  // for null explicitly, or every org without an override would silently resolve to a threshold
+  // of 0 instead of falling through to the practice setting/documented default below.
+  if (org?.opening_balance_threshold_gbp != null) {
+    const orgConfigured = Number(org.opening_balance_threshold_gbp);
+    if (Number.isFinite(orgConfigured) && orgConfigured >= 0) return orgConfigured;
+  }
+  const raw = getSetting('opening_balance_threshold_gbp');
+  if (raw == null || raw === '') return DEFAULT_OPENING_BALANCE_THRESHOLD_GBP;
+  const configured = Number(raw);
+  return Number.isFinite(configured) && configured >= 0 ? configured : DEFAULT_OPENING_BALANCE_THRESHOLD_GBP;
+}
+
+function filedAccountsComparison(filedNetAssets, xeroNetAssets, tolerance = null, org = null) {
   if (xeroNetAssets == null) return { configured: false, difference: null, hasIssue: null };
   if (!Number.isFinite(Number(xeroNetAssets))) return { configured: false, difference: null, hasIssue: null };
   const difference = Math.abs(Number(filedNetAssets) - Number(xeroNetAssets));
-  const limit = tolerance == null ? filedRoundingTolerance(filedNetAssets) : tolerance;
+  const limit = tolerance == null
+    ? Math.max(resolveOpeningBalanceThreshold(org), filedRoundingFloor(filedNetAssets))
+    : tolerance;
   return { configured: true, difference, hasIssue: difference > limit };
 }
 
@@ -383,7 +409,10 @@ function recomputeEvidenceIssues(orgId, periodKey = null, onlyCheck = null, opti
   const {
     getBankReconciliationForOrg, getFiledAccountsForOrg, getLatestStatementImportsForOrg,
     getLatestStatementLinesForOrg, getIssueByCheckType, refreshLatestHealthScore, replaceIssueForCheck,
+    getOrganisationById, getExcludedBankAccountIds,
   } = require('../db/queries');
+  const excludedBankAccountIds = getExcludedBankAccountIds(orgId);
+  const org = getOrganisationById(orgId);
   // A reserved label (not_configured/needs_sync/...) is not a real period range, so it must never
   // stand in for one here — falling back to it would then get written onto a DIFFERENT check's
   // genuine period_checked below (e.g. bank_balance correctly stored as 'not_configured' could
@@ -445,7 +474,11 @@ function recomputeEvidenceIssues(orgId, periodKey = null, onlyCheck = null, opti
       xeroBalance: account.xero_calculated_balance, xeroBalanceAsOf: account.xero_balance_as_of,
     });
   }
-  const comparable = evidence.filter(item => Number.isFinite(Number(item.xeroBalance)));
+  // Xenon supports excluding individual bank accounts from Bank Balance — e.g. a dormant account
+  // an accountant once entered a closing balance for but no longer wants flagged. Organisation-
+  // scoped, so excluding one client's account can never affect another's.
+  const includedEvidence = evidence.filter(item => !excludedBankAccountIds.has(item.accountId));
+  const comparable = includedEvidence.filter(item => Number.isFinite(Number(item.xeroBalance)));
   const discrepancies = comparable.map(item => ({
     ...item, discrepancy: balanceDiscrepancy(item.statementBalance, item.xeroBalance),
   })).filter(item => item.discrepancy > 0.01);
@@ -453,31 +486,48 @@ function recomputeEvidenceIssues(orgId, periodKey = null, onlyCheck = null, opti
     org_id: orgId, check_type: 'bank_balance', importance: 'critical',
     count: discrepancies.length
       ? discrepancies.length
-      : evidence.length && comparable.length === evidence.length ? 0 : null,
+      : includedEvidence.length && comparable.length === includedEvidence.length ? 0 : null,
     potential_value_gbp: discrepancies.reduce((sum, item) => sum + item.discrepancy, 0),
     detail_json: JSON.stringify(discrepancies),
-    period_checked: !evidence.length ? 'not_configured'
-      : comparable.length !== evidence.length ? 'needs_sync'
-        : `statement_comparison_as_of_${evidence.map(item => item.statementDate).filter(Boolean).sort().pop()}`,
+    period_checked: !includedEvidence.length ? 'not_configured'
+      : comparable.length !== includedEvidence.length ? 'needs_sync'
+        : `statement_comparison_as_of_${includedEvidence.map(item => item.statementDate).filter(Boolean).sort().pop()}`,
   });
 
-  const filed = getFiledAccountsForOrg(orgId)[0];
-  const comparison = filed ? filedAccountsComparison(filed.net_assets, filed.xero_net_assets) : null;
-  const filedDetails = comparison?.configured ? [{
-    filingDate: filed.filing_date, filedNetAssets: filed.net_assets,
-    xeroNetAssets: filed.xero_net_assets, xeroBalanceAsOf: filed.xero_balance_as_of,
-    difference: comparison.difference, sourceNote: filed.source_note,
-  }].filter(() => comparison.hasIssue) : [];
+  // Every eligible filed year-end is compared, not just the newest one — xeroSync.js already
+  // fetches a live Balance Sheet AS OF EACH filing's own date (see the getFiledAccountsForOrg loop
+  // around the Companies House sync), so the data has always supported this; only this check itself
+  // was silently reducing to filed[0], which meant a client with two historical filings that both
+  // differ from Xero could only ever surface one. Findings carry `date: filing_date` so
+  // addFindingKeys' fallback identity keys each filing by its own date, not just by its £ amount.
+  const filedAccounts = getFiledAccountsForOrg(orgId);
+  const filedComparisons = filedAccounts.map(filed => ({
+    filed, comparison: filedAccountsComparison(filed.net_assets, filed.xero_net_assets, null, org),
+  }));
+  const comparableFilings = filedComparisons.filter(fc => fc.comparison.configured);
+  const allComparable = filedAccounts.length > 0 && comparableFilings.length === filedAccounts.length;
+  const filedDetails = comparableFilings
+    .filter(fc => fc.comparison.hasIssue)
+    .map(fc => ({
+      filingDate: fc.filed.filing_date, date: fc.filed.filing_date,
+      filedNetAssets: fc.filed.net_assets,
+      xeroNetAssets: fc.filed.xero_net_assets, xeroBalanceAsOf: fc.filed.xero_balance_as_of,
+      difference: fc.comparison.difference, sourceNote: fc.filed.source_note,
+    }));
   replace({
     org_id: orgId, check_type: 'opening_balance_differences', importance: 'high',
-    count: !filed || !comparison.configured ? null : filedDetails.length,
+    count: !filedAccounts.length || !allComparable ? null : filedDetails.length,
     potential_value_gbp: filedDetails.reduce((sum, item) => sum + item.difference, 0),
     detail_json: JSON.stringify(filedDetails),
-    // A sync that ran and found no bookkeeping at the filing date is a permanent answer, not a
-    // pending one: telling the practice to "sync" again would never change it.
-    period_checked: !filed ? 'not_configured'
-      : comparison.configured ? `filed_accounts_${filed.filing_date}`
-        : filed.xero_synced_at ? 'unavailable' : 'needs_sync',
+    // A sync that ran and found no bookkeeping at a filing date is a permanent answer for THAT
+    // filing, not a pending one — but with several filings, one still-unsynced date must not let
+    // an already-clean-and-comparable one silently report as if the whole check succeeded, so any
+    // incomparable filing puts the whole check into needs_sync/unavailable, same as bank_balance
+    // above treats a partially-imported statement set as not yet ready rather than a real answer.
+    period_checked: !filedAccounts.length ? 'not_configured'
+      : allComparable
+        ? `filed_accounts_${filedAccounts.map(f => f.filing_date).sort().join(',')}`
+        : filedAccounts.some(f => !f.xero_synced_at) ? 'needs_sync' : 'unavailable',
   });
   if (!options.deferScoreRefresh) refreshLatestHealthScore(orgId);
 }

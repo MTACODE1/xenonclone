@@ -19,7 +19,10 @@ null count and must never be presented or scored as clean.
 - Exposure: sum the absolute magnitude of every counted finding. Credits and negative adjustments
   must not cancel positive findings. Where the risk is tax coding, exposure is absolute tax amount.
 - Fail-safe: missing prerequisites produce no scored result for that cycle. Null, zero, unavailable,
-  and not-configured values do not deduct health-score points.
+  not-configured, and not-applicable values do not deduct health-score points — nor do they earn a
+  false "clean check" credit; see `src/services/periodStatus.js` for the full status model a
+  `period_checked` label can carry (`unavailable`, `not_configured`, `not_applicable`, or a real
+  period key meaning the check actually ran).
 - Period: every check is bounded by both ends of the selected period, including the ones that look
   like cumulative backlogs. A failed fetch is not an empty dataset.
 - Detail safety: persist only the fields needed to explain a finding. Tests use synthetic identifiers
@@ -67,8 +70,8 @@ null count and must never be presented or scored as clean.
 | 17 | `multi_tax_suppliers` | medium | Detection over the period or the trailing twelve months, whichever reaches further back; NONE counts as a tax code; £0.00 lines ignored; supplier must have activity inside the checked period to be listed. Dominant tax is highest absolute volume; the configurable non-dominant floor defaults to £0. | Supplier / absolute non-dominant period value. | Fast Track exact. Rose 29 v 28 (Canva only residual). Handymanz SET-correct at 5 of Xenon's 7 (2 missing Zero-Rated lines not in cache). 4X4 / MBX still short. See "Multi-tax lookback evidence" below |
 | 18 | `unexpected_account_used` | medium | Period-scoped AUTHORISED bill/invoice/SPEND/RECEIVE line account differs from that contact role's configured default; contacts without a default are skipped. DELETED bank txns excluded. | Offending line / absolute **net (ex-VAT)** line amount. | Count confirmed on Handymanz/MBX/4X4; MBX value exact at £58,023.83 versus Xenon £58,024 |
 | 19 | `unexpected_tax_code_used` | medium | Period-scoped AUTHORISED bill/invoice/SPEND/RECEIVE line tax type differs from that contact role's configured default; contacts without a default are skipped. DELETED bank txns excluded. | Offending line / absolute **net (ex-VAT)** line amount. | Handymanz exact at 30 / £1,308.21 versus Xenon 30 / £1,308 |
-| 20 | `sales_tax_missing` | medium | VAT-registered client; positive sales-invoice or revenue-coded RECEIVE line since lock date has no tax type or NONE. | Offending line / absolute line amount. | Confirmed line and bank coverage |
-| 21 | `purchase_tax_missing` | medium | VAT-registered client; positive purchase-bill or expense-coded SPEND line since lock date has no tax type or NONE and account is not exempt. Processor fees are included; payroll/statutory/bank fees are exempt. | Offending line / absolute line amount. | Confirmed line/exemption behavior |
+| 20 | `sales_tax_missing` | medium | VAT-registered client; positive sales-invoice or revenue-coded RECEIVE line since lock date has no tax type or NONE. A non-VAT-registered client (`salesTaxBasis === 'NONE'`) is reported as **Not applicable**, not as a clean zero — see the fix note below. | Offending line / absolute line amount. | Confirmed line and bank coverage |
+| 21 | `purchase_tax_missing` | medium | VAT-registered client; positive purchase-bill or expense-coded SPEND line since lock date has no tax type or NONE and account is not exempt. Processor fees are included; payroll/statutory/bank fees are exempt. A non-VAT-registered client is reported as **Not applicable**, same as row 20. | Offending line / absolute line amount. | Confirmed line/exemption behavior |
 | 22 | `sales_tax_on_bills` | medium | Purchase-bill line uses a sales-only tax rate. Qualifying SPEND lines may be retained only as display-only observations. | Counted bill line / absolute tax amount; bank observations contribute zero. | Confirmed default |
 | 23 | `purchase_tax_on_invoices` | medium | Sales-invoice line uses a purchase-only tax rate. Qualifying RECEIVE lines may be retained only as display-only observations. | Counted invoice line / absolute tax amount; bank observations contribute zero. | Confirmed default |
 | 24 | `undocumented_bills` | medium | AUTHORISED purchase bill since lock date has no attachment. | Document / £0; displayed but excluded from headline totals and score. | Implemented, non-scored |
@@ -260,3 +263,79 @@ real transaction 2026-07-09), and 4 started being flagged because a recent recor
 hiding real dormancy (Cafe Mila: record edited 2026-04-15, last transaction 2025-06-18).
 Also Handymanz 204 → 186, Fast Track 152 → 148, Rose 314 → 273, 4X4 277 → 276.
 Not gate-scored: Xenon renders contact checks as "(!)" rather than a count.
+
+## Not-applicable status for non-VAT-registered clients (7 Sep 2026)
+
+`sales_tax_missing`/`purchase_tax_missing` have always correctly detected a non-VAT-registered
+client (`orgInfo.salesTaxBasis === 'NONE'`) and written `period_checked: 'not_vat_registered'` —
+but that label was not in the reserved-label set, so the shared persistence path
+(`resolvePeriodChecked`) silently overwrote it with the sync's real period key before storage. The
+practical effect: a non-VAT-registered client's zero-findings result was indistinguishable in the
+database from a VAT-registered client that was checked and genuinely found nothing, and the
+dashboard rendered both as an ordinary green "OK".
+
+Fixed by:
+- Adding `'not_vat_registered'` to the reserved-label set, now consolidated in
+  `src/services/periodStatus.js` (a dependency-free module both `checkRules.js` and
+  `scoreProfile.js` import from, avoiding a circular require between them).
+- Introducing `resolveCheckDisplayStatus(check)` as the single place that turns a persisted issue
+  into `unavailable` / `not_configured` / `not_applicable` / `ok` / `issues` / `not_synced` — the
+  dashboard UI (`client.ejs`, via a `displayStatus` field computed once server-side) and the health
+  score (`scoreProfile.js`'s `NON_SCORED_PERIODS`) both read from it now, so they can never disagree.
+- The dashboard now shows "Not applicable — client is not VAT registered" for both checks,
+  distinguished from "OK" and from "Not synced."
+- The health score already had no reward mechanic (it is pure deduction from active findings, so a
+  clean check and a not-applicable check both already deducted zero) — the fix's scoring
+  contribution is making that exclusion *reasoned* (`excludedReason: 'not_vat_registered'`) rather
+  than falling through to the generic "no active findings" bucket, and confirming a VAT-registered
+  client's real findings on these two checks are completely unaffected.
+
+No detection logic changed for a VAT-registered client. Verified live against all 7 connected
+clients (all VAT-registered) with zero change to their stored results, plus a synthetic
+non-VAT-registered organisation to confirm the dashboard renders correctly end-to-end.
+
+This is the smaller-scope fix explicitly chosen over a dedicated status column: `period_checked`
+already carries this applicability information as an overloaded label, and the five reserved
+strings now cover every state this app currently needs. See `periodStatus.js`'s own comment for the
+documented technical debt — if a future status needs richer structure than a single label, that is
+the point to introduce a real column instead of a sixth reserved string.
+
+## Phase 5 verification pass (7 Sep 2026)
+
+`scripts/generate-xenon-parity-matrix.js` was re-run read-only against current cached data (no live
+Xero calls) and `XENON_PARITY_MATRIX.md` refreshed. Zero self-check divergences — every pure-function
+recomputation this script performs still matches what production last stored, for every client and
+check it covers. That rules out a script/production divergence as the explanation for anything below;
+every residual is either genuine ~1-month data drift since the Xenon snapshots (7–13 Aug 2026) or an
+already-documented, evidence-backed cause.
+
+- **RBC Sutherland and Julia Kuisma Ltd have no stored Xenon comparison at all** (no
+  `validation_snapshots` row) — of the 7 connected clients, only 4X4, Handymanz, Fast Track, Rose,
+  and MBX have ever had a Xenon export entered via the Validation Gate. Any row-level parity claim
+  about RBC or Julia Kuisma is **unresolved, not verified-clean** — it requires the accountant to
+  paste a fresh Xenon export for that client before a real comparison is possible. The `RBC legacy
+  report integrity` entry above documents a past aggregation bug fix for RBC, which is a code
+  correctness fact independent of having no live Xenon comparison — the two should not be conflated.
+- **4X4 `duplicate_invoices`/`duplicate_bills` dropped from the Aug-13 locked fixture's 31/6 groups
+  to 0/0 live**, both in this script's live recomputation and in the actual last production sync
+  (independently cross-checked) — consistent with the client's real invoices/bills having been
+  matched, paid, or corrected in Xero since the snapshot, not a regression. `test/xenonParity.test.js`
+  still locks the *algorithm* against the frozen Aug-13 fixture (by design, per that file's own
+  header comment) and continues to pass; that test's purpose was never to assert live-forever Xenon
+  equality, only that the grouping logic itself hasn't silently changed.
+- **Rose's `purchase_tax_missing` gap (2952 vs Xenon's 5) is dominated by Xenon's own dismissed/
+  ignored review state**, per the `Rose purchase_tax_missing 2758 → 5` entry above (still the
+  correct, evidence-backed explanation — the underlying count has simply grown further with Rose's
+  continued trading activity since that entry was written). A secondary, smaller contributor worth
+  the accountant's attention: of Rose's 2952 findings, roughly 950 sit on PayPal fees (account 311)
+  and Bank Fees (account 404) — both deliberately **not** in the universal exemption keyword list
+  (`Confirmed defaults` above: "PayPal, card, merchant, and other processor fees remain included
+  unless explicitly excluded by client account code"), so this is expected behaviour, not a bug.
+  If Rose's own processor fees are confirmed VAT-out-of-scope, the fix is a client-side one: add
+  `311,404` to Rose's `purchase_tax_missing_exclude_codes` organisation override — no code change,
+  and it cannot affect any other client.
+- Every other MISMATCH/COUNT_MATCH_ONLY row in the refreshed matrix is within the range explainable
+  by ~1 month of ordinary trading activity (new transactions, reconciliations, edits) on an actively
+  used set of real client books, and none showed a self-check divergence. None were investigated
+  individually beyond that threshold check in this pass — a genuinely fresh Xenon export for any of
+  the 5 covered clients would be needed to re-tighten these to a same-day comparison.

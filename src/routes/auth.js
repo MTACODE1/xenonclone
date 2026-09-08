@@ -6,28 +6,32 @@ const crypto = require('crypto');
 
 router.get('/connect', async (req, res) => {
   try {
-    const xero = createXeroClient();
-    await xero.initialize();
     const state = crypto.randomBytes(16).toString('hex');
     req.session.oauthState = state;
+    const xero = createXeroClient(state);
+    await xero.initialize();
     const url = await xero.buildConsentUrl();
     res.redirect(url);
   } catch (err) {
-    console.error('Auth connect error:', err);
+    console.error('Auth connect error:', err.message);
     res.status(500).send('Failed to initiate OAuth: ' + err.message);
   }
 });
 
 router.get('/callback', async (req, res) => {
   try {
-    const xero = createXeroClient();
+    const xero = createXeroClient(req.session.oauthState);
     await xero.initialize();
 
     // Build full callback URL — xero-node needs the complete URL including host
     const fullCallbackUrl = `${process.env.XERO_REDIRECT_URI}${req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : ''}`;
-    console.log('[OAuth callback] URL:', fullCallbackUrl);
+    // The query string carries Xero's one-time authorisation `code` and `state` — real secrets,
+    // even though short-lived and single-use. Log only that the callback was reached, never the
+    // query string itself.
+    console.log('[OAuth callback] received, redirect URI:', process.env.XERO_REDIRECT_URI);
 
     const tokenSet = await xero.apiCallback(fullCallbackUrl);
+    delete req.session.oauthState;
     await xero.updateTenants();
     const tenants = xero.tenants;
 
@@ -57,14 +61,17 @@ router.get('/callback', async (req, res) => {
 
     res.redirect('/');
   } catch (err) {
-    console.error('Auth callback error:', err);
+    console.error('Auth callback error:', err.message);
     const msg = err?.message || err?.error_description || JSON.stringify(err) || 'Unknown error';
     res.status(500).send('OAuth callback failed: ' + msg);
   }
 });
 
-router.get('/disconnect/:tenantId', async (req, res) => {
+router.post('/disconnect/:tenantId', express.urlencoded({ extended: true }), async (req, res) => {
   const { tenantId } = req.params;
+  if (!req.session.csrfToken || req.body.csrf_token !== req.session.csrfToken) {
+    return res.status(403).send('Invalid form token');
+  }
   try {
     const xero = createXeroClient();
     const tokenRow = getToken(tenantId);
@@ -76,7 +83,7 @@ router.get('/disconnect/:tenantId', async (req, res) => {
     deleteToken(tenantId);
     res.redirect('/');
   } catch (err) {
-    console.error('Disconnect error:', err);
+    console.error('Disconnect error:', err.message);
     markOrganisationDisconnected(tenantId);
     res.redirect('/');
   }

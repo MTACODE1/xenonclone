@@ -1,0 +1,17 @@
+{
+  "client": "Fast Track Excavations",
+  "xenonSnapshotDate": "2026-09-04",
+  "accountCode": "473",
+  "accountName": "Repairs & Maintenance",
+  "threshold": 200,
+  "boundaryEvidence": {
+    "contact": "Louth Tyre Services",
+    "date": "2026-02-13",
+    "netAmount": 245,
+    "description": "LOUTH",
+    "includedByXenon": true
+  },
+  "expectedCount": 20,
+  "expectedExposure": 12316.53,
+  "expectedRenderedExposure": 12317
+}

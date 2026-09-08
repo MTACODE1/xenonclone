@@ -67,18 +67,19 @@ Open **http://localhost:3000** in your browser.
 ## Usage
 
 1. Click "Connect Client" to authorize a Xero organisation
-2. After connecting, click "Sync" to run all 25 health checks
+2. After connecting, click "Sync" to run all 29 health checks
 3. View the client list, panorama, or individual client health reports
 4. Download PDF reports for any client
 5. View transaction counts across all clients
 
 ## Health Checks
 
-The dashboard runs 25 automated checks grouped by importance:
+The dashboard runs 29 checks grouped by importance. Some require external evidence or per-client configuration, as described in `XENON_PARITY_SPEC.md`.
 
 **Critical:**
 - Bank Balance Check
 - Unreconciled Bank Items
+- Unprocessed Bank
 
 **High:**
 - Duplicate Invoices
@@ -101,21 +102,24 @@ The dashboard runs 25 automated checks grouped by importance:
 - Unexpected Tax Code Used
 - Sales Tax Missing
 - Purchase Tax Missing
-
-**Low:**
+- Sales Tax on Bills
+- Purchase Tax on Invoices
+- Undocumented Bills
 - Unapproved Invoices
 - Unapproved Bills
+
+**Low:**
 - Duplicate Contacts
 - Contact Defaults Missing
 - Inactive Contacts
 
 ## Database Schema
 
-SQLite database with 5 tables:
+SQLite stores organisations, versioned sync results, cached Xero entities, evidence, review state, jobs and validation snapshots. Core tables include:
 - `organisations` — Connected Xero clients
 - `health_scores` — Calculated health scores per org
 - `issues` — Individual check results
-- `xero_tokens` — OAuth tokens (encrypted)
+- `xero_tokens` — OAuth tokens stored locally; protect the database/volume because application-layer encryption is not currently implemented
 - `settings` — Practice configuration
 - `transaction_counts` — Transaction volume data
 
