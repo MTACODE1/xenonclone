@@ -148,7 +148,13 @@
               <% } %>
             </td>
             <td class="text-right">
-              <button onclick="syncClient('<%= org.xero_tenant_id %>', this)" class="btn btn-ghost-primary btn-sm">Sync</button>
+              <% if (org.activeJob) { %>
+                <button type="button" id="sync-btn-<%= org.xero_tenant_id %>" class="btn btn-ghost-primary btn-sm" disabled>
+                  <%= org.activeJob.progress?.message || (org.activeJob.status === 'queued' ? 'Waiting to start...' : 'Syncing…') %>
+                </button>
+              <% } else { %>
+                <button onclick="syncClient('<%= org.xero_tenant_id %>', this)" class="btn btn-ghost-primary btn-sm">Sync</button>
+              <% } %>
               <% if (org.connection_status === 'connected') { %>
                 <form method="post" action="<%= basePath %>/auth/disconnect/<%= org.xero_tenant_id %>" style="display:inline" onsubmit="return confirm('Disconnect this client?')">
                   <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
@@ -221,3 +227,13 @@ document.addEventListener('click', event => {
 </script>
 
 <%- include('partials/footer') %>
+
+<script>
+// A queued/running sync only shows live progress in the browser tab that started it — a
+// refresh (or anyone else looking at this page) otherwise sees nothing until it finishes. On
+// load, re-open the progress stream for every client whose sync is already in flight, so the
+// button here reflects the real current status instead of always showing a plain "Sync".
+<% orgs.filter(org => org.activeJob).forEach(org => { %>
+  followJob('<%= org.activeJob.id %>', document.getElementById('sync-btn-<%= org.xero_tenant_id %>'), 'Sync');
+<% }) %>
+</script>

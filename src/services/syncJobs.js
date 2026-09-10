@@ -202,6 +202,22 @@ async function getJob(id) {
   return publicJob(rows[0]);
 }
 
+// For the Client List page on load: without this, a queued/running job is invisible after a
+// refresh (or to anyone who didn't personally click Sync) until it finishes, since the live
+// progress stream only exists in the browser tab that started it. Returns a Map keyed by org_id
+// so a page rendering many orgs can look up "is there one already in flight" per row in one query
+// instead of one query per org.
+async function getActiveJobsByOrg() {
+  const [rows] = await getPool().query(
+    `SELECT * FROM akrio_sync_jobs WHERE status IN ('queued', 'running') ORDER BY created_at`
+  );
+  const byOrg = new Map();
+  for (const row of rows) {
+    if (!byOrg.has(row.org_id)) byOrg.set(row.org_id, publicJob(row));
+  }
+  return byOrg;
+}
+
 async function subscribe(id, listener) {
   const job = await getJob(id);
   if (!job) return null;
@@ -244,4 +260,4 @@ async function cancelJob(id) {
   }
 })();
 
-module.exports = { cancelJob, getJob, startJob, subscribe, transient };
+module.exports = { cancelJob, getActiveJobsByOrg, getJob, startJob, subscribe, transient };

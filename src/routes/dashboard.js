@@ -9,7 +9,7 @@ const { syncOrganisation } = require('../services/xeroSync');
 const {
   periodInput, PERIOD_TYPES, resolvePeriod, shouldUseCacheOnlyForReanalysis,
 } = require('../services/periodResolver');
-const { cancelJob, getJob, startJob, subscribe } = require('../services/syncJobs');
+const { cancelJob, getActiveJobsByOrg, getJob, startJob, subscribe } = require('../services/syncJobs');
 
 function requestedPeriod(query) {
   return periodInput(query, getSetting('default_sync_period') || 'since_lock_date');
@@ -49,11 +49,13 @@ router.get('/', async (req, res, next) => {
       const allowed = new Set(await getOrgIdsForStaff(req.session.staffId));
       orgs = orgs.filter(o => allowed.has(o.id));
     }
+    const activeJobsByOrg = await getActiveJobsByOrg();
     orgs = await Promise.all(orgs.map(async org => ({
       ...org,
       isStale: !org.last_successful_sync_at ||
         new Date(org.last_successful_sync_at).getTime() < staleBefore,
       accessBadges: await getStaffForOrg(org.id),
+      activeJob: activeJobsByOrg.get(org.id) || null,
     })));
     const connected = orgs.filter(o => o.connection_status === 'connected');
     const avgScore = connected.length
