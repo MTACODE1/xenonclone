@@ -11,7 +11,14 @@ function getDb() {
     fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
     db = new Database(DB_PATH);
     db.pragma('journal_mode = WAL');
-    db.pragma('foreign_keys = ON');
+    // organisations/health_scores/sync_runs/sync_jobs/xero_tokens moved to the shared MySQL
+    // database — this local organisations table is no longer written to, so every remaining
+    // SQLite table's "REFERENCES organisations(id)" foreign key (issues, xero_entity_cache,
+    // transaction_counts, bank_reconciliation, etc.) can never be satisfied by ON, since the
+    // org ids now come from MySQL and never exist in this local shadow table. Referential
+    // integrity for org_id is enforced at the application layer now (every write already comes
+    // from an org fetched via a real MySQL lookup), not by SQLite.
+    db.pragma('foreign_keys = OFF');
     initSchema();
   }
   return db;
