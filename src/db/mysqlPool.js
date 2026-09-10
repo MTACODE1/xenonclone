@@ -25,6 +25,13 @@ function getPool() {
       database: process.env.AKRIO_DB_NAME || process.env.MTAKPI_DB_NAME,
       waitForConnections: true,
       connectionLimit: 10,
+      // mysql2 returns DATE/DATETIME/TIMESTAMP columns as JS Date objects by default. Everything
+      // else in this app (still on SQLite, plus all the existing JS code that formats/compares
+      // these values as strings) expects plain strings, the way better-sqlite3 always returned
+      // them — a Date object passed into a SQLite query as a bind parameter throws ("SQLite3 can
+      // only bind numbers, strings, bigints, buffers, and null"). This makes MySQL return the
+      // same string shape SQLite always did, instead of patching every call site.
+      dateStrings: true,
     });
   }
   return pool;
