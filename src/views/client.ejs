@@ -978,7 +978,7 @@ async function reanalyseCheck(checkType, btn) {
 }
 
 function watchSyncJob(jobId, btn) {
-  const stream = new EventSource('/sync-jobs/' + encodeURIComponent(jobId) + '/events');
+  const stream = new EventSource('<%= basePath %>/sync-jobs/' + encodeURIComponent(jobId) + '/events');
   stream.onmessage = event => {
     const job = JSON.parse(event.data);
     btn.textContent = job.progress?.message || 'Working…';
