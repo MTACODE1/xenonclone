@@ -14,7 +14,7 @@ router.get('/', (req, res) => {
 // against AKRIO_SSO_SECRET (deliberately NOT the same secret MTAKPI uses for its own JWT
 // sessions, so this token can never double as one), then log the matching local staff
 // record in — same session shape as a normal password login.
-router.get('/sso', (req, res) => {
+router.get('/sso', async (req, res, next) => {
   const token = req.query.token;
   const secret = process.env.AKRIO_SSO_SECRET;
   if (!token || !secret) {
@@ -31,23 +31,27 @@ router.get('/sso', (req, res) => {
     return res.render('login', { error: 'Invalid sign-in link.' });
   }
 
-  const staff = getStaffByMtakpiName(payload.staff_name);
-  if (!staff || !staff.is_active) {
-    return res.render('login', {
-      error: "You don't have Akrio Verify access yet. Ask an admin to add you on the Staff page.",
-    });
-  }
+  try {
+    const staff = await getStaffByMtakpiName(payload.staff_name);
+    if (!staff || !staff.is_active) {
+      return res.render('login', {
+        error: "You don't have Akrio Verify access yet. Ask an admin to add you on the Staff page.",
+      });
+    }
 
-  req.session.staffId = staff.id;
-  req.session.staffRole = staff.role;
-  req.session.staffName = staff.name;
-  touchStaffLastLogin(staff.id);
-  res.redirect('/');
+    req.session.staffId = staff.id;
+    req.session.staffRole = staff.role;
+    req.session.staffName = staff.name;
+    await touchStaffLastLogin(staff.id);
+    res.redirect('/');
+  } catch (error) {
+    next(error);
+  }
 });
 
 // No CSRF check here — there's no prior session to compare a token against before login, and
 // this isn't a state-changing action against another user's data.
-router.post('/', express.urlencoded({ extended: true }), async (req, res) => {
+router.post('/', express.urlencoded({ extended: true }), async (req, res, next) => {
   const { staff_name, password } = req.body;
 
   let mtakpiResult;
@@ -66,18 +70,22 @@ router.post('/', express.urlencoded({ extended: true }), async (req, res) => {
     return res.render('login', { error });
   }
 
-  const staff = getStaffByMtakpiName(mtakpiResult.mtakpiStaff.staff_name);
-  if (!staff || !staff.is_active) {
-    return res.render('login', {
-      error: "You don't have Akrio Verify access yet. Ask an admin to add you on the Staff page.",
-    });
-  }
+  try {
+    const staff = await getStaffByMtakpiName(mtakpiResult.mtakpiStaff.staff_name);
+    if (!staff || !staff.is_active) {
+      return res.render('login', {
+        error: "You don't have Akrio Verify access yet. Ask an admin to add you on the Staff page.",
+      });
+    }
 
-  req.session.staffId = staff.id;
-  req.session.staffRole = staff.role;
-  req.session.staffName = staff.name;
-  touchStaffLastLogin(staff.id);
-  res.redirect('/');
+    req.session.staffId = staff.id;
+    req.session.staffRole = staff.role;
+    req.session.staffName = staff.name;
+    await touchStaffLastLogin(staff.id);
+    res.redirect('/');
+  } catch (error) {
+    next(error);
+  }
 });
 
 router.post('/logout', express.urlencoded({ extended: true }), (req, res) => {

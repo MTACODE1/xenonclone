@@ -11,13 +11,12 @@ const { getDb } = require('./src/db/schema');
 const { getAllOrganisations, getSetting, getStaffById } = require('./src/db/queries');
 const { syncOrganisation } = require('./src/services/xeroSync');
 const { startJob } = require('./src/services/syncJobs');
-const SqliteSessionStore = require('./src/services/sqliteSessionStore');
+const MysqlSessionStore = require('./src/services/mysqlSessionStore');
 const { bootstrapAdmin } = require('./src/services/bootstrapAdmin');
 const { isStaffManager, canAccessSettings } = require('./src/services/staffPermissions');
 
 // Init DB on startup
 getDb();
-bootstrapAdmin();
 
 const app = express();
 
@@ -46,7 +45,7 @@ const useLocalTlsServer = isSecureRedirect && process.env.NODE_ENV !== 'producti
 app.set('trust proxy', 1);
 
 app.use(session({
-  store: new SqliteSessionStore(),
+  store: new MysqlSessionStore(),
   secret: process.env.SESSION_SECRET || 'xero-dashboard-secret',
   resave: false,
   saveUninitialized: false,
@@ -59,22 +58,26 @@ app.use(session({
 }));
 
 // Sweeps expired session rows hourly so the sessions table doesn't grow unbounded.
-setInterval(() => SqliteSessionStore.pruneExpired(), 60 * 60 * 1000).unref();
+setInterval(() => MysqlSessionStore.pruneExpired().catch(err => console.error('[sessions] prune failed:', err.message)), 60 * 60 * 1000).unref();
 
-app.use((req, res, next) => {
-  if (!req.session.csrfToken) req.session.csrfToken = crypto.randomBytes(24).toString('hex');
-  res.locals.csrfToken = req.session.csrfToken;
-  res.locals.practiceName = getSetting('practice_name') || '';
-  res.locals.cssVersion = '20260807';
-  res.locals.staffName = req.session.staffName || null;
-  res.locals.staffRole = req.session.staffRole || null;
-  res.locals.isStaffManager = isStaffManager(req.session.staffRole);
-  res.locals.canAccessSettings = res.locals.isStaffManager
-    || (req.session.staffId ? canAccessSettings(getStaffById(req.session.staffId)) : false);
-  // Every root-relative link/form/asset in the views is written as "<%= basePath %>/...",
-  // so the whole app moves cleanly under a path prefix (e.g. /akrio-verify) with one change.
-  res.locals.basePath = BASE_PATH;
-  next();
+app.use(async (req, res, next) => {
+  try {
+    if (!req.session.csrfToken) req.session.csrfToken = crypto.randomBytes(24).toString('hex');
+    res.locals.csrfToken = req.session.csrfToken;
+    res.locals.practiceName = getSetting('practice_name') || '';
+    res.locals.cssVersion = '20260807';
+    res.locals.staffName = req.session.staffName || null;
+    res.locals.staffRole = req.session.staffRole || null;
+    res.locals.isStaffManager = isStaffManager(req.session.staffRole);
+    res.locals.canAccessSettings = res.locals.isStaffManager
+      || (req.session.staffId ? canAccessSettings(await getStaffById(req.session.staffId)) : false);
+    // Every root-relative link/form/asset in the views is written as "<%= basePath %>/...",
+    // so the whole app moves cleanly under a path prefix (e.g. /akrio-verify) with one change.
+    res.locals.basePath = BASE_PATH;
+    next();
+  } catch (error) {
+    next(error);
+  }
 });
 
 // res.redirect('/x') is written all over the routes as a plain root-relative path — Express
@@ -148,16 +151,23 @@ cron.schedule('0 2 * * *', () => {
 
 const PORT = process.env.PORT || 3000;
 
-if (useLocalTlsServer) {
-  const sslOptions = {
-    key: fs.readFileSync(path.join(__dirname, 'certs/localhost-key.pem')),
-    cert: fs.readFileSync(path.join(__dirname, 'certs/localhost-cert.pem')),
-  };
-  https.createServer(sslOptions, app).listen(PORT, () => {
-    console.log(`Xero Dashboard running at https://localhost:${PORT}`);
-  });
-} else {
-  app.listen(PORT, () => {
-    console.log(`Xero Dashboard running at http://localhost:${PORT} (NODE_ENV=${process.env.NODE_ENV || 'development'})`);
-  });
-}
+// bootstrapAdmin needs the staff table (now in MySQL) before anything can log in, so the server
+// only starts accepting connections once it's confirmed done.
+bootstrapAdmin().then(() => {
+  if (useLocalTlsServer) {
+    const sslOptions = {
+      key: fs.readFileSync(path.join(__dirname, 'certs/localhost-key.pem')),
+      cert: fs.readFileSync(path.join(__dirname, 'certs/localhost-cert.pem')),
+    };
+    https.createServer(sslOptions, app).listen(PORT, () => {
+      console.log(`Xero Dashboard running at https://localhost:${PORT}`);
+    });
+  } else {
+    app.listen(PORT, () => {
+      console.log(`Xero Dashboard running at http://localhost:${PORT} (NODE_ENV=${process.env.NODE_ENV || 'development'})`);
+    });
+  }
+}).catch(error => {
+  console.error('[bootstrap] Failed to start:', error);
+  process.exit(1);
+});

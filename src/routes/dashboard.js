@@ -40,29 +40,33 @@ function startOrganisationJob(tenantId, query = {}, checkType = null) {
   );
 }
 
-router.get('/', (req, res) => {
-  const staleBefore = Date.now() - 36 * 60 * 60 * 1000;
-  const managesStaff = isStaffManager(req.session.staffRole);
-  let orgs = getAllOrganisations();
-  if (!managesStaff) {
-    const allowed = new Set(getOrgIdsForStaff(req.session.staffId));
-    orgs = orgs.filter(o => allowed.has(o.id));
+router.get('/', async (req, res, next) => {
+  try {
+    const staleBefore = Date.now() - 36 * 60 * 60 * 1000;
+    const managesStaff = isStaffManager(req.session.staffRole);
+    let orgs = getAllOrganisations();
+    if (!managesStaff) {
+      const allowed = new Set(await getOrgIdsForStaff(req.session.staffId));
+      orgs = orgs.filter(o => allowed.has(o.id));
+    }
+    orgs = await Promise.all(orgs.map(async org => ({
+      ...org,
+      isStale: !org.last_successful_sync_at ||
+        new Date(org.last_successful_sync_at).getTime() < staleBefore,
+      accessBadges: await getStaffForOrg(org.id),
+    })));
+    const connected = orgs.filter(o => o.connection_status === 'connected');
+    const avgScore = connected.length
+      ? Math.round(connected.filter(o => o.score != null).reduce((s, o) => s + o.score, 0) / (connected.filter(o => o.score != null).length || 1))
+      : null;
+    res.render('index', {
+      orgs, avgScore, totalConnected: connected.length,
+      isAdmin: managesStaff,
+      allStaff: managesStaff ? (await getAllStaff()).filter(s => s.is_active) : [],
+    });
+  } catch (error) {
+    next(error);
   }
-  orgs = orgs.map(org => ({
-    ...org,
-    isStale: !org.last_successful_sync_at ||
-      new Date(org.last_successful_sync_at).getTime() < staleBefore,
-    accessBadges: getStaffForOrg(org.id),
-  }));
-  const connected = orgs.filter(o => o.connection_status === 'connected');
-  const avgScore = connected.length
-    ? Math.round(connected.filter(o => o.score != null).reduce((s, o) => s + o.score, 0) / (connected.filter(o => o.score != null).length || 1))
-    : null;
-  res.render('index', {
-    orgs, avgScore, totalConnected: connected.length,
-    isAdmin: managesStaff,
-    allStaff: managesStaff ? getAllStaff().filter(s => s.is_active) : [],
-  });
 });
 
 router.get('/panorama', (req, res) => {

@@ -1,4 +1,5 @@
 const { getDb } = require('./schema');
+const { getPool } = require('./mysqlPool');
 const {
   NON_SCORED_CHECKS, addFindingKeys, allocateFindingValues, isReviewStateActive, normalizeContactKey,
 } = require('../services/checkRules');
@@ -1651,144 +1652,168 @@ function getPanoramaOrganisations() {
   });
 }
 
-// Staff login / access control
-function getAllStaff() {
-  const db = getDb();
-  return db.prepare(`SELECT * FROM staff_users ORDER BY name`).all();
+// Staff login / access control — migrated to the shared MySQL database (akrio_staff_users /
+// akrio_staff_org_access), see scripts/mysql-schema.sql.
+async function getAllStaff() {
+  const [rows] = await getPool().query(`SELECT * FROM akrio_staff_users ORDER BY name`);
+  return rows;
 }
 
 // Case-insensitive/trimmed, matching how MTAKPI itself resolves a login and how the mtakpi
 // pairing is meant to be looked up regardless of how the admin originally typed it in.
-function getStaffByMtakpiName(mtakpiStaffName) {
-  const db = getDb();
+async function getStaffByMtakpiName(mtakpiStaffName) {
   const name = String(mtakpiStaffName || '').trim();
-  return db.prepare(`
-    SELECT * FROM staff_users WHERE LOWER(TRIM(mtakpi_staff_name)) = LOWER(?)
-  `).get(name);
+  const [rows] = await getPool().query(
+    `SELECT * FROM akrio_staff_users WHERE LOWER(TRIM(mtakpi_staff_name)) = LOWER(?)`,
+    [name]
+  );
+  return rows[0] || null;
 }
 
-function getStaffById(id) {
-  const db = getDb();
-  return db.prepare(`SELECT * FROM staff_users WHERE id = ?`).get(id);
+async function getStaffById(id) {
+  const [rows] = await getPool().query(`SELECT * FROM akrio_staff_users WHERE id = ?`, [id]);
+  return rows[0] || null;
 }
 
-function createStaff({ mtakpi_staff_name, name, initials, role }) {
-  const db = getDb();
-  const result = db.prepare(`
-    INSERT INTO staff_users (mtakpi_staff_name, name, initials, role)
-    VALUES (?, ?, ?, ?)
-  `).run(mtakpi_staff_name, name, initials, role);
-  return getStaffById(result.lastInsertRowid);
+async function createStaff({ mtakpi_staff_name, name, initials, role }) {
+  const [result] = await getPool().query(
+    `INSERT INTO akrio_staff_users (mtakpi_staff_name, name, initials, role) VALUES (?, ?, ?, ?)`,
+    [mtakpi_staff_name, name, initials, role]
+  );
+  return getStaffById(result.insertId);
 }
 
-// Bulk import from the "Import from MTAKPI" picker — one transaction so a failure partway
-// through (e.g. a duplicate name that slipped in) doesn't leave a half-imported batch. Skips
-// (rather than errors on) a name already linked, since the picker's own list already excludes
-// them but a race between two admins importing at once is still possible.
-function createStaffBulk(entries) {
-  const db = getDb();
-  const insert = db.prepare(`
-    INSERT OR IGNORE INTO staff_users (mtakpi_staff_name, name, initials, role)
-    VALUES (@mtakpi_staff_name, @name, @initials, @role)
-  `);
-  const importAll = db.transaction((rows) => {
+// Bulk import from the "Import from MTAKPI" picker — skips (rather than errors on) a name
+// already linked, since the picker's own list already excludes them but a race between two
+// admins importing at once is still possible.
+async function createStaffBulk(entries) {
+  if (!entries.length) return 0;
+  const pool = getPool();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
     let created = 0;
-    for (const row of rows) {
-      const result = insert.run(row);
-      if (result.changes > 0) created++;
+    for (const row of entries) {
+      const [result] = await conn.query(
+        `INSERT IGNORE INTO akrio_staff_users (mtakpi_staff_name, name, initials, role)
+         VALUES (?, ?, ?, ?)`,
+        [row.mtakpi_staff_name, row.name, row.initials, row.role]
+      );
+      if (result.affectedRows > 0) created++;
     }
+    await conn.commit();
     return created;
-  });
-  return importAll(entries);
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
 }
 
-function deactivateStaff(id) {
-  const db = getDb();
-  db.prepare(`UPDATE staff_users SET is_active = 0 WHERE id = ?`).run(id);
+async function deactivateStaff(id) {
+  await getPool().query(`UPDATE akrio_staff_users SET is_active = 0 WHERE id = ?`, [id]);
 }
 
-function reactivateStaff(id) {
-  const db = getDb();
-  db.prepare(`UPDATE staff_users SET is_active = 1 WHERE id = ?`).run(id);
+async function reactivateStaff(id) {
+  await getPool().query(`UPDATE akrio_staff_users SET is_active = 1 WHERE id = ?`, [id]);
 }
 
-function touchStaffLastLogin(id) {
-  const db = getDb();
-  db.prepare(`UPDATE staff_users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?`).run(id);
+async function touchStaffLastLogin(id) {
+  await getPool().query(`UPDATE akrio_staff_users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?`, [id]);
 }
 
 // Permission checks (only super_admin may set role to admin/super_admin) live in the route
 // layer via src/services/staffPermissions.js — this is a plain write, trusted to have already
 // been authorized by the caller.
-function updateStaffRole(id, role) {
-  const db = getDb();
-  db.prepare(`UPDATE staff_users SET role = ? WHERE id = ?`).run(role, id);
+async function updateStaffRole(id, role) {
+  await getPool().query(`UPDATE akrio_staff_users SET role = ? WHERE id = ?`, [role, id]);
 }
 
-function updateStaffInitials(id, initials) {
-  const db = getDb();
-  db.prepare(`UPDATE staff_users SET initials = ? WHERE id = ?`).run(initials, id);
+async function updateStaffInitials(id, initials) {
+  await getPool().query(`UPDATE akrio_staff_users SET initials = ? WHERE id = ?`, [initials, id]);
 }
 
-function setStaffCanManageSettings(id, canManage) {
-  const db = getDb();
-  db.prepare(`UPDATE staff_users SET can_manage_settings = ? WHERE id = ?`).run(canManage ? 1 : 0, id);
+async function setStaffCanManageSettings(id, canManage) {
+  await getPool().query(
+    `UPDATE akrio_staff_users SET can_manage_settings = ? WHERE id = ?`,
+    [canManage ? 1 : 0, id]
+  );
 }
 
 // Hard delete — distinct from deactivateStaff (the soft-delete default used elsewhere in this
 // app). Offered explicitly for removing an account added by mistake (e.g. the wrong MTAKPI name
 // picked during import) rather than leaving permanent clutter; ON DELETE CASCADE on
 // staff_org_access cleans up any access grants for this account automatically.
-function deleteStaff(id) {
-  const db = getDb();
-  db.prepare(`DELETE FROM staff_users WHERE id = ?`).run(id);
+async function deleteStaff(id) {
+  await getPool().query(`DELETE FROM akrio_staff_users WHERE id = ?`, [id]);
 }
 
-function staffHasOrgAccess(staffId, orgId) {
-  const db = getDb();
-  return !!db.prepare(`
-    SELECT 1 FROM staff_org_access WHERE staff_id = ? AND org_id = ?
-  `).get(staffId, orgId);
+async function staffHasOrgAccess(staffId, orgId) {
+  const [rows] = await getPool().query(
+    `SELECT 1 FROM akrio_staff_org_access WHERE staff_id = ? AND org_id = ?`,
+    [staffId, orgId]
+  );
+  return rows.length > 0;
 }
 
-function getOrgIdsForStaff(staffId) {
-  const db = getDb();
-  return db.prepare(`SELECT org_id FROM staff_org_access WHERE staff_id = ?`).all(staffId)
-    .map(row => row.org_id);
+async function getOrgIdsForStaff(staffId) {
+  const [rows] = await getPool().query(
+    `SELECT org_id FROM akrio_staff_org_access WHERE staff_id = ?`,
+    [staffId]
+  );
+  return rows.map(row => row.org_id);
 }
 
 // Active staff assigned to an org, for the client-list "Team Member Access" avatar badges.
-function getStaffForOrg(orgId) {
-  const db = getDb();
-  return db.prepare(`
-    SELECT su.id, su.name, su.initials
-    FROM staff_org_access soa
-    JOIN staff_users su ON su.id = soa.staff_id
-    WHERE soa.org_id = ? AND su.is_active = 1
-    ORDER BY su.name
-  `).all(orgId);
+async function getStaffForOrg(orgId) {
+  const [rows] = await getPool().query(
+    `SELECT su.id, su.name, su.initials
+     FROM akrio_staff_org_access soa
+     JOIN akrio_staff_users su ON su.id = soa.staff_id
+     WHERE soa.org_id = ? AND su.is_active = 1
+     ORDER BY su.name`,
+    [orgId]
+  );
+  return rows;
 }
 
 // Replaces a staff member's ENTIRE org-access set in one transaction — the primary editing
 // surface (a full-page checklist of every org) submits the whole new set at once.
-function replaceStaffOrgAccess(staffId, orgIds) {
-  const db = getDb();
-  const replace = db.transaction((ids) => {
-    db.prepare(`DELETE FROM staff_org_access WHERE staff_id = ?`).run(staffId);
-    const insert = db.prepare(`INSERT INTO staff_org_access (staff_id, org_id) VALUES (?, ?)`);
-    for (const orgId of ids) insert.run(staffId, orgId);
-  });
-  replace(orgIds);
+async function replaceStaffOrgAccess(staffId, orgIds) {
+  const pool = getPool();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.query(`DELETE FROM akrio_staff_org_access WHERE staff_id = ?`, [staffId]);
+    for (const orgId of orgIds) {
+      await conn.query(
+        `INSERT INTO akrio_staff_org_access (staff_id, org_id) VALUES (?, ?)`,
+        [staffId, orgId]
+      );
+    }
+    await conn.commit();
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
 }
 
 // Toggles a single (staff, org) pair — the client-list "+" popover's quick-add/remove shortcut,
 // writing to the same join table as replaceStaffOrgAccess but scoped to one pair at a time.
-function toggleStaffOrgAccess(staffId, orgId, grant) {
-  const db = getDb();
+async function toggleStaffOrgAccess(staffId, orgId, grant) {
   if (grant) {
-    db.prepare(`INSERT OR IGNORE INTO staff_org_access (staff_id, org_id) VALUES (?, ?)`).run(staffId, orgId);
+    await getPool().query(
+      `INSERT IGNORE INTO akrio_staff_org_access (staff_id, org_id) VALUES (?, ?)`,
+      [staffId, orgId]
+    );
   } else {
-    db.prepare(`DELETE FROM staff_org_access WHERE staff_id = ? AND org_id = ?`).run(staffId, orgId);
+    await getPool().query(
+      `DELETE FROM akrio_staff_org_access WHERE staff_id = ? AND org_id = ?`,
+      [staffId, orgId]
+    );
   }
 }
 

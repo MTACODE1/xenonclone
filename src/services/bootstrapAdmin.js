@@ -8,8 +8,8 @@ const { getAllStaff, createStaff } = require('../db/queries');
 // all (see src/services/staffPermissions.js — only super_admin can do that). Deliberately does
 // NOT hard-fail if the env var is unset in dev — it just warns, mirroring how SESSION_SECRET is
 // required in production but falls back with a warning in dev.
-function bootstrapAdmin() {
-  if (getAllStaff().length > 0) return;
+async function bootstrapAdmin() {
+  if ((await getAllStaff()).length > 0) return;
 
   if (!process.env.ADMIN_MTAKPI_STAFF_NAME) {
     console.warn(
@@ -19,7 +19,7 @@ function bootstrapAdmin() {
     return;
   }
 
-  createStaff({
+  await createStaff({
     mtakpi_staff_name: process.env.ADMIN_MTAKPI_STAFF_NAME.trim(),
     name: process.env.ADMIN_MTAKPI_STAFF_NAME.trim(), initials: 'AD', role: 'super_admin',
   });

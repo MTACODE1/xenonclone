@@ -22,11 +22,15 @@ function requireSuperAdmin(req, res, next) {
 // Settings access is admin/super_admin by default, OR a staff-tier account with the separate
 // can_manage_settings grant — fetched fresh (not from the session) so a permission change takes
 // effect immediately without waiting for the person to log out and back in.
-function requireSettingsAccess(req, res, next) {
+async function requireSettingsAccess(req, res, next) {
   if (isStaffManager(req.session.staffRole)) return next();
-  const staff = getStaffById(req.session.staffId);
-  if (canAccessSettings(staff)) return next();
-  return res.status(403).send('You do not have access to Settings');
+  try {
+    const staff = await getStaffById(req.session.staffId);
+    if (canAccessSettings(staff)) return next();
+    return res.status(403).send('You do not have access to Settings');
+  } catch (error) {
+    next(error);
+  }
 }
 
 module.exports = { requireStaffLogin, requireStaffManager, requireSuperAdmin, requireSettingsAccess };

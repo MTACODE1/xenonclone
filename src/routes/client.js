@@ -809,15 +809,19 @@ router.post('/:tenantId/update', express.urlencoded({ extended: true }), verifyC
 // The client-list "Team Member Access" +/- popover's quick single-pair toggle — a convenience
 // shortcut over /staff/:id/edit's full-page "replace the whole set" editor, writing to the same
 // staff_org_access join table via toggleStaffOrgAccess. Admin-only: only admins manage access.
-router.post('/:tenantId/access', express.urlencoded({ extended: true }), verifyCsrf, (req, res) => {
+router.post('/:tenantId/access', express.urlencoded({ extended: true }), verifyCsrf, async (req, res, next) => {
   if (!isStaffManager(req.session.staffRole)) return res.status(403).send('Admin access required');
   const { tenantId } = req.params;
   const org = getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   const staffId = Number(req.body.staff_id);
   if (!Number.isFinite(staffId)) return res.status(400).send('Missing staff_id');
-  toggleStaffOrgAccess(staffId, org.id, req.body.grant === '1');
-  res.redirect('/');
+  try {
+    await toggleStaffOrgAccess(staffId, org.id, req.body.grant === '1');
+    res.redirect('/');
+  } catch (error) {
+    next(error);
+  }
 });
 
 router.get('/:tenantId/report', (req, res) => {
