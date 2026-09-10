@@ -11,83 +11,93 @@ function cacheDate(value) {
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 }
 
-// Organisations
-function upsertOrganisation(data) {
-  const db = getDb();
-  return db.prepare(`
-    INSERT INTO organisations (xero_tenant_id, name, client_ref, tag, connection_status, last_synced_at)
-    VALUES (@xero_tenant_id, @name, @client_ref, @tag, @connection_status, @last_synced_at)
-    ON CONFLICT(xero_tenant_id) DO UPDATE SET
-      name = excluded.name,
-      connection_status = excluded.connection_status,
-      last_synced_at = COALESCE(excluded.last_synced_at, organisations.last_synced_at)
-  `).run(data);
+// Organisations — migrated to the shared MySQL database (akrio_organisations), see
+// scripts/mysql-schema.sql. health_scores and sync_runs moved alongside it (below), so the
+// existing JOINs stay single MySQL queries; issues/findings/insight/statement tables stay on
+// SQLite for now (see getPanoramaOrganisations for how that split is handled).
+async function upsertOrganisation(data) {
+  await getPool().query(
+    `INSERT INTO akrio_organisations
+       (xero_tenant_id, name, client_ref, tag, connection_status, last_synced_at)
+     VALUES (?, ?, ?, ?, ?, ?) AS new
+     ON DUPLICATE KEY UPDATE
+       name = new.name,
+       connection_status = new.connection_status,
+       last_synced_at = COALESCE(new.last_synced_at, akrio_organisations.last_synced_at)`,
+    [data.xero_tenant_id, data.name, data.client_ref, data.tag, data.connection_status, data.last_synced_at]
+  );
 }
 
 // Raw organisations row (no health_scores join) — for resolving per-org check configuration,
 // where only the organisation's own override columns matter, not its latest health score.
-function getOrganisationById(orgId) {
-  const db = getDb();
-  return db.prepare(`SELECT * FROM organisations WHERE id = ?`).get(orgId);
+async function getOrganisationById(orgId) {
+  const [rows] = await getPool().query(`SELECT * FROM akrio_organisations WHERE id = ?`, [orgId]);
+  return rows[0] || null;
 }
 
-function getAllOrganisations() {
-  const db = getDb();
-  return db.prepare(`
+async function getAllOrganisations() {
+  const [rows] = await getPool().query(`
     SELECT o.*, hs.score, hs.total_issues, hs.total_potential_errors_gbp,
            hs.last_bank_reconciled, hs.most_recent_transaction,
            hs.unreconciled_bank_items, hs.lock_date, hs.score_profile_version,
            hs.score_breakdown_json, hs.calculated_at, hs.period_key, hs.period_type,
            hs.period_start, hs.period_end, hs.period_label,
-           (SELECT MAX(completed_at) FROM sync_runs
+           (SELECT MAX(completed_at) FROM akrio_sync_runs
             WHERE org_id = o.id AND status = 'succeeded') AS last_successful_sync_at
-    FROM organisations o
-    LEFT JOIN health_scores hs ON hs.org_id = o.id
-      AND hs.id = (SELECT MAX(id) FROM health_scores WHERE org_id = o.id AND is_active = 1)
+    FROM akrio_organisations o
+    LEFT JOIN akrio_health_scores hs ON hs.org_id = o.id
+      AND hs.id = (SELECT MAX(id) FROM akrio_health_scores WHERE org_id = o.id AND is_active = 1)
     ORDER BY o.name
-  `).all();
+  `);
+  return rows;
 }
 
-function getOrganisationByTenantId(tenantId) {
-  const db = getDb();
-  return db.prepare(`
+async function getOrganisationByTenantId(tenantId) {
+  const [rows] = await getPool().query(`
     SELECT o.*, hs.score, hs.total_issues, hs.total_potential_errors_gbp,
            hs.last_bank_reconciled, hs.most_recent_transaction,
            hs.unreconciled_bank_items, hs.lock_date, hs.score_profile_version,
            hs.score_breakdown_json, hs.calculated_at, hs.period_key, hs.period_type,
            hs.period_start, hs.period_end, hs.period_label,
-           (SELECT MAX(completed_at) FROM sync_runs
+           (SELECT MAX(completed_at) FROM akrio_sync_runs
             WHERE org_id = o.id AND status = 'succeeded') AS last_successful_sync_at
-    FROM organisations o
-    LEFT JOIN health_scores hs ON hs.org_id = o.id
-      AND hs.id = (SELECT MAX(id) FROM health_scores WHERE org_id = o.id AND is_active = 1)
+    FROM akrio_organisations o
+    LEFT JOIN akrio_health_scores hs ON hs.org_id = o.id
+      AND hs.id = (SELECT MAX(id) FROM akrio_health_scores WHERE org_id = o.id AND is_active = 1)
     WHERE o.xero_tenant_id = ?
-  `).get(tenantId);
+  `, [tenantId]);
+  return rows[0] || null;
 }
 
-function updateOrganisationMeta(tenantId, { client_ref, tag }) {
-  const db = getDb();
-  db.prepare(`UPDATE organisations SET client_ref = ?, tag = ? WHERE xero_tenant_id = ?`)
-    .run(client_ref, tag, tenantId);
+async function updateOrganisationMeta(tenantId, { client_ref, tag }) {
+  await getPool().query(
+    `UPDATE akrio_organisations SET client_ref = ?, tag = ? WHERE xero_tenant_id = ?`,
+    [client_ref, tag, tenantId]
+  );
 }
 
-function updateOrganisationAccountingSettings(orgId, data) {
-  getDb().prepare(`
-    UPDATE organisations SET financial_year_end_day = ?, financial_year_end_month = ? WHERE id = ?
-  `).run(data.financialYearEndDay || null, data.financialYearEndMonth || null, orgId);
+async function updateOrganisationAccountingSettings(orgId, data) {
+  await getPool().query(
+    `UPDATE akrio_organisations SET financial_year_end_day = ?, financial_year_end_month = ? WHERE id = ?`,
+    [data.financialYearEndDay || null, data.financialYearEndMonth || null, orgId]
+  );
 }
 
 // NULL (the default) means "use the 12-month fallback tuned against already-validated clients" —
 // see checkRules.js's resolveSupplierPatternLookbackMonths. A positive integer here overrides that
 // per-client, matching Xenon's own "3 months by default, changeable per client" setting.
-function updateOrganisationSupplierPatternLookback(orgId, months) {
-  getDb().prepare(`UPDATE organisations SET supplier_pattern_lookback_months = ? WHERE id = ?`)
-    .run(Number.isInteger(months) && months > 0 ? months : null, orgId);
+async function updateOrganisationSupplierPatternLookback(orgId, months) {
+  await getPool().query(
+    `UPDATE akrio_organisations SET supplier_pattern_lookback_months = ? WHERE id = ?`,
+    [Number.isInteger(months) && months > 0 ? months : null, orgId]
+  );
 }
 
-function updateOrganisationMultiAccountPatternLookback(orgId, months) {
-  getDb().prepare(`UPDATE organisations SET multi_account_pattern_lookback_months = ? WHERE id = ?`)
-    .run(Number.isInteger(months) && months > 0 ? months : null, orgId);
+async function updateOrganisationMultiAccountPatternLookback(orgId, months) {
+  await getPool().query(
+    `UPDATE akrio_organisations SET multi_account_pattern_lookback_months = ? WHERE id = ?`,
+    [Number.isInteger(months) && months > 0 ? months : null, orgId]
+  );
 }
 
 // Config-isolation overrides (2026-09) — one organisation's own settings for values that
@@ -96,9 +106,8 @@ function updateOrganisationMultiAccountPatternLookback(orgId, months) {
 // change a client's behaviour — only an explicit non-null value the accountant chose to set does.
 // A caller passing `undefined` for a field leaves that column untouched (COALESCE onto its current
 // value) so a form that only edits some fields can't accidentally null out the others.
-function updateOrganisationCheckConfig(orgId, fields) {
-  const db = getDb();
-  const current = db.prepare(`SELECT * FROM organisations WHERE id = ?`).get(orgId);
+async function updateOrganisationCheckConfig(orgId, fields) {
+  const current = await getOrganisationById(orgId);
   if (!current) return;
   const numericOrNull = value => (Number.isFinite(Number(value)) ? Number(value) : null);
   // Tri-state boolean field: '' / null means "not configured, use the documented default";
@@ -150,44 +159,53 @@ function updateOrganisationCheckConfig(orgId, fields) {
       ? current.duplicate_bill_require_exact_total
       : triStateBoolOrNull(fields.duplicate_bill_require_exact_total),
   };
-  db.prepare(`
-    UPDATE organisations SET
-      opening_balance_threshold_gbp = @opening_balance_threshold_gbp,
-      capital_review_default_threshold_gbp = @capital_review_default_threshold_gbp,
-      misallocated_items_default_threshold_gbp = @misallocated_items_default_threshold_gbp,
-      multi_account_suppliers_min_value_gbp = @multi_account_suppliers_min_value_gbp,
-      multi_tax_suppliers_min_value_gbp = @multi_tax_suppliers_min_value_gbp,
-      purchase_tax_missing_exclude_codes = @purchase_tax_missing_exclude_codes,
-      duplicate_invoice_window_days = @duplicate_invoice_window_days,
-      duplicate_bill_window_days = @duplicate_bill_window_days,
-      duplicate_invoice_require_exact_reference = @duplicate_invoice_require_exact_reference,
-      duplicate_invoice_include_fully_paid = @duplicate_invoice_include_fully_paid,
-      duplicate_bill_require_exact_reference = @duplicate_bill_require_exact_reference,
-      duplicate_bill_include_fully_paid = @duplicate_bill_include_fully_paid,
-      duplicate_invoice_require_exact_total = @duplicate_invoice_require_exact_total,
-      duplicate_bill_require_exact_total = @duplicate_bill_require_exact_total
-    WHERE id = @id
-  `).run({ ...merged, id: orgId });
+  await getPool().query(`
+    UPDATE akrio_organisations SET
+      opening_balance_threshold_gbp = ?,
+      capital_review_default_threshold_gbp = ?,
+      misallocated_items_default_threshold_gbp = ?,
+      multi_account_suppliers_min_value_gbp = ?,
+      multi_tax_suppliers_min_value_gbp = ?,
+      purchase_tax_missing_exclude_codes = ?,
+      duplicate_invoice_window_days = ?,
+      duplicate_bill_window_days = ?,
+      duplicate_invoice_require_exact_reference = ?,
+      duplicate_invoice_include_fully_paid = ?,
+      duplicate_bill_require_exact_reference = ?,
+      duplicate_bill_include_fully_paid = ?,
+      duplicate_invoice_require_exact_total = ?,
+      duplicate_bill_require_exact_total = ?
+    WHERE id = ?
+  `, [
+    merged.opening_balance_threshold_gbp,
+    merged.capital_review_default_threshold_gbp,
+    merged.misallocated_items_default_threshold_gbp,
+    merged.multi_account_suppliers_min_value_gbp,
+    merged.multi_tax_suppliers_min_value_gbp,
+    merged.purchase_tax_missing_exclude_codes,
+    merged.duplicate_invoice_window_days,
+    merged.duplicate_bill_window_days,
+    merged.duplicate_invoice_require_exact_reference,
+    merged.duplicate_invoice_include_fully_paid,
+    merged.duplicate_bill_require_exact_reference,
+    merged.duplicate_bill_include_fully_paid,
+    merged.duplicate_invoice_require_exact_total,
+    merged.duplicate_bill_require_exact_total,
+    orgId,
+  ]);
 }
 
-function markOrganisationDisconnected(tenantId) {
-  const db = getDb();
-  db.prepare(`UPDATE organisations SET connection_status = 'disconnected' WHERE xero_tenant_id = ?`).run(tenantId);
+async function markOrganisationDisconnected(tenantId) {
+  await getPool().query(
+    `UPDATE akrio_organisations SET connection_status = 'disconnected' WHERE xero_tenant_id = ?`,
+    [tenantId]
+  );
 }
 
-// Health Scores
-function upsertHealthScore(orgId, data) {
-  const db = getDb();
-  return db.prepare(`
-    INSERT INTO health_scores (org_id, score, total_issues, total_potential_errors_gbp,
-      last_bank_reconciled, most_recent_transaction, unreconciled_bank_items, lock_date,
-      period_key, period_type, period_start, period_end, period_label,
-      score_profile_version, score_breakdown_json, run_id, is_active)
-    VALUES (@org_id, @score, @total_issues, @total_potential_errors_gbp,
-      @last_bank_reconciled, @most_recent_transaction, @unreconciled_bank_items, @lock_date,
-      @period_key, @period_type, @period_start, @period_end, @period_label,
-      @score_profile_version, @score_breakdown_json, @run_id, @is_active)
-  `).run({
+// Health Scores — migrated to the shared MySQL database (akrio_health_scores), moved
+// alongside organisations/sync_runs since they're joined together in the queries above.
+async function upsertHealthScore(orgId, data) {
+  const merged = {
     period_key: null,
     period_type: null,
     period_start: null,
@@ -199,7 +217,21 @@ function upsertHealthScore(orgId, data) {
     is_active: 1,
     org_id: orgId,
     ...data,
-  });
+  };
+  const [result] = await getPool().query(`
+    INSERT INTO akrio_health_scores (org_id, score, total_issues, total_potential_errors_gbp,
+      last_bank_reconciled, most_recent_transaction, unreconciled_bank_items, lock_date,
+      period_key, period_type, period_start, period_end, period_label,
+      score_profile_version, score_breakdown_json, run_id, is_active)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    merged.org_id, merged.score, merged.total_issues, merged.total_potential_errors_gbp,
+    merged.last_bank_reconciled, merged.most_recent_transaction, merged.unreconciled_bank_items,
+    merged.lock_date, merged.period_key, merged.period_type, merged.period_start,
+    merged.period_end, merged.period_label, merged.score_profile_version,
+    merged.score_breakdown_json, merged.run_id, merged.is_active,
+  ]);
+  return result.insertId;
 }
 
 // Issues
@@ -332,25 +364,26 @@ function replaceIssueForCheck(data) {
   })();
 }
 
-function refreshLatestHealthScore(orgId) {
-  const db = getDb();
+// Reads (issues/scoring observations) stay plain sync SQLite calls — only the health_scores
+// write below moved to MySQL, so this function is now async purely because of that one write.
+async function refreshLatestHealthScore(orgId) {
   const issues = getIssuesForOrg(orgId);
   const scored = issues.filter(row => !NON_SCORED_CHECKS.includes(row.check_type));
   const breakdown = calculateScoreBreakdown(getScoringObservations(orgId), {
     nonScoredChecks: NON_SCORED_CHECKS,
   });
-  db.prepare(`
-    UPDATE health_scores SET score = ?, total_issues = ?, total_potential_errors_gbp = ?,
+  await getPool().query(`
+    UPDATE akrio_health_scores SET score = ?, total_issues = ?, total_potential_errors_gbp = ?,
       score_profile_version = ?, score_breakdown_json = ?
-    WHERE id = (SELECT MAX(id) FROM health_scores WHERE org_id = ? AND is_active = 1)
-  `).run(
+    WHERE id = (SELECT id FROM (SELECT MAX(id) AS id FROM akrio_health_scores WHERE org_id = ? AND is_active = 1) AS latest)
+  `, [
     breakdown.score,
     scored.reduce((sum, row) => sum + (row.count || 0), 0),
     scored.reduce((sum, row) => sum + (row.potential_value_gbp || 0), 0),
     breakdown.profileVersion,
     JSON.stringify(breakdown),
-    orgId
-  );
+    orgId,
+  ]);
 }
 
 // Shared by both branches of refreshIssueAggregations' UPDATE below — a live (non-reviewed)
@@ -492,31 +525,50 @@ function getScoringObservationsForRun(orgId, runId, checkType = null) {
   }));
 }
 
-function createSyncRun(orgId, mode, periodKey = null) {
-  return Number(getDb().prepare(`
-    INSERT INTO sync_runs (org_id, mode, status, period_key) VALUES (?, ?, 'running', ?)
-  `).run(orgId, mode, periodKey).lastInsertRowid);
+// sync_runs — migrated to the shared MySQL database (akrio_sync_runs), moved alongside
+// organisations/health_scores since all three are joined together elsewhere in this file.
+async function createSyncRun(orgId, mode, periodKey = null) {
+  const [result] = await getPool().query(
+    `INSERT INTO akrio_sync_runs (org_id, mode, status, period_key) VALUES (?, ?, 'running', ?)`,
+    [orgId, mode, periodKey]
+  );
+  return result.insertId;
 }
 
-function finishSyncRun(runId, status, error = null) {
-  getDb().prepare(`
-    UPDATE sync_runs SET status = ?, error = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?
-  `).run(status, error, runId);
+async function finishSyncRun(runId, status, error = null) {
+  await getPool().query(
+    `UPDATE akrio_sync_runs SET status = ?, error = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    [status, error, runId]
+  );
 }
 
-function activateSyncRun(orgId, runId, checkType = null) {
+// This used to be ONE SQLite transaction flipping is_active across health_scores, issues,
+// issue_findings, transaction_counts, sync_runs, and organisations all atomically. Now that
+// health_scores/sync_runs/organisations live in MySQL while issues/issue_findings/
+// transaction_counts stay on SQLite, that single atomic guarantee is no longer possible across
+// both — this runs as two sequential transactions (SQLite first, then MySQL). If the process
+// crashes between them, the SQLite-side tables (issues/findings/transaction_counts) would show
+// the new run's data while health_scores/sync_runs/organisations still show the previous run's —
+// a stale-looking dashboard until the next sync, not data loss or corruption. This is an accepted,
+// documented tradeoff of the staged migration, not an oversight.
+async function activateSyncRun(orgId, runId, checkType = null) {
+  const [stagedScoreRows] = await getPool().query(
+    `SELECT 1 FROM akrio_health_scores WHERE org_id = ? AND run_id = ? AND is_active = 0`,
+    [orgId, runId]
+  );
+  if (!stagedScoreRows.length) {
+    throw new Error('Cannot activate a run without a staged health score');
+  }
+
   const db = getDb();
+  if (!checkType && !db.prepare(`
+    SELECT 1 FROM transaction_counts WHERE org_id = ? AND run_id = ? AND is_active = 0
+  `).get(orgId, runId)) {
+    throw new Error('Cannot activate a full run without staged transaction counts');
+  }
+
+  // SQLite side first: issues/issue_findings/transaction_counts.
   db.transaction(() => {
-    if (!db.prepare(`
-      SELECT 1 FROM health_scores WHERE org_id = ? AND run_id = ? AND is_active = 0
-    `).get(orgId, runId)) {
-      throw new Error('Cannot activate a run without a staged health score');
-    }
-    if (!checkType && !db.prepare(`
-      SELECT 1 FROM transaction_counts WHERE org_id = ? AND run_id = ? AND is_active = 0
-    `).get(orgId, runId)) {
-      throw new Error('Cannot activate a full run without staged transaction counts');
-    }
     if (checkType) {
       db.prepare(`UPDATE issues SET is_active = 0 WHERE org_id = ? AND is_active = 1 AND check_type = ?`)
         .run(orgId, checkType);
@@ -527,27 +579,42 @@ function activateSyncRun(orgId, runId, checkType = null) {
       db.prepare(`UPDATE issue_findings SET is_active = 0 WHERE org_id = ? AND is_active = 1`).run(orgId);
       db.prepare(`UPDATE transaction_counts SET is_active = 0 WHERE org_id = ? AND is_active = 1`).run(orgId);
     }
-    db.prepare(`UPDATE health_scores SET is_active = 0 WHERE org_id = ? AND is_active = 1`).run(orgId);
     db.prepare(`UPDATE issues SET is_active = 1 WHERE org_id = ? AND run_id = ?`).run(orgId, runId);
     db.prepare(`UPDATE issue_findings SET is_active = 1 WHERE org_id = ? AND run_id = ?`).run(orgId, runId);
-    db.prepare(`UPDATE health_scores SET is_active = 1 WHERE org_id = ? AND run_id = ?`).run(orgId, runId);
     if (!checkType) {
       db.prepare(`UPDATE transaction_counts SET is_active = 1 WHERE org_id = ? AND run_id = ?`).run(orgId, runId);
     }
-    db.prepare(`UPDATE sync_runs SET is_active = 0 WHERE org_id = ? AND is_active = 1`).run(orgId);
-    db.prepare(`
-      UPDATE sync_runs SET status = 'succeeded', is_active = 1, completed_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND org_id = ?
-    `).run(runId, orgId);
-    db.prepare(`UPDATE organisations SET last_synced_at = CURRENT_TIMESTAMP WHERE id = ?`).run(orgId);
   })();
+
+  // MySQL side second: health_scores/sync_runs/organisations, in one real transaction.
+  const conn = await getPool().getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.query(`UPDATE akrio_health_scores SET is_active = 0 WHERE org_id = ? AND is_active = 1`, [orgId]);
+    await conn.query(`UPDATE akrio_health_scores SET is_active = 1 WHERE org_id = ? AND run_id = ?`, [orgId, runId]);
+    await conn.query(`UPDATE akrio_sync_runs SET is_active = 0 WHERE org_id = ? AND is_active = 1`, [orgId]);
+    await conn.query(
+      `UPDATE akrio_sync_runs SET status = 'succeeded', is_active = 1, completed_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND org_id = ?`,
+      [runId, orgId]
+    );
+    await conn.query(`UPDATE akrio_organisations SET last_synced_at = CURRENT_TIMESTAMP WHERE id = ?`, [orgId]);
+    await conn.commit();
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
 }
 
-function getLastSuccessfulRun(orgId) {
-  return getDb().prepare(`
-    SELECT * FROM sync_runs WHERE org_id = ? AND status = 'succeeded'
-    ORDER BY completed_at DESC, id DESC LIMIT 1
-  `).get(orgId);
+async function getLastSuccessfulRun(orgId) {
+  const [rows] = await getPool().query(
+    `SELECT * FROM akrio_sync_runs WHERE org_id = ? AND status = 'succeeded'
+     ORDER BY completed_at DESC, id DESC LIMIT 1`,
+    [orgId]
+  );
+  return rows[0] || null;
 }
 
 function mergeEntityCache(orgId, entityType, rows, { runId = null, fullRefresh = false } = {}) {
@@ -745,12 +812,17 @@ function getReportFindings(orgId, perCheckLimit = 50) {
   return byCheck;
 }
 
-function setFindingReviewStates(orgId, checkType, findingKeys, state, notes = null) {
+// The finding_review_states/finding_review_audit/issues work below is all SQLite and stays one
+// atomic transaction. Only the final health_scores recalculation moved to MySQL (see
+// refreshLatestHealthScore) — it now runs as a separate step after the SQLite transaction
+// commits, same two-phase pattern as activateSyncRun, and reuses that function instead of
+// duplicating the score-recalculation logic that used to be inlined here.
+async function setFindingReviewStates(orgId, checkType, findingKeys, state, notes = null) {
   if (!['dismissed', 'ignored', 'ok', 'restore'].includes(state)) throw new Error('Invalid review state');
   const db = getDb();
   const uniqueKeys = [...new Set(findingKeys.filter(Boolean))];
   if (!uniqueKeys.length) return 0;
-  return db.transaction(() => {
+  const changed = db.transaction(() => {
     const issue = db.prepare(`
       SELECT id, period_checked FROM issues WHERE org_id = ? AND check_type = ? AND is_active = 1
     `).get(orgId, checkType);
@@ -822,25 +894,10 @@ function setFindingReviewStates(orgId, checkType, findingKeys, state, notes = nu
         )
       WHERE id = ?
     `).run(issue.id);
-    const issues = getIssuesForOrg(orgId);
-    const scored = issues.filter(row => !NON_SCORED_CHECKS.includes(row.check_type));
-    const breakdown = calculateScoreBreakdown(getScoringObservations(orgId), {
-      nonScoredChecks: NON_SCORED_CHECKS,
-    });
-    db.prepare(`
-      UPDATE health_scores SET score = ?, total_issues = ?, total_potential_errors_gbp = ?,
-        score_profile_version = ?, score_breakdown_json = ?
-      WHERE id = (SELECT MAX(id) FROM health_scores WHERE org_id = ? AND is_active = 1)
-    `).run(
-      breakdown.score,
-      scored.reduce((sum, row) => sum + (row.count || 0), 0),
-      scored.reduce((sum, row) => sum + (row.potential_value_gbp || 0), 0),
-      breakdown.profileVersion,
-      JSON.stringify(breakdown),
-      orgId
-    );
     return changed;
   })();
+  await refreshLatestHealthScore(orgId);
+  return changed;
 }
 
 // Per-transaction "reviewed" audit trail for checks with a drill-down (multi_account_suppliers,
@@ -895,17 +952,19 @@ function getFindingNotes(orgId, checkType) {
 }
 
 // Tokens
-function upsertToken(data) {
-  const db = getDb();
-  return db.prepare(`
-    INSERT INTO xero_tokens (xero_tenant_id, access_token, refresh_token, expires_at)
-    VALUES (@xero_tenant_id, @access_token, @refresh_token, @expires_at)
-    ON CONFLICT(xero_tenant_id) DO UPDATE SET
-      access_token = excluded.access_token,
-      refresh_token = excluded.refresh_token,
-      expires_at = excluded.expires_at,
-      updated_at = CURRENT_TIMESTAMP
-  `).run(data);
+// xero_tokens — migrated to the shared MySQL database (akrio_xero_tokens), moved alongside
+// organisations since they're joined together below.
+async function upsertToken(data) {
+  await getPool().query(
+    `INSERT INTO akrio_xero_tokens (xero_tenant_id, access_token, refresh_token, expires_at)
+     VALUES (?, ?, ?, ?) AS new
+     ON DUPLICATE KEY UPDATE
+       access_token = new.access_token,
+       refresh_token = new.refresh_token,
+       expires_at = new.expires_at,
+       updated_at = CURRENT_TIMESTAMP`,
+    [data.xero_tenant_id, data.access_token, data.refresh_token, data.expires_at]
+  );
 }
 
 // A single Xero consent covers every tenant the user ticked, and Xero issues ONE token set for that
@@ -915,66 +974,94 @@ function upsertToken(data) {
 // consumed token, and the next sync of any of them died with
 // "invalid_grant (Refresh token has been consumed)". Observed live: six tenants sharing one token,
 // of which only the last one synced still worked. Propagate the rotation across the connection.
-function upsertTokenForConnection(previousRefreshToken, data) {
-  const db = getDb();
-  return db.transaction(() => {
+async function upsertTokenForConnection(previousRefreshToken, data) {
+  const conn = await getPool().getConnection();
+  try {
+    await conn.beginTransaction();
     let propagated = 0;
     if (previousRefreshToken && previousRefreshToken !== data.refresh_token) {
-      propagated = db.prepare(`
-        UPDATE xero_tokens
-        SET access_token = @access_token, refresh_token = @refresh_token,
-            expires_at = @expires_at, updated_at = CURRENT_TIMESTAMP
-        WHERE refresh_token = @previous_refresh_token
-      `).run({ ...data, previous_refresh_token: previousRefreshToken }).changes;
+      const [result] = await conn.query(
+        `UPDATE akrio_xero_tokens
+         SET access_token = ?, refresh_token = ?, expires_at = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE refresh_token = ?`,
+        [data.access_token, data.refresh_token, data.expires_at, previousRefreshToken]
+      );
+      propagated = result.affectedRows;
     }
     // Always write the syncing tenant's own row, so it is correct even if it did not share a token.
-    upsertToken(data);
+    await conn.query(
+      `INSERT INTO akrio_xero_tokens (xero_tenant_id, access_token, refresh_token, expires_at)
+       VALUES (?, ?, ?, ?) AS new
+       ON DUPLICATE KEY UPDATE
+         access_token = new.access_token,
+         refresh_token = new.refresh_token,
+         expires_at = new.expires_at,
+         updated_at = CURRENT_TIMESTAMP`,
+      [data.xero_tenant_id, data.access_token, data.refresh_token, data.expires_at]
+    );
+    await conn.commit();
     return propagated;
-  })();
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
 }
 
 // When a refresh token is genuinely rejected, the whole connection is dead — not just the tenant
 // that happened to be syncing. Marking only that one left the others showing "connected" in the UI
 // when they were not.
-function markConnectionDisconnected(refreshToken, tenantId) {
-  const db = getDb();
-  return db.transaction(() => {
+async function markConnectionDisconnected(refreshToken, tenantId) {
+  const conn = await getPool().getConnection();
+  try {
+    await conn.beginTransaction();
     let affected = 0;
     if (refreshToken) {
-      affected = db.prepare(`
-        UPDATE organisations SET connection_status = 'disconnected'
-        WHERE xero_tenant_id IN (
-          SELECT xero_tenant_id FROM xero_tokens WHERE refresh_token = ?
-        )
-      `).run(refreshToken).changes;
+      const [result] = await conn.query(
+        `UPDATE akrio_organisations SET connection_status = 'disconnected'
+         WHERE xero_tenant_id IN (
+           SELECT xero_tenant_id FROM akrio_xero_tokens WHERE refresh_token = ?
+         )`,
+        [refreshToken]
+      );
+      affected = result.affectedRows;
     }
     if (tenantId) {
-      db.prepare(`
-        UPDATE organisations SET connection_status = 'disconnected' WHERE xero_tenant_id = ?
-      `).run(tenantId);
+      await conn.query(
+        `UPDATE akrio_organisations SET connection_status = 'disconnected' WHERE xero_tenant_id = ?`,
+        [tenantId]
+      );
     }
+    await conn.commit();
     return affected;
-  })();
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
 }
 
-function getToken(tenantId) {
-  const db = getDb();
-  return db.prepare(`SELECT * FROM xero_tokens WHERE xero_tenant_id = ?`).get(tenantId);
+async function getToken(tenantId) {
+  const [rows] = await getPool().query(`SELECT * FROM akrio_xero_tokens WHERE xero_tenant_id = ?`, [tenantId]);
+  return rows[0] || null;
 }
 
 // Tenants sharing one refresh token are one Xero connection; used to explain a dead connection.
-function getTenantsSharingRefreshToken(refreshToken) {
+async function getTenantsSharingRefreshToken(refreshToken) {
   if (!refreshToken) return [];
-  return getDb().prepare(`
-    SELECT t.xero_tenant_id, o.name
-    FROM xero_tokens t LEFT JOIN organisations o ON o.xero_tenant_id = t.xero_tenant_id
-    WHERE t.refresh_token = ?
-  `).all(refreshToken);
+  const [rows] = await getPool().query(
+    `SELECT t.xero_tenant_id, o.name
+     FROM akrio_xero_tokens t LEFT JOIN akrio_organisations o ON o.xero_tenant_id = t.xero_tenant_id
+     WHERE t.refresh_token = ?`,
+    [refreshToken]
+  );
+  return rows;
 }
 
-function deleteToken(tenantId) {
-  const db = getDb();
-  db.prepare(`DELETE FROM xero_tokens WHERE xero_tenant_id = ?`).run(tenantId);
+async function deleteToken(tenantId) {
+  await getPool().query(`DELETE FROM akrio_xero_tokens WHERE xero_tenant_id = ?`, [tenantId]);
 }
 
 // Bank Reconciliation (secondary/optional real bank check)
@@ -1270,9 +1357,11 @@ function getFiledAccountsForOrg(orgId) {
 }
 
 // Companies House public-register snapshot (informational only)
-function updateOrganisationCompanyNumber(orgId, companyNumber) {
-  getDb().prepare(`UPDATE organisations SET company_number = ? WHERE id = ?`)
-    .run(companyNumber || null, orgId);
+async function updateOrganisationCompanyNumber(orgId, companyNumber) {
+  await getPool().query(
+    `UPDATE akrio_organisations SET company_number = ? WHERE id = ?`,
+    [companyNumber || null, orgId]
+  );
 }
 
 function upsertCompaniesHouseProfile(orgId, data) {
@@ -1355,7 +1444,7 @@ function getAccountCheckConfigurationForOrg(orgId) {
   `).all(orgId);
 }
 
-function setAccountCheckConfiguration(orgId, configurations) {
+async function setAccountCheckConfiguration(orgId, configurations) {
   const db = getDb();
   const all = db.prepare(`SELECT account_code FROM chart_of_accounts_cache WHERE org_id = ?`).all(orgId);
   const byCode = new Map(configurations.map(config => [config.account_code, config]));
@@ -1383,12 +1472,14 @@ function setAccountCheckConfiguration(orgId, configurations) {
         row.account_code
       );
     }
-    // First save flips this org from "never configured" (xeroSync.js still auto-adds Xenon's
-    // documented 461/473 defaults if present) to "explicitly configured" (is_capital_candidate is
-    // trusted verbatim from here on, including a deliberate 0 on 461 or 473 — a real opt-out).
-    db.prepare(`UPDATE organisations SET account_settings_initialised = 1 WHERE id = ?`).run(orgId);
   });
   run();
+  // First save flips this org from "never configured" (xeroSync.js still auto-adds Xenon's
+  // documented 461/473 defaults if present) to "explicitly configured" (is_capital_candidate is
+  // trusted verbatim from here on, including a deliberate 0 on 461 or 473 — a real opt-out).
+  // organisations now lives in MySQL, so this runs as a separate step after the SQLite
+  // transaction above commits (same two-phase pattern as activateSyncRun).
+  await getPool().query(`UPDATE akrio_organisations SET account_settings_initialised = 1 WHERE id = ?`, [orgId]);
 }
 
 // Settings
@@ -1432,14 +1523,20 @@ function createValidationSnapshot(orgId, data, checks) {
   })();
 }
 
-function getValidationSnapshots() {
+// validation_snapshots stays on SQLite; organisations moved to MySQL, so the org name/tenant-id
+// join is now a separate MySQL lookup merged in JS instead of one SQL join.
+async function getValidationSnapshots() {
   const db = getDb();
-  const rows = db.prepare(`
-    SELECT vs.*, o.name AS org_name, o.xero_tenant_id
-    FROM validation_snapshots vs
-    JOIN organisations o ON o.id = vs.org_id
-    ORDER BY vs.created_at DESC, vs.id DESC
-  `).all();
+  const rows = db.prepare(`SELECT * FROM validation_snapshots ORDER BY created_at DESC, id DESC`).all();
+  const orgIds = [...new Set(rows.map(row => row.org_id))];
+  const orgById = new Map();
+  if (orgIds.length) {
+    const [orgRows] = await getPool().query(
+      `SELECT id, name, xero_tenant_id FROM akrio_organisations WHERE id IN (?)`,
+      [orgIds]
+    );
+    for (const org of orgRows) orgById.set(org.id, org);
+  }
   const checkQuery = db.prepare(`
     SELECT * FROM validation_snapshot_checks WHERE snapshot_id = ? ORDER BY check_type
   `);
@@ -1453,11 +1550,12 @@ function getValidationSnapshots() {
     };
     let profileTags = [];
     try { profileTags = JSON.parse(row.profile_tags_json); } catch (error) { profileTags = []; }
+    const org = orgById.get(row.org_id);
     return {
       id: row.id,
       orgId: row.org_id,
-      orgName: row.org_name,
-      tenantId: row.xero_tenant_id,
+      orgName: org?.name,
+      tenantId: org?.xero_tenant_id,
       periodKey: row.period_key,
       xenonScore: row.xenon_score,
       xenonIssues: row.xenon_issues,
@@ -1480,15 +1578,16 @@ function getValidationSnapshots() {
 // follows whatever period the user last synced — clicking Sync on the dashboard moves it to today
 // and silently blanked every comparison. Look up the newest run for the requested period instead;
 // runIsComparable still demands it succeeded and finished no earlier than the Xenon export.
-function getValidationRunForPeriod(orgId, periodKey) {
+async function getValidationRunForPeriod(orgId, periodKey) {
   const db = getDb();
-  const score = db.prepare(`
+  const [scoreRows] = await getPool().query(`
     SELECT hs.*, sr.status AS run_status, sr.completed_at AS run_completed_at
-    FROM health_scores hs
-    LEFT JOIN sync_runs sr ON sr.id = hs.run_id
+    FROM akrio_health_scores hs
+    LEFT JOIN akrio_sync_runs sr ON sr.id = hs.run_id
     WHERE hs.org_id = ? AND hs.period_key = ? AND sr.status = 'succeeded'
     ORDER BY hs.id DESC LIMIT 1
-  `).get(orgId, periodKey);
+  `, [orgId, periodKey]);
+  const score = scoreRows[0];
   if (!score) return null;
   const issues = db.prepare(`
     SELECT check_type, count, potential_value_gbp FROM issues WHERE org_id = ? AND run_id = ?
@@ -1508,19 +1607,19 @@ function getValidationRunForPeriod(orgId, periodKey) {
   };
 }
 
-function getActiveValidationRuns() {
+async function getActiveValidationRuns() {
   const db = getDb();
   // The run's provenance travels with it: the gate must be able to tell a score row a real
   // sync produced from one that was edited or left behind by a failed run.
-  const scores = db.prepare(`
+  const [scores] = await getPool().query(`
     SELECT hs.*, sr.status AS run_status, sr.completed_at AS run_completed_at
-    FROM health_scores hs
-    LEFT JOIN sync_runs sr ON sr.id = hs.run_id
+    FROM akrio_health_scores hs
+    LEFT JOIN akrio_sync_runs sr ON sr.id = hs.run_id
     WHERE hs.is_active = 1 AND hs.id = (
-      SELECT MAX(latest.id) FROM health_scores latest
+      SELECT MAX(latest.id) FROM akrio_health_scores latest
       WHERE latest.org_id = hs.org_id AND latest.is_active = 1
     )
-  `).all();
+  `);
   const issues = db.prepare(`
     SELECT org_id, check_type, count, potential_value_gbp
     FROM issues WHERE is_active = 1
@@ -1596,60 +1695,70 @@ function getTransactionCountsForOrg(orgId, periodType = null, periodStart = null
   `).get(orgId, periodType, periodType, periodStart, periodStart, periodEnd, periodEnd);
 }
 
-function getAllTransactionCounts(periodType = null, periodStart = null, periodEnd = null) {
+// organisations moved to MySQL; transaction_counts stays on SQLite, so the join becomes a
+// separate MySQL org list + a SQLite per-org latest-transaction-count lookup, merged in JS.
+async function getAllTransactionCounts(periodType = null, periodStart = null, periodEnd = null) {
   const db = getDb();
-  return db.prepare(`
-    SELECT o.xero_tenant_id, o.name, o.client_ref, o.connection_status, o.last_synced_at,
-           tc.period, tc.period_start, tc.period_end, tc.months_covered,
-           tc.turnover, tc.total_transactions, tc.customer_invoices, tc.supplier_bills,
-           tc.credit_notes_sales, tc.credit_notes_purchase, tc.bank_processed, tc.journals
-    FROM organisations o
-    LEFT JOIN transaction_counts tc ON tc.org_id = o.id
-      AND tc.id = (
-        SELECT id FROM transaction_counts
-        WHERE org_id = o.id AND is_active = 1 AND (? IS NULL OR period = ?)
-          AND (? IS NULL OR period_start = ?) AND (? IS NULL OR period_end = ?)
-        ORDER BY synced_at DESC, id DESC LIMIT 1
-      )
-    ORDER BY o.name
-  `).all(periodType, periodType, periodStart, periodStart, periodEnd, periodEnd);
+  const [orgs] = await getPool().query(
+    `SELECT id, xero_tenant_id, name, client_ref, connection_status, last_synced_at
+     FROM akrio_organisations ORDER BY name`
+  );
+  const countQuery = db.prepare(`
+    SELECT period, period_start, period_end, months_covered, turnover, total_transactions,
+           customer_invoices, supplier_bills, credit_notes_sales, credit_notes_purchase,
+           bank_processed, journals
+    FROM transaction_counts
+    WHERE org_id = ? AND is_active = 1 AND (? IS NULL OR period = ?)
+      AND (? IS NULL OR period_start = ?) AND (? IS NULL OR period_end = ?)
+    ORDER BY synced_at DESC, id DESC LIMIT 1
+  `);
+  return orgs.map(o => {
+    const tc = countQuery.get(o.id, periodType, periodType, periodStart, periodStart, periodEnd, periodEnd) || {};
+    return {
+      xero_tenant_id: o.xero_tenant_id, name: o.name, client_ref: o.client_ref,
+      connection_status: o.connection_status, last_synced_at: o.last_synced_at,
+      period: tc.period, period_start: tc.period_start, period_end: tc.period_end,
+      months_covered: tc.months_covered, turnover: tc.turnover,
+      total_transactions: tc.total_transactions, customer_invoices: tc.customer_invoices,
+      supplier_bills: tc.supplier_bills, credit_notes_sales: tc.credit_notes_sales,
+      credit_notes_purchase: tc.credit_notes_purchase, bank_processed: tc.bank_processed,
+      journals: tc.journals,
+    };
+  });
 }
 
-function getPanoramaOrganisations() {
-  const db = getDb();
-  return db.prepare(`
-    WITH latest_health AS (
-      SELECT hs.* FROM health_scores hs
-      WHERE hs.is_active = 1 AND hs.id = (
-        SELECT MAX(newer.id) FROM health_scores newer WHERE newer.org_id = hs.org_id AND newer.is_active = 1
-      )
-    ), breakdown AS (
-      SELECT i.org_id,
-        json_group_array(json_object(
-          'checkType', i.check_type, 'importance', i.importance,
-          'count', i.count, 'potentialValue', i.potential_value_gbp
-        )) AS issue_breakdown_json
-      FROM issues i
-      WHERE i.is_active = 1 AND COALESCE(i.count, 0) > 0
-      GROUP BY i.org_id
-    )
+// organisations/health_scores/sync_runs now live in MySQL; issues stays on SQLite. This used
+// to be one SQL query joining all four — now it's a MySQL query for the first three (mirrors
+// getAllOrganisations) plus a separate SQLite query for the issue breakdown, merged by org_id
+// in JS below (not a SQL join, so no cross-database query is needed).
+async function getPanoramaOrganisations() {
+  const [orgRows] = await getPool().query(`
     SELECT o.*, hs.score, hs.total_issues, hs.total_potential_errors_gbp,
       hs.last_bank_reconciled, hs.most_recent_transaction, hs.unreconciled_bank_items,
       hs.lock_date, hs.calculated_at, hs.period_key, hs.period_label,
-      (SELECT MAX(completed_at) FROM sync_runs sr
-       WHERE sr.org_id = o.id AND sr.status = 'succeeded') AS last_successful_sync_at,
-      COALESCE(b.issue_breakdown_json, '[]') AS issue_breakdown_json
-    FROM organisations o
-    LEFT JOIN latest_health hs ON hs.org_id = o.id
-    LEFT JOIN breakdown b ON b.org_id = o.id
+      (SELECT MAX(completed_at) FROM akrio_sync_runs sr
+       WHERE sr.org_id = o.id AND sr.status = 'succeeded') AS last_successful_sync_at
+    FROM akrio_organisations o
+    LEFT JOIN akrio_health_scores hs ON hs.org_id = o.id
+      AND hs.id = (SELECT MAX(id) FROM akrio_health_scores WHERE org_id = o.id AND is_active = 1)
     ORDER BY o.name
-  `).all().map(row => {
-    try {
-      return { ...row, issueBreakdown: JSON.parse(row.issue_breakdown_json) };
-    } catch (error) {
-      return { ...row, issueBreakdown: [] };
-    }
-  });
+  `);
+
+  const issueRows = getDb().prepare(`
+    SELECT org_id, check_type, importance, count, potential_value_gbp
+    FROM issues WHERE is_active = 1 AND COALESCE(count, 0) > 0
+  `).all();
+  const breakdownByOrg = new Map();
+  for (const row of issueRows) {
+    const list = breakdownByOrg.get(row.org_id) || [];
+    list.push({
+      checkType: row.check_type, importance: row.importance,
+      count: row.count, potentialValue: row.potential_value_gbp,
+    });
+    breakdownByOrg.set(row.org_id, list);
+  }
+
+  return orgRows.map(row => ({ ...row, issueBreakdown: breakdownByOrg.get(row.id) || [] }));
 }
 
 // Staff login / access control — migrated to the shared MySQL database (akrio_staff_users /

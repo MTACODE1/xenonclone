@@ -5,7 +5,7 @@ const { isStaffManager } = require('../services/staffPermissions');
 // covers all of them without touching any individual route body.
 async function resolveOrgAccess(req, res, next) {
   try {
-    const org = getOrganisationByTenantId(req.params.tenantId);
+    const org = await getOrganisationByTenantId(req.params.tenantId);
     if (!org) return res.status(404).send('Organisation not found');
     if (!isStaffManager(req.session.staffRole) && !(await staffHasOrgAccess(req.session.staffId, org.id))) {
       return res.status(403).send('You do not have access to this client');

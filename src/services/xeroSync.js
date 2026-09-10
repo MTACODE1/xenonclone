@@ -246,16 +246,16 @@ async function syncOrganisation(tenantId, progressCallback, options = {}) {
     throw new Error('A sync is already in progress for this organisation — please wait for it to finish.');
   }
   syncsInProgress.add(tenantId);
-  const existing = getOrganisationByTenantId(tenantId);
+  const existing = await getOrganisationByTenantId(tenantId);
   if (!existing) {
     syncsInProgress.delete(tenantId);
     throw new Error('Organisation not found');
   }
-  const runId = createSyncRun(existing.id, options.checkType ? `check:${options.checkType}` : 'full');
+  const runId = await createSyncRun(existing.id, options.checkType ? `check:${options.checkType}` : 'full');
   try {
     return await runSync(tenantId, progressCallback, { ...options, runId });
   } catch (error) {
-    finishSyncRun(runId, 'failed', error.message);
+    await finishSyncRun(runId, 'failed', error.message);
     throw error;
   } finally {
     syncsInProgress.delete(tenantId);
@@ -270,7 +270,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
   emit({ step: 'org_info', message: 'Fetching organisation info...' });
   let orgInfo;
   try {
-    const existingOrg = getOrganisationByTenantId(tenantId);
+    const existingOrg = await getOrganisationByTenantId(tenantId);
     [orgInfo] = await refreshCachedEntities(
       existingOrg.id, tenantId, options.runId, 'organisation',
       () => apiCall(tenantId, async (xero, tid) => {
@@ -283,7 +283,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     throw new Error(`Failed to fetch org info: ${err.message}`);
   }
 
-  upsertOrganisation({
+  await upsertOrganisation({
     xero_tenant_id: tenantId,
     name: orgInfo.name,
     client_ref: null,
@@ -292,7 +292,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     last_synced_at: null,
   });
 
-  const org = getOrganisationByTenantId(tenantId);
+  const org = await getOrganisationByTenantId(tenantId);
   const orgId = org.id;
 
   // Use the most recent lock date available (period lock moves forward monthly)
@@ -307,7 +307,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     financialYearEndMonth: orgInfo.financialYearEndMonth,
     asOf: options.asOf,
   });
-  updateOrganisationAccountingSettings(orgId, {
+  await updateOrganisationAccountingSettings(orgId, {
     financialYearEndDay: orgInfo.financialYearEndDay,
     financialYearEndMonth: orgInfo.financialYearEndMonth,
   });
@@ -318,7 +318,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
   try {
     const companyNumber = normalizeCompanyNumber(org.company_number || orgInfo.registrationNumber);
     if (companyNumber) {
-      if (companyNumber !== org.company_number) updateOrganisationCompanyNumber(orgId, companyNumber);
+      if (companyNumber !== org.company_number) await updateOrganisationCompanyNumber(orgId, companyNumber);
       const apiKey = getSetting('companies_house_api_key');
       if (apiKey) {
         emit({ step: 'companies_house', message: 'Refreshing Companies House status...' });
@@ -2005,7 +2005,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     ? { key: org.period_key, type: org.period_type, start: org.period_start, end: org.period_end, label: org.period_label }
     : { key: period.key, type: period.type, start: period.start, end: period.end, label: period.label };
 
-  upsertHealthScore(orgId, {
+  await upsertHealthScore(orgId, {
     score, total_issues: totalIssues, total_potential_errors_gbp: totalPotentialErrors,
     last_bank_reconciled: lastBankReconciled,
     most_recent_transaction: mostRecentTransaction,
@@ -2089,7 +2089,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     console.error('Transaction counts failed — activating check results anyway:', err.message);
   }
 
-  activateSyncRun(orgId, runId, options.checkType || null);
+  await activateSyncRun(orgId, runId, options.checkType || null);
 
   // Refresh Insight KPI data (P&L + Balance Sheet) in the background — failure does not block sync
   try {

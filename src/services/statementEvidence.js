@@ -405,14 +405,17 @@ function evidenceFreshness(date, now = new Date()) {
   return dayDistance(date, now.toISOString().slice(0, 10)) > 35 ? 'stale' : 'current';
 }
 
-function recomputeEvidenceIssues(orgId, periodKey = null, onlyCheck = null, options = {}) {
+// getOrganisationById and refreshLatestHealthScore now hit the shared MySQL database
+// (organisations/health_scores) — everything else this function reads/writes
+// (issues, bank_reconciliation, statement_imports/lines, filed_accounts) stays on SQLite.
+async function recomputeEvidenceIssues(orgId, periodKey = null, onlyCheck = null, options = {}) {
   const {
     getBankReconciliationForOrg, getFiledAccountsForOrg, getLatestStatementImportsForOrg,
     getLatestStatementLinesForOrg, getIssueByCheckType, refreshLatestHealthScore, replaceIssueForCheck,
     getOrganisationById, getExcludedBankAccountIds,
   } = require('../db/queries');
   const excludedBankAccountIds = getExcludedBankAccountIds(orgId);
-  const org = getOrganisationById(orgId);
+  const org = await getOrganisationById(orgId);
   // A reserved label (not_configured/needs_sync/...) is not a real period range, so it must never
   // stand in for one here — falling back to it would then get written onto a DIFFERENT check's
   // genuine period_checked below (e.g. bank_balance correctly stored as 'not_configured' could
@@ -529,7 +532,7 @@ function recomputeEvidenceIssues(orgId, periodKey = null, onlyCheck = null, opti
         ? `filed_accounts_${filedAccounts.map(f => f.filing_date).sort().join(',')}`
         : filedAccounts.some(f => !f.xero_synced_at) ? 'needs_sync' : 'unavailable',
   });
-  if (!options.deferScoreRefresh) refreshLatestHealthScore(orgId);
+  if (!options.deferScoreRefresh) await refreshLatestHealthScore(orgId);
 }
 
 module.exports = {

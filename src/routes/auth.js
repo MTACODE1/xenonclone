@@ -42,14 +42,14 @@ router.get('/callback', async (req, res) => {
         ? new Date(tokenSet.expires_at * 1000).toISOString()
         : new Date(Date.now() + 1800000).toISOString();
 
-      upsertToken({
+      await upsertToken({
         xero_tenant_id: tenant.tenantId,
         access_token: tokenSet.access_token,
         refresh_token: tokenSet.refresh_token,
         expires_at: expiresAt,
       });
 
-      upsertOrganisation({
+      await upsertOrganisation({
         xero_tenant_id: tenant.tenantId,
         name: tenant.tenantName,
         client_ref: null,
@@ -74,17 +74,17 @@ router.post('/disconnect/:tenantId', express.urlencoded({ extended: true }), asy
   }
   try {
     const xero = createXeroClient();
-    const tokenRow = getToken(tenantId);
+    const tokenRow = await getToken(tenantId);
     if (tokenRow) {
       xero.setTokenSet({ access_token: tokenRow.access_token, refresh_token: tokenRow.refresh_token });
       try { await xero.revokeToken(); } catch (e) { /* ignore */ }
     }
-    markOrganisationDisconnected(tenantId);
-    deleteToken(tenantId);
+    await markOrganisationDisconnected(tenantId);
+    await deleteToken(tenantId);
     res.redirect('/');
   } catch (err) {
     console.error('Disconnect error:', err.message);
-    markOrganisationDisconnected(tenantId);
+    await markOrganisationDisconnected(tenantId);
     res.redirect('/');
   }
 });

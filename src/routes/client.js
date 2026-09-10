@@ -191,9 +191,9 @@ function verifyCsrf(req, res, next) {
   next();
 }
 
-router.get('/:tenantId', (req, res) => {
+router.get('/:tenantId', async (req, res) => {
   const { tenantId } = req.params;
-  const org = getOrganisationByTenantId(tenantId);
+  const org = await getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   try {
     res.render('client', clientViewData(org, req.query));
@@ -202,17 +202,17 @@ router.get('/:tenantId', (req, res) => {
   }
 });
 
-router.get('/:tenantId/score-breakdown', (req, res) => {
-  const org = getOrganisationByTenantId(req.params.tenantId);
+router.get('/:tenantId/score-breakdown', async (req, res) => {
+  const org = await getOrganisationByTenantId(req.params.tenantId);
   if (!org) return res.status(404).json({ error: 'Organisation not found' });
   const breakdown = parseScoreBreakdown(org);
   if (!breakdown) return res.status(404).json({ error: 'No scored sync is available' });
   res.json(breakdown);
 });
 
-router.post('/:tenantId/account-check-configuration', express.urlencoded({ extended: true }), verifyCsrf, (req, res) => {
+router.post('/:tenantId/account-check-configuration', express.urlencoded({ extended: true }), verifyCsrf, async (req, res) => {
   const { tenantId } = req.params;
-  const org = getOrganisationByTenantId(tenantId);
+  const org = await getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   const accounts = getAccountCheckConfigurationForOrg(org.id);
   const checked = name => new Set([req.body[name]].flat().filter(Boolean));
@@ -233,27 +233,27 @@ router.post('/:tenantId/account-check-configuration', express.urlencoded({ exten
     purchase_tax_ignore: taxIgnored.has(account.account_code),
     purchase_tax_include_asset_prepayment: taxIncluded.has(account.account_code),
   }));
-  setAccountCheckConfiguration(org.id, configurations);
+  await setAccountCheckConfiguration(org.id, configurations);
   res.redirect(`/client/${tenantId}#capital-review-accounts`);
 });
 
-router.post('/:tenantId/supplier-pattern-lookback', express.urlencoded({ extended: true }), (req, res) => {
+router.post('/:tenantId/supplier-pattern-lookback', express.urlencoded({ extended: true }), async (req, res) => {
   const { tenantId } = req.params;
-  const org = getOrganisationByTenantId(tenantId);
+  const org = await getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   if (!req.session.csrfToken || req.body.csrf_token !== req.session.csrfToken) {
     return res.status(403).send('Invalid form token');
   }
   const months = parseInt(req.body.supplier_pattern_lookback_months, 10);
-  updateOrganisationSupplierPatternLookback(org.id, Number.isFinite(months) ? months : null);
+  await updateOrganisationSupplierPatternLookback(org.id, Number.isFinite(months) ? months : null);
   const multiAccountMonths = parseInt(req.body.multi_account_pattern_lookback_months, 10);
-  updateOrganisationMultiAccountPatternLookback(org.id, Number.isFinite(multiAccountMonths) ? multiAccountMonths : null);
+  await updateOrganisationMultiAccountPatternLookback(org.id, Number.isFinite(multiAccountMonths) ? multiAccountMonths : null);
   res.redirect(`/client/${tenantId}#supplier-pattern-lookback`);
 });
 
-router.post('/:tenantId/check-config', express.urlencoded({ extended: true }), (req, res) => {
+router.post('/:tenantId/check-config', express.urlencoded({ extended: true }), async (req, res) => {
   const { tenantId } = req.params;
-  const org = getOrganisationByTenantId(tenantId);
+  const org = await getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   if (!req.session.csrfToken || req.body.csrf_token !== req.session.csrfToken) {
     return res.status(403).send('Invalid form token');
@@ -266,7 +266,7 @@ router.post('/:tenantId/check-config', express.urlencoded({ extended: true }), (
   // here means "no override" like every other field — the rarer case stays reachable directly in
   // the database if ever needed, just not from this form.
   const blankToNull = value => (value === '' || value == null ? null : value);
-  updateOrganisationCheckConfig(org.id, {
+  await updateOrganisationCheckConfig(org.id, {
     opening_balance_threshold_gbp: blankToNull(req.body.opening_balance_threshold_gbp),
     capital_review_default_threshold_gbp: blankToNull(req.body.capital_review_default_threshold_gbp),
     misallocated_items_default_threshold_gbp: blankToNull(req.body.misallocated_items_default_threshold_gbp),
@@ -287,34 +287,34 @@ router.post('/:tenantId/check-config', express.urlencoded({ extended: true }), (
   res.redirect(`/client/${tenantId}#check-config`);
 });
 
-router.post('/:tenantId/bank-reconciliation', express.urlencoded({ extended: true }), verifyCsrf, (req, res) => {
+router.post('/:tenantId/bank-reconciliation', express.urlencoded({ extended: true }), verifyCsrf, async (req, res) => {
   const { tenantId } = req.params;
   const { bank_account_id, statement_balance } = req.body;
-  const org = getOrganisationByTenantId(tenantId);
+  const org = await getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   const parsed = parseFloat(statement_balance);
   updateStatementBalance(org.id, bank_account_id, isNaN(parsed) ? null : parsed);
-  recomputeEvidenceIssues(org.id);
+  await recomputeEvidenceIssues(org.id);
   res.redirect(`/client/${tenantId}#bank-reconciliation`);
 });
 
-router.post('/:tenantId/bank-account-exclusion', express.urlencoded({ extended: true }), verifyCsrf, (req, res) => {
+router.post('/:tenantId/bank-account-exclusion', express.urlencoded({ extended: true }), verifyCsrf, async (req, res) => {
   const { tenantId } = req.params;
   const { bank_account_id, excluded } = req.body;
-  const org = getOrganisationByTenantId(tenantId);
+  const org = await getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   if (!bank_account_id) return res.status(400).send('bank_account_id is required');
   // Xenon supports excluding individual bank accounts from Bank Balance and Unreconciled Bank
   // Items — organisation-scoped, so this can never affect another client's account, even one that
   // happens to share the same Xero bank_account_id (accounts are keyed by (org_id, account_id)).
   setBankAccountExcluded(org.id, bank_account_id, excluded === '1' || excluded === 'true');
-  recomputeEvidenceIssues(org.id);
+  await recomputeEvidenceIssues(org.id);
   res.redirect(`/client/${tenantId}#bank-reconciliation`);
 });
 
-router.post('/:tenantId/statement-import', acceptStatementUpload, (req, res) => {
+router.post('/:tenantId/statement-import', acceptStatementUpload, async (req, res) => {
   const { tenantId } = req.params;
-  const org = getOrganisationByTenantId(tenantId);
+  const org = await getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   if (!req.file) return res.status(400).send('Select a CSV statement file');
   if (!req.session.csrfToken || req.body.csrf_token !== req.session.csrfToken) {
@@ -358,26 +358,26 @@ router.post('/:tenantId/statement-import', acceptStatementUpload, (req, res) => 
       fs.rmSync(path.join(evidenceDir, storedFilename), { force: true });
       throw error;
     }
-    recomputeEvidenceIssues(org.id);
+    await recomputeEvidenceIssues(org.id);
     res.redirect(`/client/${encodeURIComponent(tenantId)}#statement-evidence`);
   } catch (error) {
     res.status(400).send(error.message);
   }
 });
 
-router.post('/:tenantId/statement-import/:importId/delete', express.urlencoded({ extended: true }), verifyCsrf, (req, res) => {
-  const org = getOrganisationByTenantId(req.params.tenantId);
+router.post('/:tenantId/statement-import/:importId/delete', express.urlencoded({ extended: true }), verifyCsrf, async (req, res) => {
+  const org = await getOrganisationByTenantId(req.params.tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   const removed = deleteStatementImport(org.id, Number(req.params.importId));
   if (!removed) return res.status(404).send('Statement import not found');
   const safeName = path.basename(removed.stored_filename);
   if (safeName === removed.stored_filename) fs.rmSync(path.join(evidenceDir, safeName), { force: true });
-  recomputeEvidenceIssues(org.id);
+  await recomputeEvidenceIssues(org.id);
   res.redirect(`/client/${encodeURIComponent(req.params.tenantId)}#statement-evidence`);
 });
 
-router.post('/:tenantId/filed-accounts', acceptSourceDocument, (req, res) => {
-  const org = getOrganisationByTenantId(req.params.tenantId);
+router.post('/:tenantId/filed-accounts', acceptSourceDocument, async (req, res) => {
+  const org = await getOrganisationByTenantId(req.params.tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   if (!req.session.csrfToken || req.body.csrf_token !== req.session.csrfToken) {
     return res.status(403).send('Invalid form token');
@@ -397,16 +397,16 @@ router.post('/:tenantId/filed-accounts', acceptSourceDocument, (req, res) => {
     filingDate, netAssets, sourceNote: String(req.body.source_note || '').slice(0, 1000),
     sourceDocumentPath: storedFilename,
   });
-  recomputeEvidenceIssues(org.id);
+  await recomputeEvidenceIssues(org.id);
   res.redirect(`/client/${encodeURIComponent(req.params.tenantId)}#filed-accounts`);
 });
 
 router.post('/:tenantId/companies-house', express.urlencoded({ extended: true }), verifyCsrf, async (req, res) => {
-  const org = getOrganisationByTenantId(req.params.tenantId);
+  const org = await getOrganisationByTenantId(req.params.tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   const number = normalizeCompanyNumber(req.body.company_number);
   if (!number) return res.status(400).send('Enter a valid company number');
-  updateOrganisationCompanyNumber(org.id, number);
+  await updateOrganisationCompanyNumber(org.id, number);
   const apiKey = getSetting('companies_house_api_key');
   try {
     const { profile, raw } = await fetchCompanyProfile(number, apiKey);
@@ -419,9 +419,9 @@ router.post('/:tenantId/companies-house', express.urlencoded({ extended: true })
   res.redirect(`/client/${encodeURIComponent(req.params.tenantId)}#companies-house`);
 });
 
-router.get('/:tenantId/check/:checkType', (req, res) => {
+router.get('/:tenantId/check/:checkType', async (req, res) => {
   const { tenantId, checkType } = req.params;
-  const org = getOrganisationByTenantId(tenantId);
+  const org = await getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   const issue = getIssueByCheckType(org.id, checkType);
   const def = CHECK_DEFINITIONS.find(d => d.type === checkType);
@@ -496,9 +496,9 @@ router.post(
   '/:tenantId/check/:checkType/review',
   express.urlencoded({ extended: true }),
   verifyCsrf,
-  (req, res) => {
+  async (req, res) => {
     const { tenantId, checkType } = req.params;
-    const org = getOrganisationByTenantId(tenantId);
+    const org = await getOrganisationByTenantId(tenantId);
     if (!org) return res.status(404).send('Organisation not found');
     // "Ignore/Dismiss all N items" applies to every finding matching the current status filter,
     // not just the ones visible on this page — matches Xenon's own bulk buttons, which state the
@@ -513,7 +513,7 @@ router.post(
       findingKeys = [req.body.finding_key || req.body.finding_keys].flat().filter(Boolean);
     }
     try {
-      setFindingReviewStates(org.id, checkType, findingKeys, req.body.action, req.body.notes);
+      await setFindingReviewStates(org.id, checkType, findingKeys, req.body.action, req.body.notes);
     } catch (error) {
       return res.status(400).send(error.message);
     }
@@ -531,9 +531,9 @@ router.post(
   '/:tenantId/check/:checkType/line-review',
   express.urlencoded({ extended: true }),
   verifyCsrf,
-  (req, res) => {
+  async (req, res) => {
     const { tenantId, checkType } = req.params;
-    const org = getOrganisationByTenantId(tenantId);
+    const org = await getOrganisationByTenantId(tenantId);
     if (!org) return res.status(404).send('Organisation not found');
     try {
       setLineReviewState(org.id, checkType, req.body.finding_key, req.body.line_key, req.body.ok === '1', req.body.notes);
@@ -552,9 +552,9 @@ router.post(
   '/:tenantId/check/:checkType/note',
   express.urlencoded({ extended: true }),
   verifyCsrf,
-  (req, res) => {
+  async (req, res) => {
     const { tenantId, checkType } = req.params;
-    const org = getOrganisationByTenantId(tenantId);
+    const org = await getOrganisationByTenantId(tenantId);
     if (!org) return res.status(404).send('Organisation not found');
     try {
       setFindingNote(org.id, checkType, req.body.finding_key, req.body.notes);
@@ -573,9 +573,9 @@ router.post(
   '/:tenantId/check/:checkType/ignore-contact',
   express.urlencoded({ extended: true }),
   verifyCsrf,
-  (req, res) => {
+  async (req, res) => {
     const { tenantId, checkType } = req.params;
-    const org = getOrganisationByTenantId(tenantId);
+    const org = await getOrganisationByTenantId(tenantId);
     if (!org) return res.status(404).send('Organisation not found');
     try {
       addContactExclusion(org.id, checkType, req.body.contact_name);
@@ -588,16 +588,16 @@ router.post(
   }
 );
 
-router.post('/:tenantId/insight/target', express.urlencoded({ extended: true }), verifyCsrf, (req, res) => {
-  const org = getOrganisationByTenantId(req.params.tenantId);
+router.post('/:tenantId/insight/target', express.urlencoded({ extended: true }), verifyCsrf, async (req, res) => {
+  const org = await getOrganisationByTenantId(req.params.tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   const val = parseFloat(req.body.monthly_target);
   if (Number.isFinite(val) && val >= 0) saveInsightData(org.id, 'target', { basis: 'fixed', monthly_target: val });
   res.redirect(`/client/${encodeURIComponent(req.params.tenantId)}?panel=insight`);
 });
 
-router.post('/:tenantId/insight/ctax-override', express.urlencoded({ extended: true }), verifyCsrf, (req, res) => {
-  const org = getOrganisationByTenantId(req.params.tenantId);
+router.post('/:tenantId/insight/ctax-override', express.urlencoded({ extended: true }), verifyCsrf, async (req, res) => {
+  const org = await getOrganisationByTenantId(req.params.tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   const idx = parseInt(req.body.fy_index, 10);
   const val = parseFloat(req.body.estimate);
@@ -631,8 +631,8 @@ const INSIGHT_WIDGET_KEYS = [
 const TARGET_BASIS_VALUES = ['none', 'fixed', 'previous_month', 'avg3', 'avg6', 'avg12', 'same_month_last_year'];
 const VALUATION_MODEL_VALUES = ['', 'current_profit', 'current_sales', 'net_asset_value'];
 
-router.get('/:tenantId/insight/settings', (req, res) => {
-  const org = getOrganisationByTenantId(req.params.tenantId);
+router.get('/:tenantId/insight/settings', async (req, res) => {
+  const org = await getOrganisationByTenantId(req.params.tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   const targetRow = getInsightData(org.id, 'target');
   const kv = getInsightSettingsKv(org.id);
@@ -659,8 +659,8 @@ router.get('/:tenantId/insight/settings', (req, res) => {
   });
 });
 
-router.post('/:tenantId/insight/settings', express.urlencoded({ extended: true }), verifyCsrf, (req, res) => {
-  const org = getOrganisationByTenantId(req.params.tenantId);
+router.post('/:tenantId/insight/settings', express.urlencoded({ extended: true }), verifyCsrf, async (req, res) => {
+  const org = await getOrganisationByTenantId(req.params.tenantId);
   if (!org) return res.status(404).send('Organisation not found');
 
   for (const cat of INSIGHT_MAPPING_CATEGORIES) {
@@ -735,7 +735,7 @@ router.post('/:tenantId/insight/settings', express.urlencoded({ extended: true }
 
 router.post('/:tenantId/sync', verifyCsrf, async (req, res) => {
   const { tenantId } = req.params;
-  const org = getOrganisationByTenantId(tenantId);
+  const org = await getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).json({ error: 'Organisation not found' });
   let period;
   try {
@@ -744,7 +744,7 @@ router.post('/:tenantId/sync', verifyCsrf, async (req, res) => {
   } catch (error) {
     return res.status(400).json({ error: error.message });
   }
-  const started = startJob(
+  const started = await startJob(
     `${tenantId}:all:${period.type}:${period.from || ''}:${period.to || ''}`,
     progress => syncOrganisation(tenantId, progress, { period }),
     { tenantId, orgId: org.id, mode: 'full', payload: { period } }
@@ -756,7 +756,7 @@ router.post('/:tenantId/sync', verifyCsrf, async (req, res) => {
 
 router.post('/:tenantId/check/:checkType/reanalyse', verifyCsrf, async (req, res) => {
   const { tenantId, checkType } = req.params;
-  const org = getOrganisationByTenantId(tenantId);
+  const org = await getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).json({ error: 'Organisation not found' });
   if (!CHECK_DEFINITIONS.some(check => check.type === checkType)) {
     return res.status(404).json({ error: 'Unknown check type' });
@@ -781,7 +781,7 @@ router.post('/:tenantId/check/:checkType/reanalyse', verifyCsrf, async (req, res
   // transaction's reconciliation flag) would never be picked up by an ordinary reanalyse. This
   // bypasses that and re-fetches everything live, same as a brand-new client's first sync.
   const forceFullRefresh = req.query.forceFullRefresh === '1';
-  const started = startJob(
+  const started = await startJob(
     `${tenantId}:${checkType}:${period.type}:${period.from || ''}:${period.to || ''}`,
     progress => syncOrganisation(tenantId, progress, {
       period, checkType, cacheOnly, asOf: resolvedPeriod.end, forceFullRefresh,
@@ -796,13 +796,13 @@ router.post('/:tenantId/check/:checkType/reanalyse', verifyCsrf, async (req, res
   });
 });
 
-router.post('/:tenantId/update', express.urlencoded({ extended: true }), verifyCsrf, (req, res) => {
+router.post('/:tenantId/update', express.urlencoded({ extended: true }), verifyCsrf, async (req, res) => {
   const { tenantId } = req.params;
-  const org = getOrganisationByTenantId(tenantId);
+  const org = await getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   const client_ref = 'client_ref' in req.body ? req.body.client_ref : org.client_ref;
   const tag = 'tag' in req.body ? req.body.tag : org.tag;
-  updateOrganisationMeta(tenantId, { client_ref, tag });
+  await updateOrganisationMeta(tenantId, { client_ref, tag });
   res.redirect(`/client/${tenantId}`);
 });
 
@@ -812,7 +812,7 @@ router.post('/:tenantId/update', express.urlencoded({ extended: true }), verifyC
 router.post('/:tenantId/access', express.urlencoded({ extended: true }), verifyCsrf, async (req, res, next) => {
   if (!isStaffManager(req.session.staffRole)) return res.status(403).send('Admin access required');
   const { tenantId } = req.params;
-  const org = getOrganisationByTenantId(tenantId);
+  const org = await getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   const staffId = Number(req.body.staff_id);
   if (!Number.isFinite(staffId)) return res.status(400).send('Missing staff_id');
@@ -824,8 +824,8 @@ router.post('/:tenantId/access', express.urlencoded({ extended: true }), verifyC
   }
 });
 
-router.get('/:tenantId/report', (req, res) => {
-  const org = getOrganisationByTenantId(req.params.tenantId);
+router.get('/:tenantId/report', async (req, res) => {
+  const org = await getOrganisationByTenantId(req.params.tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   try {
     const data = clientViewData(org, req.query);

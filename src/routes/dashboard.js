@@ -20,12 +20,12 @@ function requestedPeriod(query) {
 // is ever wired up from the dashboard, it inherits the same fix rather than the bug that fix was
 // written for: cacheOnly must only skip the live Xero fetch when reanalysing a genuinely different
 // period than the one currently active, not unconditionally.
-function startOrganisationJob(tenantId, query = {}, checkType = null) {
+async function startOrganisationJob(tenantId, query = {}, checkType = null) {
   const period = requestedPeriod(query);
   const key = `${tenantId}:${checkType || 'all'}:${period.type}:${period.from || ''}:${period.to || ''}`;
   let cacheOnly, asOf;
   if (checkType) {
-    const org = getOrganisationByTenantId(tenantId);
+    const org = await getOrganisationByTenantId(tenantId);
     const resolvedPeriod = resolvePeriod(period, {
       lockDate: org?.lock_date,
       financialYearEndDay: org?.financial_year_end_day,
@@ -44,7 +44,7 @@ router.get('/', async (req, res, next) => {
   try {
     const staleBefore = Date.now() - 36 * 60 * 60 * 1000;
     const managesStaff = isStaffManager(req.session.staffRole);
-    let orgs = getAllOrganisations();
+    let orgs = await getAllOrganisations();
     if (!managesStaff) {
       const allowed = new Set(await getOrgIdsForStaff(req.session.staffId));
       orgs = orgs.filter(o => allowed.has(o.id));
@@ -69,8 +69,9 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-router.get('/panorama', (req, res) => {
-  let orgs = getPanoramaOrganisations();
+router.get('/panorama', async (req, res, next) => {
+  try {
+  let orgs = await getPanoramaOrganisations();
   const { sort, tag, status, search } = req.query;
   if (tag) orgs = orgs.filter(o => o.tag === tag);
   if (status) orgs = orgs.filter(o => o.connection_status === status);
@@ -95,9 +96,12 @@ router.get('/panorama', (req, res) => {
   const avgScore = orgs.filter(o => o.score != null).length
     ? Math.round(orgs.filter(o => o.score != null).reduce((s, o) => s + o.score, 0) / orgs.filter(o => o.score != null).length)
     : null;
-  const allTags = [...new Set(getAllOrganisations().map(o => o.tag).filter(Boolean))];
+  const allTags = [...new Set((await getAllOrganisations()).map(o => o.tag).filter(Boolean))];
 
   res.render('panorama', { orgs, totalIssues, totalErrors, totalUnreconciled, avgScore, allTags, query: req.query });
+  } catch (error) {
+    next(error);
+  }
 });
 
 function verifyAjaxCsrf(req, res, next) {
@@ -109,11 +113,11 @@ function verifyAjaxCsrf(req, res, next) {
 
 router.post('/sync/:tenantId', verifyAjaxCsrf, async (req, res) => {
   const { tenantId } = req.params;
-  if (!getOrganisationByTenantId(tenantId)) {
+  if (!(await getOrganisationByTenantId(tenantId))) {
     return res.status(404).json({ error: 'Organisation not found' });
   }
   try {
-    const started = startOrganisationJob(tenantId, req.query);
+    const started = await startOrganisationJob(tenantId, req.query);
     return res.status(started.existing ? 200 : 202).json({
       success: true, jobId: started.job.id, existing: started.existing,
     });
@@ -123,12 +127,12 @@ router.post('/sync/:tenantId', verifyAjaxCsrf, async (req, res) => {
 });
 
 router.post('/sync-all', verifyAjaxCsrf, async (req, res) => {
-  const orgs = getAllOrganisations().filter(o => o.connection_status === 'connected');
+  const orgs = (await getAllOrganisations()).filter(o => o.connection_status === 'connected');
   const period = requestedPeriod(req.query);
   const results = [];
   for (const org of orgs) {
     try {
-      const started = startOrganisationJob(org.xero_tenant_id, req.query);
+      const started = await startOrganisationJob(org.xero_tenant_id, req.query);
       results.push({
         tenantId: org.xero_tenant_id, jobId: started.job.id, existing: started.existing,
       });
@@ -139,7 +143,7 @@ router.post('/sync-all', verifyAjaxCsrf, async (req, res) => {
   res.status(202).json({ success: true, period, results });
 });
 
-router.get('/transactions', (req, res) => {
+router.get('/transactions', async (req, res, next) => {
   const selectedPeriod = PERIOD_TYPES.includes(req.query.period)
     ? req.query.period : (getSetting('default_sync_period') || 'since_lock_date');
   let custom = null;
@@ -150,7 +154,8 @@ router.get('/transactions', (req, res) => {
       return res.status(400).send(error.message);
     }
   }
-  let rows = getAllTransactionCounts(selectedPeriod, custom?.start || null, custom?.end || null);
+  try {
+  let rows = await getAllTransactionCounts(selectedPeriod, custom?.start || null, custom?.end || null);
   const { sort, search } = req.query;
   if (search) rows = rows.filter(r => r.name.toLowerCase().includes(search.toLowerCase()));
   if (sort === 'turnover') rows.sort((a, b) => (b.turnover || 0) - (a.turnover || 0));
@@ -168,28 +173,39 @@ router.get('/transactions', (req, res) => {
     journals: rows.reduce((s, r) => s + (r.journals || 0), 0),
   };
   res.render('transactions', { rows, totals, query: { ...req.query, period: selectedPeriod } });
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.get('/sync-jobs/:jobId', (req, res) => {
-  const job = getJob(req.params.jobId);
-  if (!job) return res.status(404).json({ error: 'Sync job not found or expired' });
-  res.json(job);
+router.get('/sync-jobs/:jobId', async (req, res, next) => {
+  try {
+    const job = await getJob(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Sync job not found or expired' });
+    res.json(job);
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.post('/sync-jobs/:jobId/cancel', verifyAjaxCsrf, (req, res) => {
-  const job = cancelJob(req.params.jobId);
-  if (!job) return res.status(409).json({ error: 'Only queued jobs can be cancelled safely' });
-  res.json(job);
+router.post('/sync-jobs/:jobId/cancel', verifyAjaxCsrf, async (req, res, next) => {
+  try {
+    const job = await cancelJob(req.params.jobId);
+    if (!job) return res.status(409).json({ error: 'Only queued jobs can be cancelled safely' });
+    res.json(job);
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.get('/sync-jobs/:jobId/events', (req, res) => {
+router.get('/sync-jobs/:jobId/events', async (req, res) => {
   res.set({
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache, no-transform',
     Connection: 'keep-alive',
   });
   res.flushHeaders();
-  const unsubscribe = subscribe(req.params.jobId, job => {
+  const unsubscribe = await subscribe(req.params.jobId, job => {
     res.write(`data: ${JSON.stringify(job)}\n\n`);
     if (['succeeded', 'failed', 'cancelled'].includes(job.status)) res.end();
   });
@@ -197,8 +213,9 @@ router.get('/sync-jobs/:jobId/events', (req, res) => {
   req.on('close', unsubscribe);
 });
 
-router.get('/health', (req, res) => {
-  const orgs = getAllOrganisations();
+router.get('/health', async (req, res, next) => {
+  try {
+  const orgs = await getAllOrganisations();
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
@@ -210,6 +227,9 @@ router.get('/health', (req, res) => {
       healthScore: o.score,
     }))
   });
+  } catch (error) {
+    next(error);
+  }
 });
 
 module.exports = router;

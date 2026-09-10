@@ -130,17 +130,17 @@ function validatePayload(payload) {
   return payload;
 }
 
-function gateState() {
-  const snapshots = getValidationSnapshots();
+async function gateState() {
+  const snapshots = await getValidationSnapshots();
   const assurances = getValidationGateAssurances();
-  const activeRuns = getActiveValidationRuns();
+  const activeRuns = await getActiveValidationRuns();
   // Snapshots are newest-first. Bind each org to the run for its newest snapshot's period
   // only — walking older snapshots and overwriting wiped period matches whenever a client
   // had both an Aug-6 and an Aug-11 export (Rose/MBX re-ingest 11 Aug 2026).
   const boundOrgs = new Set();
   for (const snapshot of snapshots) {
     if (boundOrgs.has(snapshot.orgId)) continue;
-    const matched = getValidationRunForPeriod(snapshot.orgId, snapshot.periodKey);
+    const matched = await getValidationRunForPeriod(snapshot.orgId, snapshot.periodKey);
     if (matched) {
       activeRuns[snapshot.orgId] = matched;
       boundOrgs.add(snapshot.orgId);
@@ -149,42 +149,50 @@ function gateState() {
   return { snapshots, assurances, gate: evaluateGate({ snapshots, assurances, activeRuns }) };
 }
 
-router.get('/', (req, res) => {
-  const state = gateState();
-  res.render('validation', {
-    ...state,
-    organisations: getAllOrganisations(),
-    checkDefinitions: CHECK_DEFINITIONS,
-    checkSupport: CHECK_SUPPORT,
-    profileTags: PROFILE_TAGS,
-    query: req.query,
-  });
+router.get('/', async (req, res, next) => {
+  try {
+    const state = await gateState();
+    res.render('validation', {
+      ...state,
+      organisations: await getAllOrganisations(),
+      checkDefinitions: CHECK_DEFINITIONS,
+      checkSupport: CHECK_SUPPORT,
+      profileTags: PROFILE_TAGS,
+      query: req.query,
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 router.get('/guide', (req, res) => {
   res.sendFile(path.join(__dirname, '../../VALIDATION_GUIDE.md'));
 });
 
-router.get('/result.json', (req, res) => {
-  const state = gateState();
-  res.setHeader('Content-Disposition', 'attachment; filename="xenon-validation-gate.json"');
-  res.json({
-    ...state.gate,
-    snapshots: state.snapshots.map(snapshot => ({
-      ...snapshot,
-      sourceFilename: snapshot.sourceFilename || null,
-    })),
-    assurances: state.assurances,
-  });
+router.get('/result.json', async (req, res, next) => {
+  try {
+    const state = await gateState();
+    res.setHeader('Content-Disposition', 'attachment; filename="xenon-validation-gate.json"');
+    res.json({
+      ...state.gate,
+      snapshots: state.snapshots.map(snapshot => ({
+        ...snapshot,
+        sourceFilename: snapshot.sourceFilename || null,
+      })),
+      assurances: state.assurances,
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.post('/import', upload.single('validation_file'), (req, res) => {
+router.post('/import', upload.single('validation_file'), async (req, res) => {
   try {
     if (!csrfValid(req)) return res.status(403).send('Invalid CSRF token');
     if (!req.file) throw new Error('Choose a JSON or CSV file');
     const extension = path.extname(req.file.originalname).toLowerCase();
     if (!['.json', '.csv'].includes(extension)) throw new Error('Only .json and .csv files are accepted');
-    const org = getAllOrganisations().find(item => String(item.id) === String(req.body.org_id));
+    const org = (await getAllOrganisations()).find(item => String(item.id) === String(req.body.org_id));
     if (!org) throw new Error('Select a connected organisation');
     const text = req.file.buffer.toString('utf8').replace(/^\uFEFF/, '');
     let raw;
@@ -217,10 +225,10 @@ router.post('/import', upload.single('validation_file'), (req, res) => {
   }
 });
 
-router.post('/manual', (req, res) => {
+router.post('/manual', async (req, res) => {
   try {
     if (!csrfValid(req)) return res.status(403).send('Invalid CSRF token');
-    const org = getAllOrganisations().find(item => String(item.id) === String(req.body.org_id));
+    const org = (await getAllOrganisations()).find(item => String(item.id) === String(req.body.org_id));
     if (!org) throw new Error('Select a connected organisation');
     const checks = CHECK_DEFINITIONS.map(definition => ({
       type: definition.type,

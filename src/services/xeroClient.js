@@ -56,7 +56,7 @@ function isAuthorisationFailure(err) {
 }
 
 async function getAuthenticatedClient(tenantId) {
-  const tokenRow = getToken(tenantId);
+  const tokenRow = await getToken(tenantId);
   if (!tokenRow) throw new Error(`No token found for tenant ${tenantId}`);
 
   const xero = createXeroClient();
@@ -84,7 +84,7 @@ async function getAuthenticatedClient(tenantId) {
       // Rotate the token for the whole connection, not just this tenant — see
       // upsertTokenForConnection. Passing the token we just consumed is what identifies the
       // sibling tenants that would otherwise be stranded on it.
-      const propagated = upsertTokenForConnection(tokenRow.refresh_token, {
+      const propagated = await upsertTokenForConnection(tokenRow.refresh_token, {
         xero_tenant_id: tenantId,
         access_token: newTokenSet.access_token,
         refresh_token: newTokenSet.refresh_token,
@@ -97,8 +97,8 @@ async function getAuthenticatedClient(tenantId) {
     } catch (err) {
       if (isAuthorisationFailure(err)) {
         // The authorisation itself is gone, which kills every tenant on this connection.
-        const affected = markConnectionDisconnected(tokenRow.refresh_token, tenantId);
-        const names = getTenantsSharingRefreshToken(tokenRow.refresh_token)
+        const affected = await markConnectionDisconnected(tokenRow.refresh_token, tenantId);
+        const names = (await getTenantsSharingRefreshToken(tokenRow.refresh_token))
           .map(row => row.name).filter(Boolean);
         const alsoAffected = affected > 1 && names.length
           ? ` This authorisation covers ${names.length} organisations (${names.join(', ')}); all need reconnecting.`

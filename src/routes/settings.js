@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { getSetting, setSetting, getAllOrganisations, updateOrganisationMeta, getOrganisationByTenantId } = require('../db/queries');
-const { getDb } = require('../db/schema');
+const { getPool } = require('../db/mysqlPool');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -94,7 +94,8 @@ function verifyCsrf(req, res, next) {
 }
 
 // ---- GET /settings ----
-router.get('/', (req, res) => {
+router.get('/', async (req, res, next) => {
+  try {
   const tab = req.query.tab || 'practice';
   const metric = BANDING_METRICS.find(m => m.key === req.query.metric) ? req.query.metric : 'turnover';
   const companiesHouseKey = getSetting('companies_house_api_key') || '';
@@ -105,7 +106,7 @@ router.get('/', (req, res) => {
     companiesHouseKeySet: !!companiesHouseKey,
   };
 
-  const orgs = getAllOrganisations();
+  const orgs = await getAllOrganisations();
   const allTags = getAllTags();
   // Gather tags in use on orgs but not in allTags list — preserve backward compat
   const orgTagsInUse = [...new Set(orgs.map(o => o.tag).filter(Boolean))];
@@ -121,6 +122,9 @@ router.get('/', (req, res) => {
     ctaSettings,
     ctaTypes: CTA_TYPES,
   });
+  } catch (error) {
+    next(error);
+  }
 });
 
 // ---- POST /settings (practice tab) ----
@@ -188,25 +192,32 @@ router.post('/tags/create', express.urlencoded({ extended: true }), verifyCsrf, 
 });
 
 // ---- POST /settings/tags/delete ----
-router.post('/tags/delete', express.urlencoded({ extended: true }), verifyCsrf, (req, res) => {
-  const name = String(req.body.tag_name || '').trim();
-  const tags = getAllTags().filter(t => t !== name);
-  saveTags(tags);
-  // Remove from orgs that have this tag
-  const db = getDb();
-  db.prepare(`UPDATE organisations SET tag = NULL WHERE tag = ?`).run(name);
-  res.redirect('/settings?tab=tags&saved=1');
+router.post('/tags/delete', express.urlencoded({ extended: true }), verifyCsrf, async (req, res, next) => {
+  try {
+    const name = String(req.body.tag_name || '').trim();
+    const tags = getAllTags().filter(t => t !== name);
+    saveTags(tags);
+    // Remove from orgs that have this tag — organisations now lives in MySQL.
+    await getPool().query(`UPDATE akrio_organisations SET tag = NULL WHERE tag = ?`, [name]);
+    res.redirect('/settings?tab=tags&saved=1');
+  } catch (error) {
+    next(error);
+  }
 });
 
 // ---- POST /settings/tags/assign ----
-router.post('/tags/assign', express.urlencoded({ extended: true }), verifyCsrf, (req, res) => {
-  const { tenant_id, tag_name } = req.body;
-  const org = tenant_id ? getOrganisationByTenantId(tenant_id) : null;
-  if (!org) return res.redirect('/settings?tab=tags');
-  // Toggle: if same tag is already set, remove it; otherwise set it
-  const newTag = org.tag === tag_name ? null : (tag_name || null);
-  updateOrganisationMeta(tenant_id, { client_ref: org.client_ref, tag: newTag });
-  res.redirect('/settings?tab=tags');
+router.post('/tags/assign', express.urlencoded({ extended: true }), verifyCsrf, async (req, res, next) => {
+  try {
+    const { tenant_id, tag_name } = req.body;
+    const org = tenant_id ? await getOrganisationByTenantId(tenant_id) : null;
+    if (!org) return res.redirect('/settings?tab=tags');
+    // Toggle: if same tag is already set, remove it; otherwise set it
+    const newTag = org.tag === tag_name ? null : (tag_name || null);
+    await updateOrganisationMeta(tenant_id, { client_ref: org.client_ref, tag: newTag });
+    res.redirect('/settings?tab=tags');
+  } catch (error) {
+    next(error);
+  }
 });
 
 // ---- POST /settings/cta ----
