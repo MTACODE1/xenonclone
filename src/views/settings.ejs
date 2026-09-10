@@ -7,10 +7,10 @@
 
 <%# Tab nav %>
 <div class="settings-tabs">
-  <a href="/settings?tab=practice" class="settings-tab <%= tab === 'practice' ? 'active' : '' %>">Practice</a>
-  <a href="/settings?tab=banding&metric=turnover" class="settings-tab <%= tab === 'banding' ? 'active' : '' %>">Activity Banding</a>
-  <a href="/settings?tab=tags" class="settings-tab <%= tab === 'tags' ? 'active' : '' %>">Tag Manager</a>
-  <a href="/settings?tab=cta" class="settings-tab <%= tab === 'cta' ? 'active' : '' %>">Call To Action</a>
+  <a href="<%= basePath %>/settings?tab=practice" class="settings-tab <%= tab === 'practice' ? 'active' : '' %>">Practice</a>
+  <a href="<%= basePath %>/settings?tab=banding&metric=turnover" class="settings-tab <%= tab === 'banding' ? 'active' : '' %>">Activity Banding</a>
+  <a href="<%= basePath %>/settings?tab=tags" class="settings-tab <%= tab === 'tags' ? 'active' : '' %>">Tag Manager</a>
+  <a href="<%= basePath %>/settings?tab=cta" class="settings-tab <%= tab === 'cta' ? 'active' : '' %>">Call To Action</a>
 </div>
 
 <% if (query && query.saved) { %>
@@ -26,7 +26,7 @@
 <div class="settings-layout">
   <div class="card" style="max-width:600px;">
     <div class="card-header"><h5>Practice Configuration</h5></div>
-    <form method="POST" action="/settings" enctype="multipart/form-data" class="card-body">
+    <form method="POST" action="<%= basePath %>/settings" enctype="multipart/form-data" class="card-body">
       <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
       <div class="form-group">
         <label class="form-label">Practice Name</label>
@@ -72,7 +72,7 @@
     <div class="card-header"><h5>Xenon Cancellation Safety</h5></div>
     <div class="card-body">
       <p style="margin-bottom:12px;">Xenon must remain active until real-client parity and workflow evidence pass the auditable validation gate.</p>
-      <a href="/validation" class="btn btn-outlined">Open Validation Gate</a>
+      <a href="<%= basePath %>/validation" class="btn btn-outlined">Open Validation Gate</a>
     </div>
   </div>
 </div>
@@ -84,7 +84,7 @@
   <%# Left metric nav %>
   <div class="banding-metric-nav">
     <% bandingMetrics.forEach(m => { %>
-      <a href="/settings?tab=banding&metric=<%= m.key %>"
+      <a href="<%= basePath %>/settings?tab=banding&metric=<%= m.key %>"
          class="banding-metric-item <%= metric === m.key ? 'active' : '' %>">
         <%= m.label %>
       </a>
@@ -105,14 +105,14 @@
     %>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
       <h5 style="margin:0;">Package Bandings based on <%= metricTitles[metric] || metricMeta.label %></h5>
-      <form method="POST" action="/settings/banding/reset" style="display:inline;">
+      <form method="POST" action="<%= basePath %>/settings/banding/reset" style="display:inline;">
         <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
         <input type="hidden" name="metric" value="<%= metric %>">
         <button type="submit" class="btn btn-ghost-error btn-sm" onclick="return confirm('Reset to default bandings?')">Revert to default bandings</button>
       </form>
     </div>
 
-    <form method="POST" action="/settings/banding" id="bandingForm">
+    <form method="POST" action="<%= basePath %>/settings/banding" id="bandingForm">
       <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
       <input type="hidden" name="metric" value="<%= metric %>">
 
@@ -247,7 +247,7 @@ function addBandRow() {
 
 <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;margin-bottom:16px;">
   <input type="text" id="tagSearch" placeholder="Search Clients..." class="form-input" style="width:220px;">
-  <form method="POST" action="/settings/tags/create" style="display:flex;gap:8px;align-items:center;margin-left:auto;">
+  <form method="POST" action="<%= basePath %>/settings/tags/create" style="display:flex;gap:8px;align-items:center;margin-left:auto;">
     <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
     <input type="text" name="tag_name" placeholder="New tag name..." class="form-input" style="width:180px;" required>
     <button type="submit" class="btn btn-primary">Create Tag</button>
@@ -270,7 +270,7 @@ function addBandRow() {
         <% allTags.forEach(tag => { %>
           <th style="text-align:center;min-width:130px;">
             <span class="chip" style="background:<%= tagChipColor(tag) %>1a;color:<%= tagChipColor(tag) %>;"><%= tag %></span>
-            <form method="POST" action="/settings/tags/delete" style="display:inline;margin-left:4px;" onsubmit="return confirm('Delete tag \'<%= tag %>\'? It will be removed from all clients.')">
+            <form method="POST" action="<%= basePath %>/settings/tags/delete" style="display:inline;margin-left:4px;" onsubmit="return confirm('Delete tag \'<%= tag %>\'? It will be removed from all clients.')">
               <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
               <input type="hidden" name="tag_name" value="<%= tag %>">
               <button type="submit" class="banding-remove-btn" title="Delete tag">×</button>
@@ -283,11 +283,11 @@ function addBandRow() {
       <% orgs.forEach(org => { %>
         <tr class="tag-row" data-name="<%= org.name.toLowerCase() %>">
           <td style="position:sticky;left:0;z-index:1;background:var(--surface);font-weight:500;">
-            <a href="/client/<%= org.xero_tenant_id %>"><%= org.name %></a>
+            <a href="<%= basePath %>/client/<%= org.xero_tenant_id %>"><%= org.name %></a>
           </td>
           <% allTags.forEach(tag => { %>
             <td style="text-align:center;">
-              <form method="POST" action="/settings/tags/assign">
+              <form method="POST" action="<%= basePath %>/settings/tags/assign">
                 <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
                 <input type="hidden" name="tenant_id" value="<%= org.xero_tenant_id %>">
                 <input type="hidden" name="tag_name" value="<%= tag %>">
@@ -333,7 +333,7 @@ document.getElementById('tagSearch').addEventListener('input', function() {
     <p class="text-muted" style="padding:12px 20px 0;">
       Create, edit, enable &amp; disable "Call To Action" buttons. Once enabled, they can appear on client dashboards and bookkeeping check pages.
     </p>
-    <form method="POST" action="/settings/cta">
+    <form method="POST" action="<%= basePath %>/settings/cta">
       <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
       <table class="data-table">
         <thead>

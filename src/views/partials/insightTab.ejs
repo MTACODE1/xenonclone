@@ -310,7 +310,7 @@ const hasAnyData = !!(pnl || bs || ctax);
 <div class="insight-no-data">
   <h3>No Insight data yet</h3>
   <p>Run a Sync to generate KPI data. This will fetch your Profit &amp; Loss and Balance Sheet from Xero.</p>
-  <form method="POST" action="/client/<%= org.xero_tenant_id %>/sync" style="display:inline;">
+  <form method="POST" action="<%= basePath %>/client/<%= org.xero_tenant_id %>/sync" style="display:inline;">
     <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
     <button type="submit" class="btn-outline-teal" style="margin-top:12px;">Sync Now</button>
   </form>
@@ -344,7 +344,7 @@ const hasAnyData = !!(pnl || bs || ctax);
           <br>(<a href="<%= settingsUrl %>#sales-tracker" style="color:var(--ins-teal);">basis set in Settings</a>)
         </div>
         <% } else { %>
-        <form method="POST" action="/client/<%= org.xero_tenant_id %>/insight/target" class="sales-target-form">
+        <form method="POST" action="<%= basePath %>/client/<%= org.xero_tenant_id %>/insight/target" class="sales-target-form">
           <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
           <% if (monthlyTarget != null) { %>
           <input type="number" name="monthly_target" class="sales-target-input"
@@ -622,7 +622,7 @@ const hasAnyData = !!(pnl || bs || ctax);
 <div class="ctax-edit-modal" id="ctaxEditModal">
   <div class="ctax-edit-box">
     <h4>Override Corp Tax Estimate</h4>
-    <form id="ctaxEditForm" method="POST" action="/client/<%= org.xero_tenant_id %>/insight/ctax-override">
+    <form id="ctaxEditForm" method="POST" action="<%= basePath %>/client/<%= org.xero_tenant_id %>/insight/ctax-override">
       <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
       <input type="hidden" name="fy_index" id="editFyIndex">
       <label id="editFyLabel">Financial Year</label>

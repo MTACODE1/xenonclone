@@ -99,7 +99,7 @@ const navItems = [
 </div>
 
 <div style="margin-top:12px;">
-  <a href="/client/<%= org.xero_tenant_id %>?panel=insight" class="btn btn-outline-primary btn-sm">← Back to Insight</a>
+  <a href="<%= basePath %>/client/<%= org.xero_tenant_id %>?panel=insight" class="btn btn-outline-primary btn-sm">← Back to Insight</a>
 </div>
 
 <% if (query && query.saved) { %>
@@ -119,7 +119,7 @@ const navItems = [
   </nav>
 
   <div class="ins-main">
-<form method="POST" action="/client/<%= org.xero_tenant_id %>/insight/settings" id="insightSettingsForm">
+<form method="POST" action="<%= basePath %>/client/<%= org.xero_tenant_id %>/insight/settings" id="insightSettingsForm">
   <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
 
   <%

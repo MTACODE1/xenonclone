@@ -26,7 +26,7 @@
             <span class="chip" style="background:var(--primary-light); color:var(--primary-dark);"><%= s.initials %></span>
             <%= s.name %>
             <% if (s.canManage) { %>
-              <form method="POST" action="/staff/<%= s.id %>/initials" style="display:inline;" onsubmit="return promptInitials(this, '<%= s.initials %>')">
+              <form method="POST" action="<%= basePath %>/staff/<%= s.id %>/initials" style="display:inline;" onsubmit="return promptInitials(this, '<%= s.initials %>')">
                 <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
                 <input type="hidden" name="initials" value="">
                 <button type="submit" class="popover-add-btn" style="margin-left:4px;" title="Edit initials">✎</button>
@@ -36,7 +36,7 @@
           <td><%= s.mtakpi_staff_name %></td>
           <td>
             <% if (s.canChangeRole) { %>
-              <form method="POST" action="/staff/<%= s.id %>/role" onchange="this.submit()">
+              <form method="POST" action="<%= basePath %>/staff/<%= s.id %>/role" onchange="this.submit()">
                 <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
                 <select name="role" class="form-select" style="padding:4px 6px;">
                   <% assignableRoles.forEach(r => { %>
@@ -50,7 +50,7 @@
           </td>
           <td>
             <% if (s.role === 'staff' && s.canManage) { %>
-              <form method="POST" action="/staff/<%= s.id %>/settings-access" onchange="this.submit()">
+              <form method="POST" action="<%= basePath %>/staff/<%= s.id %>/settings-access" onchange="this.submit()">
                 <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
                 <input type="hidden" name="can_manage_settings" value="<%= s.can_manage_settings ? '0' : '1' %>">
                 <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
@@ -64,18 +64,18 @@
               <span class="text-muted" style="font-size:0.75rem;"><%= s.can_manage_settings ? 'Yes' : 'No' %></span>
             <% } %>
           </td>
-          <td><a href="/staff/<%= s.id %>/edit"><%= s.orgCount %> client<%= s.orgCount === 1 ? '' : 's' %></a></td>
+          <td><a href="<%= basePath %>/staff/<%= s.id %>/edit"><%= s.orgCount %> client<%= s.orgCount === 1 ? '' : 's' %></a></td>
           <td>
             <span class="chip <%= s.is_active ? 'chip-success' : 'chip-default' %>"><%= s.is_active ? 'Active' : 'Deactivated' %></span>
           </td>
           <td>
-            <a href="/staff/<%= s.id %>/edit" class="btn btn-sm btn-outlined">Edit Access</a>
+            <a href="<%= basePath %>/staff/<%= s.id %>/edit" class="btn btn-sm btn-outlined">Edit Access</a>
             <% if (s.canManage) { %>
-              <form method="POST" action="/staff/<%= s.id %>/<%= s.is_active ? 'deactivate' : 'reactivate' %>" style="display:inline;">
+              <form method="POST" action="<%= basePath %>/staff/<%= s.id %>/<%= s.is_active ? 'deactivate' : 'reactivate' %>" style="display:inline;">
                 <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
                 <button type="submit" class="btn btn-sm btn-outlined"><%= s.is_active ? 'Deactivate' : 'Reactivate' %></button>
               </form>
-              <form method="POST" action="/staff/<%= s.id %>/delete" style="display:inline;" onsubmit="return confirm('Permanently delete <%= s.name %>? This removes their account and all client-access grants. This cannot be undone.')">
+              <form method="POST" action="<%= basePath %>/staff/<%= s.id %>/delete" style="display:inline;" onsubmit="return confirm('Permanently delete <%= s.name %>? This removes their account and all client-access grants. This cannot be undone.')">
                 <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
                 <button type="submit" class="btn btn-sm btn-ghost-error">Delete</button>
               </form>

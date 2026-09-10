@@ -90,7 +90,7 @@
           <tr class="client-row" data-name="<%= org.name.toLowerCase() %>" data-tag="<%= org.tag || '' %>" data-status="<%= org.connection_status %>">
             <td class="text-muted"><%= org.client_ref || '—' %></td>
             <td class="font-medium">
-              <a href="/client/<%= org.xero_tenant_id %>"><%= org.name %></a>
+              <a href="<%= basePath %>/client/<%= org.xero_tenant_id %>"><%= org.name %></a>
               <% if (org.score != null) { %>
                 <span class="chip <%= org.score >= 80 ? 'chip-success' : org.score >= 60 ? 'chip-medium' : 'chip-error' %>" style="margin-left:6px;"><%= org.score %>%</span>
               <% } else { %>
@@ -118,7 +118,7 @@
                   <div id="accessPopover-<%= org.id %>" class="popover">
                     <% const assignedIds = new Set((org.accessBadges || []).map(s => s.id)); %>
                     <% (org.accessBadges || []).forEach(staff => { %>
-                      <form method="post" action="/client/<%= org.xero_tenant_id %>/access" class="popover-row">
+                      <form method="post" action="<%= basePath %>/client/<%= org.xero_tenant_id %>/access" class="popover-row">
                         <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
                         <input type="hidden" name="staff_id" value="<%= staff.id %>">
                         <input type="hidden" name="grant" value="0">
@@ -127,7 +127,7 @@
                       </form>
                     <% }) %>
                     <% allStaff.filter(s => !assignedIds.has(s.id)).forEach(staff => { %>
-                      <form method="post" action="/client/<%= org.xero_tenant_id %>/access" class="popover-row">
+                      <form method="post" action="<%= basePath %>/client/<%= org.xero_tenant_id %>/access" class="popover-row">
                         <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
                         <input type="hidden" name="staff_id" value="<%= staff.id %>">
                         <input type="hidden" name="grant" value="1">
@@ -135,7 +135,7 @@
                         <button type="submit" class="popover-add-btn" title="Grant access">Add</button>
                       </form>
                     <% }) %>
-                    <% if (!allStaff.length) { %><p class="text-muted" style="font-size:0.75rem; padding:8px;"><a href="/staff">Add staff</a> first</p><% } %>
+                    <% if (!allStaff.length) { %><p class="text-muted" style="font-size:0.75rem; padding:8px;"><a href="<%= basePath %>/staff">Add staff</a> first</p><% } %>
                   </div>
                 <% } %>
               </div>
@@ -150,12 +150,12 @@
             <td class="text-right">
               <button onclick="syncClient('<%= org.xero_tenant_id %>', this)" class="btn btn-ghost-primary btn-sm">Sync</button>
               <% if (org.connection_status === 'connected') { %>
-                <form method="post" action="/auth/disconnect/<%= org.xero_tenant_id %>" style="display:inline" onsubmit="return confirm('Disconnect this client?')">
+                <form method="post" action="<%= basePath %>/auth/disconnect/<%= org.xero_tenant_id %>" style="display:inline" onsubmit="return confirm('Disconnect this client?')">
                   <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
                   <button type="submit" class="btn btn-ghost-error btn-sm">Disconnect</button>
                 </form>
               <% } else { %>
-                <a href="/auth/connect" class="btn btn-ghost-success btn-sm">Reconnect</a>
+                <a href="<%= basePath %>/auth/connect" class="btn btn-ghost-success btn-sm">Reconnect</a>
               <% } %>
             </td>
           </tr>
@@ -173,7 +173,7 @@
     </div>
     <p class="text-muted" style="margin-bottom:16px;">Select your client's bookkeeping data...</p>
     <div class="provider-grid">
-      <a href="/auth/connect" class="provider-btn provider-xero">Connect to Xero</a>
+      <a href="<%= basePath %>/auth/connect" class="provider-btn provider-xero">Connect to Xero</a>
       <button type="button" class="provider-btn provider-disabled" disabled title="Coming soon">Connect to QuickBooks</button>
       <button type="button" class="provider-btn provider-disabled" disabled title="Coming soon">Connect to FreeAgent</button>
       <button type="button" class="provider-btn provider-disabled" disabled title="Coming soon">Connect to Sage</button>

@@ -1,0 +1,59 @@
+name: Build and Deploy Akrio Verify
+
+on:
+  push:
+    branches: [ "main" ]
+
+concurrency:
+  group: deploy-akrio-verify
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: us-east-2
+  ECR_REPOSITORY: 281066986535.dkr.ecr.us-east-2.amazonaws.com/akrio-verify
+  ECS_CLUSTER: kpimanagementjames
+  ECS_SERVICE: akrio-verify-service
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build and push Akrio Verify image
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REPOSITORY:$IMAGE_TAG -t $ECR_REPOSITORY:latest .
+          docker push $ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REPOSITORY:latest
+
+      # No-ops until the ECS service actually exists (created once, separately, after the
+      # first successful image push above). Safe to leave in from day one: once the service
+      # exists, every future push here will redeploy it automatically.
+      - name: Force new ECS deployment
+        continue-on-error: true
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --force-new-deployment

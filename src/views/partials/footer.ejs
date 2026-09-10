@@ -31,7 +31,7 @@ async function syncAll() {
   btn.disabled = true;
   btn.innerHTML = '<svg class="spinning" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg> Syncing...';
   try {
-    const response = await fetch('/sync-all?async=1', {
+    const response = await fetch('<%= basePath %>/sync-all?async=1', {
       method: 'POST', headers: { 'x-csrf-token': csrfToken }
     });
     const data = await response.json();
@@ -53,7 +53,7 @@ function followAllJobs(jobIds, btn, originalHTML, initialFailures = 0) {
   const poll = async () => {
     try {
       const responses = await Promise.all(jobIds.map(id =>
-        fetch('/sync-jobs/' + encodeURIComponent(id)).then(response => response.json())
+        fetch('<%= basePath %>/sync-jobs/' + encodeURIComponent(id)).then(response => response.json())
       ));
       const completed = responses.filter(job => ['succeeded', 'failed', 'cancelled'].includes(job.status));
       const failed = initialFailures + responses.filter(job => job.status === 'failed').length;
@@ -78,7 +78,7 @@ async function syncClient(tenantId, btn) {
   btn.disabled = true;
   btn.innerHTML = '<svg class="spinning" width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke-width="4"/></svg>';
   try {
-    const resp = await fetch('/sync/' + tenantId + '?async=1', {
+    const resp = await fetch('<%= basePath %>/sync/' + tenantId + '?async=1', {
       method: 'POST', headers: { 'x-csrf-token': csrfToken }
     });
     const data = await resp.json();

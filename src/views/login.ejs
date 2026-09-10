@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/style.css?v=<%= typeof cssVersion !== 'undefined' ? cssVersion : '1' %>">
+  <link rel="stylesheet" href="<%= basePath %>/style.css?v=<%= typeof cssVersion !== 'undefined' ? cssVersion : '1' %>">
 </head>
 <body>
   <div class="login-page">
@@ -24,7 +24,7 @@
       <% if (error) { %>
         <div class="alert alert-error" style="margin-bottom: 16px;"><%= error %></div>
       <% } %>
-      <form method="post" action="/login">
+      <form method="post" action="<%= basePath %>/login">
         <div class="form-group" style="margin-bottom: 14px;">
           <label class="form-label">Staff Name</label>
           <input type="text" name="staff_name" class="form-input" required autofocus style="width:100%;">

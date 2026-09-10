@@ -97,7 +97,7 @@
         <% orgs.forEach(org => { %>
           <tr>
             <td>
-              <a href="/client/<%= org.xero_tenant_id %>" class="font-medium"><%= org.name %></a>
+              <a href="<%= basePath %>/client/<%= org.xero_tenant_id %>" class="font-medium"><%= org.name %></a>
               <% if (org.client_ref) { %><div class="text-muted" style="font-size: 0.75rem;"><%= org.client_ref %></div><% } %>
               <% if (org.connection_status === 'disconnected') { %>
                 <div class="text-error" style="font-size: 0.75rem;">Disconnected</div>
@@ -122,7 +122,7 @@
                   <summary style="cursor:pointer;color:var(--primary)"><%= org.total_issues %></summary>
                   <div style="position:absolute;background:white;border:1px solid var(--divider);padding:8px 12px;z-index:5;text-align:left;box-shadow:var(--shadow-md);min-width:220px">
                     <% org.issueBreakdown.forEach(issue => { %>
-                      <a style="display:flex;justify-content:space-between;gap:12px;padding:4px 0" href="/client/<%= org.xero_tenant_id %>/check/<%= issue.checkType %>">
+                      <a style="display:flex;justify-content:space-between;gap:12px;padding:4px 0" href="<%= basePath %>/client/<%= org.xero_tenant_id %>/check/<%= issue.checkType %>">
                         <span><%= issue.checkType.replaceAll('_',' ') %></span><strong><%= issue.count %></strong>
                       </a>
                     <% }) %>
@@ -140,7 +140,7 @@
             </td>
             <td class="text-center text-muted" style="font-size: 0.75rem;"><%= org.lock_date || '—' %></td>
             <td class="text-right">
-              <a href="/client/<%= org.xero_tenant_id %>" class="btn btn-ghost-primary btn-sm">Open</a>
+              <a href="<%= basePath %>/client/<%= org.xero_tenant_id %>" class="btn btn-ghost-primary btn-sm">Open</a>
               <button onclick="syncClient('<%= org.xero_tenant_id %>', this)" class="btn btn-ghost-primary btn-sm">Sync</button>
             </td>
           </tr>

@@ -25,10 +25,15 @@ if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) {
   throw new Error('SESSION_SECRET is required in production');
 }
 
+// Set when Akrio is reverse-proxied under a path on another app's domain
+// (e.g. AKRIO_BASE_PATH=/akrio-verify for wf.morethanaccountants.co.uk/akrio-verify).
+// Left blank for local dev / a dedicated subdomain, where Akrio owns the whole origin.
+const BASE_PATH = (process.env.AKRIO_BASE_PATH || '').replace(/\/$/, '');
+
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'src/views'));
-app.use(express.static(path.join(__dirname, 'public')));
-app.use('/uploads', express.static(path.join(__dirname, 'data/uploads')));
+app.use(BASE_PATH, express.static(path.join(__dirname, 'public')));
+app.use(BASE_PATH + '/uploads', express.static(path.join(__dirname, 'data/uploads')));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -66,8 +71,31 @@ app.use((req, res, next) => {
   res.locals.isStaffManager = isStaffManager(req.session.staffRole);
   res.locals.canAccessSettings = res.locals.isStaffManager
     || (req.session.staffId ? canAccessSettings(getStaffById(req.session.staffId)) : false);
+  // Every root-relative link/form/asset in the views is written as "<%= basePath %>/...",
+  // so the whole app moves cleanly under a path prefix (e.g. /akrio-verify) with one change.
+  res.locals.basePath = BASE_PATH;
   next();
 });
+
+// res.redirect('/x') is written all over the routes as a plain root-relative path — Express
+// does NOT rewrite that for a sub-mounted app, so under a BASE_PATH it would bounce the
+// browser to the wrong (unprefixed) URL. Patch res.redirect once here instead of touching
+// every call site.
+if (BASE_PATH) {
+  app.use((req, res, next) => {
+    const originalRedirect = res.redirect.bind(res);
+    res.redirect = (a, b) => {
+      if (typeof b === 'string') {
+        return originalRedirect(a, b.startsWith('/') && !b.startsWith(BASE_PATH) ? BASE_PATH + b : b);
+      }
+      if (typeof a === 'string') {
+        return originalRedirect(a.startsWith('/') && !a.startsWith(BASE_PATH) ? BASE_PATH + a : a);
+      }
+      return originalRedirect(a, b);
+    };
+    next();
+  });
+}
 
 // Routes
 const authRoutes = require('./src/routes/auth');
@@ -79,22 +107,22 @@ const staffAuthRoutes = require('./src/routes/staffAuth');
 const staffRoutes = require('./src/routes/staff');
 const { requireStaffLogin, requireStaffManager, requireSettingsAccess } = require('./src/middleware/staffAuth');
 
-app.use('/login', staffAuthRoutes); // reachable pre-auth
+app.use(BASE_PATH + '/login', staffAuthRoutes); // reachable pre-auth
 app.use(requireStaffLogin); // everything below requires a staff session
 
 // /auth is Xero OAuth (connect/callback/disconnect a client's Xero org) — now implicitly
 // staff-gated by the requireStaffLogin above, since only a logged-in admin/staff clicking
 // "Connect Client" should ever start that flow.
-app.use('/auth', authRoutes);
+app.use(BASE_PATH + '/auth', authRoutes);
 // Per-:tenantId access enforcement (resolveOrgAccess) is mounted INSIDE client.js itself via
 // router.use('/:tenantId', ...) — Express only populates req.params from a path pattern that
 // contains the named param, so it can't be applied here as plain middleware on the bare '/client'
 // prefix.
-app.use('/client', clientRoutes);
-app.use('/settings', requireSettingsAccess, settingsRoutes);
-app.use('/staff', requireStaffManager, staffRoutes);
-app.use('/validation', validationRoutes);
-app.use('/', dashboardRoutes);
+app.use(BASE_PATH + '/client', clientRoutes);
+app.use(BASE_PATH + '/settings', requireSettingsAccess, settingsRoutes);
+app.use(BASE_PATH + '/staff', requireStaffManager, staffRoutes);
+app.use(BASE_PATH + '/validation', validationRoutes);
+app.use(BASE_PATH, dashboardRoutes);
 
 // Nightly sync at 2am
 cron.schedule('0 2 * * *', () => {

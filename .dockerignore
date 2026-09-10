@@ -1,0 +1,8 @@
+node_modules
+.git
+data
+backups
+certs
+*.db
+.env
+.DS_Store

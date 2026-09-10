@@ -25,7 +25,7 @@
 <div class="card" style="margin-bottom: 20px;">
   <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
     <h5>Gate Criteria</h5>
-    <a class="btn btn-outlined btn-sm" href="/validation/result.json">Download JSON result</a>
+    <a class="btn btn-outlined btn-sm" href="<%= basePath %>/validation/result.json">Download JSON result</a>
   </div>
   <div class="card-body">
     <% gate.criteria.forEach(item => { %>
@@ -48,7 +48,7 @@
       ['no_data_loss_sync', 'No-data-loss sync test'],
       ['workflow_readiness', 'Workflow readiness']
     ].forEach(([type, label]) => { const assurance = assurances[type] || {}; %>
-      <form method="POST" action="/validation/assurance" class="validation-assurance">
+      <form method="POST" action="<%= basePath %>/validation/assurance" class="validation-assurance">
         <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
         <input type="hidden" name="assurance_type" value="<%= type %>">
         <strong><%= label %></strong>
@@ -67,9 +67,9 @@
 
 <div class="card" style="margin-bottom: 20px;">
   <div class="card-header"><h5>Import Private Xenon Evidence</h5></div>
-  <form method="POST" action="/validation/import" enctype="multipart/form-data" class="card-body">
+  <form method="POST" action="<%= basePath %>/validation/import" enctype="multipart/form-data" class="card-body">
     <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
-    <p class="text-muted" style="margin-bottom:12px;">JSON/CSV is validated strictly, hashed with SHA-256, and stored under private <code>data/validation-evidence</code>. See <a href="/validation/guide">VALIDATION_GUIDE.md</a> for the exact format.</p>
+    <p class="text-muted" style="margin-bottom:12px;">JSON/CSV is validated strictly, hashed with SHA-256, and stored under private <code>data/validation-evidence</code>. See <a href="<%= basePath %>/validation/guide">VALIDATION_GUIDE.md</a> for the exact format.</p>
     <div class="validation-import-grid">
       <select name="org_id" class="form-select" required>
         <option value="">Select organisation</option>
@@ -83,7 +83,7 @@
 
 <details class="card" style="margin-bottom: 20px;">
   <summary class="card-header" style="cursor:pointer;"><h5>Manual Evidence Entry</h5></summary>
-  <form method="POST" action="/validation/manual" class="card-body">
+  <form method="POST" action="<%= basePath %>/validation/manual" class="card-body">
     <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
     <div class="validation-form-grid">
       <label>Organisation<select name="org_id" class="form-select" required><option value="">Select</option><% organisations.forEach(org => { %><option value="<%= org.id %>"><%= org.name %></option><% }) %></select></label>

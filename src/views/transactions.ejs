@@ -13,7 +13,7 @@
   </button>
 </div>
 
-<form method="GET" action="/transactions" class="form-row mb-24">
+<form method="GET" action="<%= basePath %>/transactions" class="form-row mb-24">
   <input type="text" name="search" value="<%= query.search || '' %>" placeholder="Search clients..." class="form-input" style="width: 250px;" oninput="this.form.submit()">
 
   <select name="period" class="form-select" onchange="handlePeriodChange(this)">
@@ -67,7 +67,7 @@
         %>
         <tr data-name="<%= row.name.toLowerCase() %>">
           <td>
-            <a href="/client/<%= row.xero_tenant_id %>" class="font-medium"><%= row.name %></a>
+            <a href="<%= basePath %>/client/<%= row.xero_tenant_id %>" class="font-medium"><%= row.name %></a>
             <% if (row.client_ref) { %><div class="text-muted" style="font-size: 0.75rem;"><%= row.client_ref %></div><% } %>
             <% if (row.connection_status === 'disconnected') { %><div class="text-error" style="font-size: 0.75rem;">Disconnected</div><% } %>
           </td>
