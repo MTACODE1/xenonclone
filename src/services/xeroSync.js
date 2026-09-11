@@ -42,6 +42,20 @@ const { isWithinPeriod, resolvePeriod } = require('./periodResolver');
 // Paginated invoice fetch — passing page triggers full record mode (with lineItems)
 const pageDelay = () => new Promise(resolve => setTimeout(resolve, 1000));
 
+// Some pagination loops (see fetchAllJournals) have no upper bound on how many pages they'll
+// walk — for a client with an enormous history in Xero, that's not a crash, just an extremely
+// long real-world wait (one client's journal fetch once ran 8 hours). Since sync jobs run one at
+// a time, a single client's fetch taking that long blocks every other client's sync behind it.
+// This races a promise against a timeout so a call that's taking unreasonably long fails fast
+// (triggering whatever non-fatal fallback the caller already has) instead of blocking forever.
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 async function fetchAllInvoices(tenantId, ifModifiedSince = undefined) {
   const allInvoices = [];
   let page = 1;
@@ -2054,12 +2068,21 @@ async function runSync(tenantId, progressCallback, options = {}) {
       .filter(item => isWithinPeriod(toDateString(item.date), period)).length;
 
     // Journals are only used for the panorama transaction-count card. A network blip here must
-    // never discard a completed health-check run — Rose already lost an 8-hour sync that way.
+    // never discard a completed health-check run — Rose already lost an 8-hour sync that way,
+    // because fetchAllJournals' pagination loop has no upper bound on how long it can run for a
+    // client with a huge journal history. The try/catch alone only helps once it throws — it
+    // does nothing while the fetch is just still going, which is what actually happened. Capped
+    // with a timeout so a client whose full journal history would take unreasonably long just
+    // skips its journal count for this sync, instead of blocking the whole one-at-a-time queue.
     let journalCount = 0;
     try {
-      const allJournals = await refreshCachedEntities(
-        orgId, tenantId, runId, 'journal',
-        since => fetchAllJournals(tenantId, since), options
+      const allJournals = await withTimeout(
+        refreshCachedEntities(
+          orgId, tenantId, runId, 'journal',
+          since => fetchAllJournals(tenantId, since), options
+        ),
+        90000,
+        'Journal fetch'
       );
       journalCount = allJournals
         .filter(item => isWithinPeriod(toDateString(item.journalDate), period)).length;
