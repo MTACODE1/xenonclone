@@ -1,7 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const { createXeroClient } = require('../services/xeroClient');
-const { upsertToken, upsertOrganisation, markOrganisationDisconnected, deleteToken, getToken } = require('../db/queries');
+const {
+  upsertToken, upsertOrganisation, markOrganisationDisconnected, deleteToken, getToken,
+  getOrganisationByTenantId, toggleStaffOrgAccess,
+} = require('../db/queries');
+const { isStaffManager } = require('../services/staffPermissions');
 const crypto = require('crypto');
 
 router.get('/connect', async (req, res) => {
@@ -57,6 +61,17 @@ router.get('/callback', async (req, res) => {
         connection_status: 'connected',
         last_synced_at: null,
       });
+
+      // A staff-tier (non-admin) account has no client access until an admin grants it via the
+      // "+" popover on the Client List — without this, whoever just connected a brand-new client
+      // would immediately be locked out of the very client they added ("You do not have access
+      // to this client"), since a fresh org starts with zero access grants for anyone. Admins/
+      // super_admins don't need this (they see every client regardless), so only grant it for
+      // staff-tier connectors.
+      if (!isStaffManager(req.session.staffRole) && req.session.staffId) {
+        const org = await getOrganisationByTenantId(tenant.tenantId);
+        if (org) await toggleStaffOrgAccess(req.session.staffId, org.id, true);
+      }
     }
 
     res.redirect('/');
