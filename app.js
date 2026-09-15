@@ -128,24 +128,28 @@ app.use(BASE_PATH + '/validation', validationRoutes);
 app.use(BASE_PATH, dashboardRoutes);
 
 // Nightly sync at 2am
-cron.schedule('0 2 * * *', () => {
+cron.schedule('0 2 * * *', async () => {
   console.log('[cron] Running nightly sync...');
-  const orgs = getAllOrganisations().filter(o => o.connection_status === 'connected');
-  const period = { type: getSetting('default_sync_period') || 'since_lock_date' };
-  for (const org of orgs) {
-    try {
-      startJob(
-        `${org.xero_tenant_id}:all:${period.type}::`,
-        progress => syncOrganisation(org.xero_tenant_id, progress, { period }),
-        {
-          tenantId: org.xero_tenant_id, orgId: org.id, mode: 'full',
-          payload: { period, source: 'nightly' },
-        }
-      );
-      console.log(`[cron] Enqueued: ${org.name}`);
-    } catch (err) {
-      console.error(`[cron] Failed to sync ${org.name}:`, err.message);
+  try {
+    const orgs = (await getAllOrganisations()).filter(o => o.connection_status === 'connected');
+    const period = { type: getSetting('default_sync_period') || 'since_lock_date' };
+    for (const org of orgs) {
+      try {
+        await startJob(
+          `${org.xero_tenant_id}:all:${period.type}::`,
+          progress => syncOrganisation(org.xero_tenant_id, progress, { period }),
+          {
+            tenantId: org.xero_tenant_id, orgId: org.id, mode: 'full',
+            payload: { period, source: 'nightly' },
+          }
+        );
+        console.log(`[cron] Enqueued: ${org.name}`);
+      } catch (err) {
+        console.error(`[cron] Failed to sync ${org.name}:`, err.message);
+      }
     }
+  } catch (err) {
+    console.error('[cron] Nightly sync failed to start:', err.message);
   }
 });
 

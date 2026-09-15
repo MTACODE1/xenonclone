@@ -1984,7 +1984,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       console.error(`Filed-account Balance Sheet failed for ${filed.filing_date}:`, error.message);
     }
   }
-  recomputeEvidenceIssues(orgId, period.key, options.checkType || null, {
+  await recomputeEvidenceIssues(orgId, period.key, options.checkType || null, {
     runId, isActive: 0, deferScoreRefresh: true,
   });
 

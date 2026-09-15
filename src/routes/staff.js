@@ -212,7 +212,7 @@ router.get('/:id/edit', async (req, res, next) => {
       return res.status(403).send('You do not have permission to view this account');
     }
     const assignedIds = new Set(await getOrgIdsForStaff(staff.id));
-    const orgs = getAllOrganisations().map(org => ({ ...org, assigned: assignedIds.has(org.id) }));
+    const orgs = (await getAllOrganisations()).map(org => ({ ...org, assigned: assignedIds.has(org.id) }));
     res.render('staffEdit', { staff, orgs, currentPage: 'staff' });
   } catch (error) {
     next(error);
