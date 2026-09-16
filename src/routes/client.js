@@ -26,6 +26,7 @@ const {
   getInsightCorpTaxAdjustments, setInsightCorpTaxAdjustment, deleteInsightCorpTaxAdjustment,
 } = require('../db/queries');
 const { syncOrganisation, CHECK_DEFINITIONS } = require('../services/xeroSync');
+const { syncFreeAgentOrganisation } = require('../services/freeagentSync');
 const { CASH_HEALTH_CATEGORIES } = require('../services/insightSync');
 const { resolveCheckDisplayStatus } = require('../services/checkRules');
 const { fetchCompanyProfile, normalizeCompanyNumber } = require('../services/companiesHouse');
@@ -744,9 +745,12 @@ router.post('/:tenantId/sync', verifyCsrf, async (req, res) => {
   } catch (error) {
     return res.status(400).json({ error: error.message });
   }
+  const runSync = org.freeagent_company_id
+    ? progress => syncFreeAgentOrganisation(tenantId, progress, { period })
+    : progress => syncOrganisation(tenantId, progress, { period });
   const started = await startJob(
     `${tenantId}:all:${period.type}:${period.from || ''}:${period.to || ''}`,
-    progress => syncOrganisation(tenantId, progress, { period }),
+    runSync,
     { tenantId, orgId: org.id, mode: 'full', payload: { period } }
   );
   return res.status(started.existing ? 200 : 202).json({
@@ -781,11 +785,16 @@ router.post('/:tenantId/check/:checkType/reanalyse', verifyCsrf, async (req, res
   // transaction's reconciliation flag) would never be picked up by an ordinary reanalyse. This
   // bypasses that and re-fetches everything live, same as a brand-new client's first sync.
   const forceFullRefresh = req.query.forceFullRefresh === '1';
+  const runSync = org.freeagent_company_id
+    ? progress => syncFreeAgentOrganisation(tenantId, progress, {
+      period, checkType, cacheOnly, asOf: resolvedPeriod.end, forceFullRefresh,
+    })
+    : progress => syncOrganisation(tenantId, progress, {
+      period, checkType, cacheOnly, asOf: resolvedPeriod.end, forceFullRefresh,
+    });
   const started = await startJob(
     `${tenantId}:${checkType}:${period.type}:${period.from || ''}:${period.to || ''}`,
-    progress => syncOrganisation(tenantId, progress, {
-      period, checkType, cacheOnly, asOf: resolvedPeriod.end, forceFullRefresh,
-    }),
+    runSync,
     {
       tenantId, orgId: org.id, mode: `check:${checkType}`,
       payload: { period, checkType, cacheOnly, asOf: resolvedPeriod.end, forceFullRefresh },

@@ -10,6 +10,7 @@ const crypto = require('crypto');
 const { getDb } = require('./src/db/schema');
 const { getAllOrganisations, getSetting, getStaffById } = require('./src/db/queries');
 const { syncOrganisation } = require('./src/services/xeroSync');
+const { syncFreeAgentOrganisation } = require('./src/services/freeagentSync');
 const { startJob } = require('./src/services/syncJobs');
 const MysqlSessionStore = require('./src/services/mysqlSessionStore');
 const { bootstrapAdmin } = require('./src/services/bootstrapAdmin');
@@ -102,6 +103,7 @@ if (BASE_PATH) {
 
 // Routes
 const authRoutes = require('./src/routes/auth');
+const freeagentAuthRoutes = require('./src/routes/freeagentAuth');
 const dashboardRoutes = require('./src/routes/dashboard');
 const clientRoutes = require('./src/routes/client');
 const settingsRoutes = require('./src/routes/settings');
@@ -117,6 +119,7 @@ app.use(requireStaffLogin); // everything below requires a staff session
 // staff-gated by the requireStaffLogin above, since only a logged-in admin/staff clicking
 // "Connect Client" should ever start that flow.
 app.use(BASE_PATH + '/auth', authRoutes);
+app.use(BASE_PATH + '/auth/freeagent', freeagentAuthRoutes);
 // Per-:tenantId access enforcement (resolveOrgAccess) is mounted INSIDE client.js itself via
 // router.use('/:tenantId', ...) — Express only populates req.params from a path pattern that
 // contains the named param, so it can't be applied here as plain middleware on the bare '/client'
@@ -134,12 +137,16 @@ cron.schedule('0 2 * * *', async () => {
     const orgs = (await getAllOrganisations()).filter(o => o.connection_status === 'connected');
     const period = { type: getSetting('default_sync_period') || 'since_lock_date' };
     for (const org of orgs) {
+      const identifier = org.xero_tenant_id || org.freeagent_company_id;
+      const runSync = org.freeagent_company_id
+        ? progress => syncFreeAgentOrganisation(identifier, progress, { period })
+        : progress => syncOrganisation(identifier, progress, { period });
       try {
         await startJob(
-          `${org.xero_tenant_id}:all:${period.type}::`,
-          progress => syncOrganisation(org.xero_tenant_id, progress, { period }),
+          `${identifier}:all:${period.type}::`,
+          runSync,
           {
-            tenantId: org.xero_tenant_id, orgId: org.id, mode: 'full',
+            tenantId: identifier, orgId: org.id, mode: 'full',
             payload: { period, source: 'nightly' },
           }
         );

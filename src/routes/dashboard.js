@@ -6,6 +6,7 @@ const {
 } = require('../db/queries');
 const { isStaffManager } = require('../services/staffPermissions');
 const { syncOrganisation } = require('../services/xeroSync');
+const { syncFreeAgentOrganisation } = require('../services/freeagentSync');
 const {
   periodInput, PERIOD_TYPES, resolvePeriod, shouldUseCacheOnlyForReanalysis,
 } = require('../services/periodResolver');
@@ -23,9 +24,9 @@ function requestedPeriod(query) {
 async function startOrganisationJob(tenantId, query = {}, checkType = null) {
   const period = requestedPeriod(query);
   const key = `${tenantId}:${checkType || 'all'}:${period.type}:${period.from || ''}:${period.to || ''}`;
+  const org = await getOrganisationByTenantId(tenantId);
   let cacheOnly, asOf;
   if (checkType) {
-    const org = await getOrganisationByTenantId(tenantId);
     const resolvedPeriod = resolvePeriod(period, {
       lockDate: org?.lock_date,
       financialYearEndDay: org?.financial_year_end_day,
@@ -34,8 +35,13 @@ async function startOrganisationJob(tenantId, query = {}, checkType = null) {
     cacheOnly = shouldUseCacheOnlyForReanalysis(org?.period_key, resolvedPeriod.key);
     asOf = resolvedPeriod.end;
   }
-  return startJob(key, progress =>
-    syncOrganisation(tenantId, progress, { period, checkType, cacheOnly, asOf }),
+  // getOrganisationByTenantId resolves either a Xero tenant id or a FreeAgent company id (see
+  // queries.js) — the same identifier the caller already has. FreeAgent Stage 1 only supports
+  // full syncs (no per-check reanalysis yet), which is all this route ever requests anyway.
+  const runSync = org?.freeagent_company_id
+    ? progress => syncFreeAgentOrganisation(tenantId, progress, { period, checkType, cacheOnly, asOf })
+    : progress => syncOrganisation(tenantId, progress, { period, checkType, cacheOnly, asOf });
+  return startJob(key, runSync,
     { tenantId, mode: checkType ? `check:${checkType}` : 'full', payload: { period, checkType, cacheOnly, asOf } }
   );
 }
@@ -133,13 +139,14 @@ router.post('/sync-all', verifyAjaxCsrf, async (req, res) => {
   const period = requestedPeriod(req.query);
   const results = [];
   for (const org of orgs) {
+    const identifier = org.xero_tenant_id || org.freeagent_company_id;
     try {
-      const started = await startOrganisationJob(org.xero_tenant_id, req.query);
+      const started = await startOrganisationJob(identifier, req.query);
       results.push({
-        tenantId: org.xero_tenant_id, jobId: started.job.id, existing: started.existing,
+        tenantId: identifier, jobId: started.job.id, existing: started.existing,
       });
     } catch (error) {
-      results.push({ tenantId: org.xero_tenant_id, error: error.message });
+      results.push({ tenantId: identifier, error: error.message });
     }
   }
   res.status(202).json({ success: true, period, results });

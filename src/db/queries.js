@@ -64,8 +64,8 @@ async function getOrganisationByTenantId(tenantId) {
     FROM akrio_organisations o
     LEFT JOIN akrio_health_scores hs ON hs.org_id = o.id
       AND hs.id = (SELECT MAX(id) FROM akrio_health_scores WHERE org_id = o.id AND is_active = 1)
-    WHERE o.xero_tenant_id = ?
-  `, [tenantId]);
+    WHERE o.xero_tenant_id = ? OR o.freeagent_company_id = ?
+  `, [tenantId, tenantId]);
   return rows[0] || null;
 }
 
@@ -1062,6 +1062,72 @@ async function getTenantsSharingRefreshToken(refreshToken) {
 
 async function deleteToken(tenantId) {
   await getPool().query(`DELETE FROM akrio_xero_tokens WHERE xero_tenant_id = ?`, [tenantId]);
+}
+
+// freeagent_tokens — one row per company, no shared-refresh-token propagation needed (unlike
+// Xero, FreeAgent tokens are always one-company-per-token).
+async function getFreeAgentToken(companyId) {
+  const [rows] = await getPool().query(
+    `SELECT * FROM akrio_freeagent_tokens WHERE freeagent_company_id = ?`, [companyId]
+  );
+  return rows[0] || null;
+}
+
+async function upsertFreeAgentToken(data) {
+  await getPool().query(
+    `INSERT INTO akrio_freeagent_tokens (freeagent_company_id, access_token, refresh_token, expires_at)
+     VALUES (?, ?, ?, ?) AS new
+     ON DUPLICATE KEY UPDATE
+       access_token = new.access_token,
+       refresh_token = new.refresh_token,
+       expires_at = new.expires_at,
+       updated_at = CURRENT_TIMESTAMP`,
+    [data.freeagent_company_id, data.access_token, data.refresh_token, data.expires_at]
+  );
+}
+
+async function deleteFreeAgentToken(companyId) {
+  await getPool().query(`DELETE FROM akrio_freeagent_tokens WHERE freeagent_company_id = ?`, [companyId]);
+}
+
+// Creates or updates the Akrio organisation row for a connected FreeAgent company — the
+// FreeAgent equivalent of upsertOrganisation, keyed by freeagent_company_id instead of
+// xero_tenant_id (a client has exactly one of the two set, never both).
+async function upsertFreeAgentOrganisation(data) {
+  await getPool().query(
+    `INSERT INTO akrio_organisations
+       (freeagent_company_id, name, client_ref, tag, connection_status, last_synced_at)
+     VALUES (?, ?, ?, ?, ?, ?) AS new
+     ON DUPLICATE KEY UPDATE
+       name = new.name,
+       connection_status = new.connection_status,
+       last_synced_at = COALESCE(new.last_synced_at, akrio_organisations.last_synced_at)`,
+    [data.freeagent_company_id, data.name, data.client_ref, data.tag, data.connection_status, data.last_synced_at]
+  );
+}
+
+async function getOrganisationByFreeAgentCompanyId(companyId) {
+  const [rows] = await getPool().query(`
+    SELECT o.*, hs.score, hs.total_issues, hs.total_potential_errors_gbp,
+           hs.last_bank_reconciled, hs.most_recent_transaction,
+           hs.unreconciled_bank_items, hs.lock_date, hs.score_profile_version,
+           hs.score_breakdown_json, hs.calculated_at, hs.period_key, hs.period_type,
+           hs.period_start, hs.period_end, hs.period_label,
+           (SELECT MAX(completed_at) FROM akrio_sync_runs
+            WHERE org_id = o.id AND status = 'succeeded') AS last_successful_sync_at
+    FROM akrio_organisations o
+    LEFT JOIN akrio_health_scores hs ON hs.org_id = o.id
+      AND hs.id = (SELECT MAX(id) FROM akrio_health_scores WHERE org_id = o.id AND is_active = 1)
+    WHERE o.freeagent_company_id = ?
+  `, [companyId]);
+  return rows[0] || null;
+}
+
+async function markOrganisationDisconnectedByFreeAgentCompany(companyId) {
+  await getPool().query(
+    `UPDATE akrio_organisations SET connection_status = 'disconnected' WHERE freeagent_company_id = ?`,
+    [companyId]
+  );
 }
 
 // Bank Reconciliation (secondary/optional real bank check)
@@ -2086,6 +2152,8 @@ module.exports = {
   addContactExclusion, getContactExclusions, removeContactExclusion,
   upsertToken, upsertTokenForConnection, markConnectionDisconnected,
   getTenantsSharingRefreshToken, getToken, deleteToken, getSetting, setSetting,
+  getFreeAgentToken, upsertFreeAgentToken, deleteFreeAgentToken, upsertFreeAgentOrganisation,
+  getOrganisationByFreeAgentCompanyId, markOrganisationDisconnectedByFreeAgentCompany,
   upsertTransactionCounts, getTransactionCountsForOrg, getAllTransactionCounts, getPanoramaOrganisations,
   upsertBankReconciliationXeroBalance, updateStatementBalance, getBankReconciliationForOrg,
   getExcludedBankAccountIds, setBankAccountExcluded,

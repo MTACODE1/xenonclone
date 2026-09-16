@@ -87,10 +87,12 @@
           </td></tr>
         <% } %>
         <% orgs.forEach(org => { %>
+          <% const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id; %>
+          <% const isFreeAgent = !!org.freeagent_company_id; %>
           <tr class="client-row" data-name="<%= org.name.toLowerCase() %>" data-tag="<%= org.tag || '' %>" data-status="<%= org.connection_status %>">
             <td class="text-muted"><%= org.client_ref || '—' %></td>
             <td class="font-medium">
-              <a href="<%= basePath %>/client/<%= org.xero_tenant_id %>"><%= org.name %></a>
+              <a href="<%= basePath %>/client/<%= orgIdentifier %>"><%= org.name %></a>
               <% if (org.score != null) { %>
                 <span class="chip <%= org.score >= 80 ? 'chip-success' : org.score >= 60 ? 'chip-medium' : 'chip-error' %>" style="margin-left:6px;"><%= org.score %>%</span>
               <% } else { %>
@@ -100,8 +102,9 @@
             </td>
             <td>
               <div class="connection-icons">
-                <span class="connection-icon <%= org.connection_status === 'connected' ? 'xero-active' : 'connection-disabled' %>" title="<%= org.connection_status === 'connected' ? 'Connected via Xero' : 'Disconnected' %>">Xe</span>
+                <span class="connection-icon <%= !isFreeAgent && org.connection_status === 'connected' ? 'xero-active' : 'connection-disabled' %>" title="<%= !isFreeAgent && org.connection_status === 'connected' ? 'Connected via Xero' : 'Not connected via Xero' %>">Xe</span>
                 <span class="connection-icon connection-disabled" title="Coming soon">QB</span>
+                <span class="connection-icon <%= isFreeAgent && org.connection_status === 'connected' ? 'xero-active' : 'connection-disabled' %>" title="<%= isFreeAgent && org.connection_status === 'connected' ? 'Connected via FreeAgent' : 'Not connected via FreeAgent' %>">Fa</span>
                 <span class="connection-icon connection-disabled" title="Coming soon">Sg</span>
               </div>
             </td>
@@ -118,7 +121,7 @@
                   <div id="accessPopover-<%= org.id %>" class="popover">
                     <% const assignedIds = new Set((org.accessBadges || []).map(s => s.id)); %>
                     <% (org.accessBadges || []).forEach(staff => { %>
-                      <form method="post" action="<%= basePath %>/client/<%= org.xero_tenant_id %>/access" class="popover-row">
+                      <form method="post" action="<%= basePath %>/client/<%= orgIdentifier %>/access" class="popover-row">
                         <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
                         <input type="hidden" name="staff_id" value="<%= staff.id %>">
                         <input type="hidden" name="grant" value="0">
@@ -127,7 +130,7 @@
                       </form>
                     <% }) %>
                     <% allStaff.filter(s => !assignedIds.has(s.id)).forEach(staff => { %>
-                      <form method="post" action="<%= basePath %>/client/<%= org.xero_tenant_id %>/access" class="popover-row">
+                      <form method="post" action="<%= basePath %>/client/<%= orgIdentifier %>/access" class="popover-row">
                         <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
                         <input type="hidden" name="staff_id" value="<%= staff.id %>">
                         <input type="hidden" name="grant" value="1">
@@ -149,19 +152,19 @@
             </td>
             <td class="text-right">
               <% if (org.activeJob) { %>
-                <button type="button" id="sync-btn-<%= org.xero_tenant_id %>" class="btn btn-ghost-primary btn-sm" disabled>
+                <button type="button" id="sync-btn-<%= orgIdentifier %>" class="btn btn-ghost-primary btn-sm" disabled>
                   <%= org.activeJob.progress?.message || (org.activeJob.status === 'queued' ? 'Waiting to start...' : 'Syncing…') %>
                 </button>
               <% } else { %>
-                <button onclick="syncClient('<%= org.xero_tenant_id %>', this)" class="btn btn-ghost-primary btn-sm">Sync</button>
+                <button onclick="syncClient('<%= orgIdentifier %>', this)" class="btn btn-ghost-primary btn-sm">Sync</button>
               <% } %>
               <% if (org.connection_status === 'connected') { %>
-                <form method="post" action="<%= basePath %>/auth/disconnect/<%= org.xero_tenant_id %>" style="display:inline" onsubmit="return confirm('Disconnect this client?')">
+                <form method="post" action="<%= basePath %>/auth<%= isFreeAgent ? '/freeagent' : '' %>/disconnect/<%= orgIdentifier %>" style="display:inline" onsubmit="return confirm('Disconnect this client?')">
                   <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
                   <button type="submit" class="btn btn-ghost-error btn-sm">Disconnect</button>
                 </form>
               <% } else { %>
-                <a href="<%= basePath %>/auth/connect" class="btn btn-ghost-success btn-sm">Reconnect</a>
+                <a href="<%= basePath %>/auth<%= isFreeAgent ? '/freeagent' : '' %>/connect" class="btn btn-ghost-success btn-sm">Reconnect</a>
               <% } %>
             </td>
           </tr>
@@ -181,7 +184,7 @@
     <div class="provider-grid">
       <a href="<%= basePath %>/auth/connect" class="provider-btn provider-xero">Connect to Xero</a>
       <button type="button" class="provider-btn provider-disabled" disabled title="Coming soon">Connect to QuickBooks</button>
-      <button type="button" class="provider-btn provider-disabled" disabled title="Coming soon">Connect to FreeAgent</button>
+      <a href="<%= basePath %>/auth/freeagent/connect" class="provider-btn provider-xero">Connect to FreeAgent</a>
       <button type="button" class="provider-btn provider-disabled" disabled title="Coming soon">Connect to Sage</button>
     </div>
   </div>
@@ -234,6 +237,6 @@ document.addEventListener('click', event => {
 // load, re-open the progress stream for every client whose sync is already in flight, so the
 // button here reflects the real current status instead of always showing a plain "Sync".
 <% orgs.filter(org => org.activeJob).forEach(org => { %>
-  followJob('<%= org.activeJob.id %>', document.getElementById('sync-btn-<%= org.xero_tenant_id %>'), 'Sync');
+  followJob('<%= org.activeJob.id %>', document.getElementById('sync-btn-<%= org.xero_tenant_id || org.freeagent_company_id %>'), 'Sync');
 <% }) %>
 </script>
