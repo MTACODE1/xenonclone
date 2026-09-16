@@ -33,6 +33,16 @@ const BILL_STATUS_MAP = {
   'Refunded': 'VOIDED',
 };
 
+// FreeAgent's /v2/credit_notes is a single resource issued TO contacts (sales-side only — there is
+// no purchase/supplier credit note concept), so every one always maps to Xero's ACCRECCREDIT type.
+const CREDIT_NOTE_STATUS_MAP = {
+  'Draft': 'DRAFT',
+  'Open': 'AUTHORISED',
+  'Overdue': 'AUTHORISED',
+  'Refunded': 'PAID',
+  'Written-off': 'VOIDED',
+};
+
 // FreeAgent references are URLs (e.g. ".../invoices/123"); Xero's ids are short numeric strings.
 // The numeric tail is stable and unique enough to use as the xero-node-shaped id field.
 function idFromUrl(url) {
@@ -122,6 +132,7 @@ async function fetchAllBills(companyId, ifModifiedSince = undefined) {
         totalTax: Number(bill.sales_tax_value) || 0,
         amountDue: Number(bill.due_value) || 0,
         currencyCode: bill.currency,
+        hasAttachments: !!bill.attachment,
         lineItems: (bill.bill_items || []).map(item => ({
           description: item.description,
           quantity: Number(item.quantity) || 0,
@@ -150,6 +161,9 @@ async function fetchAllContacts(companyId, ifModifiedSince = undefined) {
         name: contact.organisation_name ||
           [contact.first_name, contact.last_name].filter(Boolean).join(' ') || 'Unknown contact',
         emailAddress: contact.email,
+        // FreeAgent's contact status is "Active"/"Hidden" — normalised to Xero's ACTIVE/ARCHIVED
+        // vocabulary so checkRules.js's contactStatus === 'ACTIVE' filters work unchanged.
+        contactStatus: contact.status === 'Active' ? 'ACTIVE' : 'ARCHIVED',
       });
     }
     if (contacts.length < 100) break;
@@ -158,4 +172,33 @@ async function fetchAllContacts(companyId, ifModifiedSince = undefined) {
   return allContacts;
 }
 
-module.exports = { fetchAllInvoices, fetchAllBills, fetchAllContacts, idFromUrl };
+async function fetchAllCreditNotes(companyId, ifModifiedSince = undefined) {
+  const contactsByUrl = await fetchContactsById(companyId);
+  const allCreditNotes = [];
+  let page = 1;
+  while (true) {
+    const body = await apiCall(companyId, '/v2/credit_notes', {
+      page, per_page: 100, updated_since: ifModifiedSince,
+    });
+    const creditNotes = body.credit_notes || [];
+    for (const creditNote of creditNotes) {
+      allCreditNotes.push({
+        creditNoteID: idFromUrl(creditNote.url),
+        creditNoteNumber: creditNote.reference || null,
+        type: 'ACCRECCREDIT',
+        status: CREDIT_NOTE_STATUS_MAP[creditNote.status] || 'AUTHORISED',
+        contact: contactsByUrl.get(creditNote.contact) || { contactID: null, name: null },
+        date: creditNote.dated_on,
+        total: Number(creditNote.total_value) || 0,
+        remainingCredit: Number(creditNote.due_value) || 0,
+      });
+    }
+    if (creditNotes.length < 100) break;
+    page++;
+  }
+  return allCreditNotes;
+}
+
+module.exports = {
+  fetchAllInvoices, fetchAllBills, fetchAllContacts, fetchAllCreditNotes, idFromUrl,
+};

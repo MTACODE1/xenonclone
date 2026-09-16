@@ -1,4 +1,6 @@
-const { fetchAllInvoices, fetchAllBills, fetchAllContacts } = require('./freeagentAdapter');
+const {
+  fetchAllInvoices, fetchAllBills, fetchAllContacts, fetchAllCreditNotes,
+} = require('./freeagentAdapter');
 const {
   getOrganisationByFreeAgentCompanyId, upsertFreeAgentOrganisation,
   mergeEntityCache, getCachedEntities, getEntityCacheWatermark,
@@ -7,7 +9,8 @@ const {
   upsertHealthScore,
 } = require('../db/queries');
 const {
-  NON_SCORED_CHECKS, findDuplicates, sumAbsoluteExposure,
+  NON_SCORED_CHECKS, findDuplicates, excludeDuplicateDrafts, findDuplicateContacts,
+  isOldDocument, selectOldCredits, sumAbsoluteExposure,
   resolveDuplicateInvoiceWindowDays, resolveDuplicateBillWindowDays,
   resolveDuplicateInvoiceRequireExactReference, resolveDuplicateInvoiceIncludeFullyPaid,
   resolveDuplicateBillRequireExactReference, resolveDuplicateBillIncludeFullyPaid,
@@ -17,17 +20,20 @@ const {
 const { calculateScoreBreakdown } = require('./scoreProfile');
 const { isWithinPeriod, resolvePeriod } = require('./periodResolver');
 
-// Stage 1 FreeAgent sync — deliberately NOT the same code path as runSync (xeroSync.js). Xero's
-// runSync unconditionally calls ~8 Xero-only endpoints before it ever reaches scoring (org
-// settings, credit notes, bank transactions, payments, tax rates, journals, chart of accounts) —
-// none of those have a FreeAgent equivalent yet. Bolting a provider-branch into that 2000-line
-// function to reach two checks would touch code every live Xero client depends on today for a
-// proof that only needs invoices/bills/contacts. This runs those three fetches through the same
-// entity cache (mergeEntityCache/getCachedEntities — already provider-agnostic) and computes only
-// duplicate_invoices/duplicate_bills. Every other check simply has no issue row for this run, which
-// is the same "will show as Not synced" state a failed Xero check already leaves behind — see the
-// try/catch convention around each check in runSync. Stage 2 will add the missing FreeAgent
-// fetchers (bills' bank-transaction-explanation join, tax rates, etc.) one check at a time.
+// FreeAgent sync — deliberately NOT the same code path as runSync (xeroSync.js). Xero's runSync
+// unconditionally calls ~8 Xero-only endpoints before it ever reaches scoring (org settings, bank
+// transactions, payments, tax rates, journals, chart of accounts, Companies House) — none of those
+// have a FreeAgent equivalent yet. Bolting a provider-branch into that 2000-line function to reach
+// a handful of checks would touch code every live Xero client depends on today. This runs its own
+// fetches through the same entity cache (mergeEntityCache/getCachedEntities — already
+// provider-agnostic) and computes only the checks that need invoices/bills/credit notes/contacts.
+// Every other check simply has no issue row for this run, which is the same "will show as Not
+// synced" state a failed Xero check already leaves behind — see the try/catch convention around
+// each check in runSync. Two checks (old_purchase_credits, contact_defaults) have no FreeAgent
+// equivalent at all — see the not_applicable_freeagent block below — and are marked "Not
+// applicable" rather than left on "Not synced" forever. A later stage will add bank
+// transactions/explanations + chart of accounts (categories) + tax rates to unlock the remaining
+// ~14 checks.
 
 function incrementalSince(orgId, entityType, options) {
   if (options.cacheOnly || options.forceFullRefresh) return undefined;
@@ -93,13 +99,28 @@ async function runFreeAgentSync(companyId, progressCallback, options = {}) {
   );
 
   emit({ step: 'fetch_contacts', message: 'Refreshing contact cache...' });
-  await refreshCachedEntities(orgId, runId, 'contact', since => fetchAllContacts(companyId, since), options);
+  const contacts = await refreshCachedEntities(
+    orgId, runId, 'contact', since => fetchAllContacts(companyId, since), options
+  );
+
+  emit({ step: 'fetch_credits', message: 'Refreshing credit note cache...' });
+  const allCredits = await refreshCachedEntities(
+    orgId, runId, 'credit_note', since => fetchAllCreditNotes(companyId, since), options
+  );
+  // FreeAgent's /v2/credit_notes is sales-side only — there is no purchase/supplier credit note
+  // concept, so purchaseCredits is always empty and old_purchase_credits is marked not-applicable
+  // below rather than computed.
+  const salesCredits = allCredits.filter(item => item.type === 'ACCRECCREDIT');
 
   const accrecAuthorised = invoices.filter(i => i.type === 'ACCREC' && ['AUTHORISED', 'PAID'].includes(i.status));
   const accrecDraft = invoices.filter(i => i.type === 'ACCREC' && ['DRAFT', 'SUBMITTED'].includes(i.status));
   const accpayAuthorised = invoices.filter(i => i.type === 'ACCPAY' && ['AUTHORISED', 'PAID'].includes(i.status));
   const accpayDraft = invoices.filter(i => i.type === 'ACCPAY' && ['DRAFT', 'SUBMITTED'].includes(i.status));
   const inPeriod = items => items.filter(item => isWithinPeriod(toDateString(item.date), period));
+  const throughPeriodEnd = items => items.filter(item => {
+    const date = toDateString(item.date);
+    return date && date <= period.end;
+  });
 
   emit({ step: 'running_checks', message: 'Running bookkeeping checks...' });
   const issueResults = [];
@@ -159,6 +180,159 @@ async function runFreeAgentSync(companyId, progressCallback, options = {}) {
   } catch (err) {
     console.error('duplicate_bills check failed — skipping (will show as "Not synced"):', err.message);
   }
+
+  const asOf = new Date(`${period.end}T00:00:00.000Z`);
+
+  try {
+    const overdue = throughPeriodEnd(accrecAuthorised).filter(i => (i.amountDue || 0) > 0 && isOldDocument(i, asOf));
+    persistIssue({
+      org_id: orgId, check_type: 'old_unpaid_invoices', importance: 'high',
+      count: overdue.length, potential_value_gbp: sumAbsoluteExposure(overdue, i => i.amountDue),
+      detail_json: JSON.stringify(overdue.map(i => ({
+        id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
+        date: toDateString(i.date), dueDate: toDateString(i.dueDate), amountDue: i.amountDue,
+      }))),
+      period_checked: 'document_date_over_60_days_ago_all_time',
+    });
+  } catch (err) {
+    console.error('old_unpaid_invoices check failed — skipping (will show as "Not synced"):', err.message);
+  }
+
+  try {
+    const credits = selectOldCredits(throughPeriodEnd(salesCredits), asOf);
+    persistIssue({
+      org_id: orgId, check_type: 'old_sales_credits', importance: 'high',
+      count: credits.length, potential_value_gbp: sumAbsoluteExposure(credits, c => c.remainingCredit),
+      detail_json: JSON.stringify(credits.map(c => ({
+        id: c.creditNoteID, number: c.creditNoteNumber, contact: c.contact?.name,
+        date: toDateString(c.date), remaining: c.remainingCredit,
+      }))),
+      period_checked: 'older_than_60_days',
+    });
+  } catch (err) {
+    console.error('old_sales_credits check failed — skipping (will show as "Not synced"):', err.message);
+  }
+
+  try {
+    const overdue = throughPeriodEnd(accpayAuthorised).filter(i => isOldDocument(i, asOf) && (i.amountDue || 0) > 0);
+    persistIssue({
+      org_id: orgId, check_type: 'old_unpaid_bills', importance: 'high',
+      count: overdue.length, potential_value_gbp: sumAbsoluteExposure(overdue, i => i.amountDue),
+      detail_json: JSON.stringify(overdue.map(i => ({
+        id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
+        date: toDateString(i.date), dueDate: toDateString(i.dueDate), amountDue: i.amountDue,
+      }))),
+      period_checked: 'document_date_over_60_days_ago',
+    });
+  } catch (err) {
+    console.error('old_unpaid_bills check failed — skipping (will show as "Not synced"):', err.message);
+  }
+
+  // old_purchase_credits has no FreeAgent equivalent — FreeAgent's credit_notes resource is
+  // sales-side only (see salesCredits above). Marked not-applicable rather than left "Not synced".
+  persistIssue({
+    org_id: orgId, check_type: 'old_purchase_credits', importance: 'high',
+    count: 0, potential_value_gbp: 0, detail_json: JSON.stringify([]),
+    period_checked: 'not_applicable_freeagent',
+  });
+
+  // unapproved_invoices/unapproved_bills: same duplicate-draft exclusion as Xero, but without the
+  // per-document History API lookup (fetchDocumentHistory in xeroSync.js calls Xero's
+  // getInvoiceHistory, which has no FreeAgent equivalent yet) — excluded duplicate drafts still
+  // appear as display-only findings, just without the "who created/approved this" note.
+  try {
+    const draftInvoices = inPeriod(accrecDraft);
+    const duplicateInvoiceGroups = findDuplicates(draftInvoices);
+    const invoicesFinding = excludeDuplicateDrafts(draftInvoices, undefined, duplicateInvoiceGroups);
+    const duplicateInvoiceFindings = duplicateInvoiceGroups.flatMap(group => group.documents.map(doc => ({
+      id: doc.id, number: doc.reference, contact: group.contact,
+      date: doc.date, total: doc.amount, status: doc.status,
+      displayOnly: true,
+      suspectedDuplicateOf: group.documentIds.filter(id => id !== doc.id),
+      history: undefined,
+    })));
+    persistIssue({
+      org_id: orgId, check_type: 'unapproved_invoices', importance: 'medium',
+      count: invoicesFinding.length, potential_value_gbp: sumAbsoluteExposure(invoicesFinding, i => i.total),
+      detail_json: JSON.stringify([
+        ...invoicesFinding.map(i => ({
+          id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
+          date: toDateString(i.date), total: i.total, status: i.status,
+        })),
+        ...duplicateInvoiceFindings,
+      ]),
+      period_checked: period.key,
+    });
+  } catch (err) {
+    console.error('unapproved_invoices check failed — skipping (will show as "Not synced"):', err.message);
+  }
+
+  try {
+    const draftBills = inPeriod(accpayDraft);
+    const duplicateBillGroups = findDuplicates(draftBills);
+    const billsFinding = excludeDuplicateDrafts(draftBills, undefined, duplicateBillGroups);
+    const duplicateBillFindings = duplicateBillGroups.flatMap(group => group.documents.map(doc => ({
+      id: doc.id, number: doc.reference, contact: group.contact,
+      date: doc.date, total: doc.amount, status: doc.status,
+      displayOnly: true,
+      suspectedDuplicateOf: group.documentIds.filter(id => id !== doc.id),
+      history: undefined,
+    })));
+    persistIssue({
+      org_id: orgId, check_type: 'unapproved_bills', importance: 'medium',
+      count: billsFinding.length, potential_value_gbp: sumAbsoluteExposure(billsFinding, i => i.total),
+      detail_json: JSON.stringify([
+        ...billsFinding.map(i => ({
+          id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
+          date: toDateString(i.date), total: i.total, status: i.status,
+        })),
+        ...duplicateBillFindings,
+      ]),
+      period_checked: period.key,
+    });
+  } catch (err) {
+    console.error('unapproved_bills check failed — skipping (will show as "Not synced"):', err.message);
+  }
+
+  try {
+    const billsSinceLD = inPeriod(accpayAuthorised).filter(b => b.status === 'AUTHORISED');
+    const undocumented = billsSinceLD.filter(b => !b.hasAttachments);
+    persistIssue({
+      org_id: orgId, check_type: 'undocumented_bills', importance: 'medium',
+      count: undocumented.length, potential_value_gbp: 0,
+      detail_json: JSON.stringify(undocumented.map(b => ({
+        invoiceId: b.invoiceID, number: b.invoiceNumber, contact: b.contact?.name,
+        date: toDateString(b.date), total: b.total,
+      }))),
+      period_checked: period.key,
+    });
+  } catch (err) {
+    console.error('undocumented_bills check failed — skipping (will show as "Not synced"):', err.message);
+  }
+
+  try {
+    // FreeAgent contacts have no isCustomer/isSupplier flag (unlike Xero) — active status alone
+    // is the closest equivalent filter available.
+    const activeContacts = contacts.filter(c => c.contactStatus === 'ACTIVE');
+    const duplicates = findDuplicateContacts(activeContacts);
+    persistIssue({
+      org_id: orgId, check_type: 'duplicate_contacts', importance: 'low',
+      count: duplicates.length, potential_value_gbp: 0,
+      detail_json: JSON.stringify(duplicates),
+      period_checked: 'active_customer_supplier_contacts',
+    });
+  } catch (err) {
+    console.error('duplicate_contacts check failed — skipping (will show as "Not synced"):', err.message);
+  }
+
+  // contact_defaults has no FreeAgent equivalent — FreeAgent contacts carry no default
+  // account-code/tax-code fields at all (unlike Xero's salesDefaultAccountCode/
+  // accountsReceivableTaxType etc.). Marked not-applicable rather than left "Not synced".
+  persistIssue({
+    org_id: orgId, check_type: 'contact_defaults', importance: 'low',
+    count: 0, potential_value_gbp: 0, detail_json: JSON.stringify([]),
+    period_checked: 'not_applicable_freeagent',
+  });
 
   emit({ step: 'score', message: 'Calculating health score...' });
   const scoreBreakdown = calculateScoreBreakdown(

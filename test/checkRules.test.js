@@ -388,12 +388,14 @@ test('with no active period key, a non-reserved label falls back to itself rathe
   assert.equal(resolvePeriodChecked(undefined, null), undefined);
 });
 
-test('RESERVED_PERIOD_LABELS contains exactly the five semantic states, nothing else', () => {
-  // 'not_vat_registered' (the not_applicable category) joined the other four this session — see
-  // periodStatus.js for the full model. This test exists specifically to catch a future label
-  // being added without updating resolveCheckDisplayStatus to handle it.
+test('RESERVED_PERIOD_LABELS contains exactly the six semantic states, nothing else', () => {
+  // 'not_vat_registered' and 'not_applicable_freeagent' (both the not_applicable category) joined
+  // the other four across sessions — see periodStatus.js for the full model. This test exists
+  // specifically to catch a future label being added without updating resolveCheckDisplayStatus to
+  // handle it.
   assert.deepEqual([...RESERVED_PERIOD_LABELS].sort(), [
-    'needs_sync', 'not_configured', 'not_vat_registered', 'out_of_scope', 'unavailable',
+    'needs_sync', 'not_applicable_freeagent', 'not_configured', 'not_vat_registered',
+    'out_of_scope', 'unavailable',
   ]);
 });
 
