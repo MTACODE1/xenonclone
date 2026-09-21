@@ -6,7 +6,7 @@ const {
   mergeEntityCache, getCachedEntities, getEntityCacheWatermark,
   createSyncRun, finishSyncRun, activateSyncRun,
   insertIssue: insertIssueDb, replaceIssueForCheck, getScoringObservationsForRun,
-  upsertHealthScore,
+  upsertHealthScore, upsertTransactionCounts,
 } = require('../db/queries');
 const {
   NON_SCORED_CHECKS, findDuplicates, excludeDuplicateDrafts, findDuplicateContacts,
@@ -361,6 +361,34 @@ async function runFreeAgentSync(companyId, progressCallback, options = {}) {
   await upsertFreeAgentOrganisation({
     freeagent_company_id: companyId, name: org.name, client_ref: org.client_ref, tag: org.tag,
     connection_status: 'connected', last_synced_at: null,
+  });
+
+  // activateSyncRun refuses to activate a full run without a staged transaction_counts row (see
+  // queries.js) — bank/journal data isn't fetched yet for FreeAgent (Group B, not built), so those
+  // fields are 0 rather than omitted; everything else uses the same data the checks above already
+  // computed.
+  emit({ step: 'transaction_counts', message: 'Calculating transaction counts...' });
+  const recentAccrec = inPeriod(invoices.filter(i => i.type === 'ACCREC' && ['AUTHORISED', 'PAID', 'VOIDED'].includes(i.status)));
+  const recentAccpay = inPeriod(invoices.filter(i => i.type === 'ACCPAY' && ['AUTHORISED', 'PAID', 'VOIDED'].includes(i.status)));
+  const recentSalesCN = inPeriod(salesCredits).filter(c => ['AUTHORISED', 'PAID', 'VOIDED'].includes(c.status));
+  const turnover = recentAccrec
+    .filter(i => i.status === 'AUTHORISED' || i.status === 'PAID')
+    .reduce((s, i) => s + (i.subTotal || 0), 0);
+  upsertTransactionCounts(orgId, {
+    period: period.type,
+    period_start: period.start,
+    period_end: period.end,
+    months_covered: period.monthsCovered,
+    turnover,
+    total_transactions: recentAccrec.length + recentAccpay.length + recentSalesCN.length,
+    customer_invoices: recentAccrec.length,
+    supplier_bills: recentAccpay.length,
+    credit_notes_sales: recentSalesCN.length,
+    credit_notes_purchase: 0,
+    bank_processed: 0,
+    journals: 0,
+    run_id: runId,
+    is_active: 0,
   });
 
   await activateSyncRun(orgId, runId, options.checkType || null);
