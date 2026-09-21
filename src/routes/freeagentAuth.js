@@ -10,7 +10,6 @@ const {
   toggleStaffOrgAccess,
 } = require('../db/queries');
 const { isStaffManager } = require('../services/staffPermissions');
-const { idFromUrl } = require('../services/freeagentAdapter');
 
 // Stage 1: mirrors src/routes/auth.js's Xero flow exactly (one OAuth grant -> one new Akrio
 // client) rather than FreeAgent's separate Practice Dashboard/company-picker flow — see
@@ -36,7 +35,12 @@ router.get('/callback', async (req, res) => {
       : new Date(Date.now() + 1800000).toISOString();
 
     const company = await fetchCompanyProfile(tokenSet.access_token);
-    const companyId = idFromUrl(company.url);
+    // Unlike invoice/bill/contact URLs, FreeAgent's own /v2/company url has no trailing numeric id
+    // (it's a fixed ".../company" endpoint per company) — idFromUrl's regex can't extract one from
+    // it and falls back to returning the whole URL string, which then breaks Express route params
+    // (:tenantId/:companyId) wherever it's used since it contains "/" characters. The company
+    // object's own `id` field is the real numeric identifier and must be used here instead.
+    const companyId = String(company.id);
 
     await upsertFreeAgentToken({
       freeagent_company_id: companyId,
