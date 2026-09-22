@@ -112,6 +112,33 @@ const staffAuthRoutes = require('./src/routes/staffAuth');
 const staffRoutes = require('./src/routes/staff');
 const { requireStaffLogin, requireStaffManager, requireSettingsAccess } = require('./src/middleware/staffAuth');
 
+// TEMPORARY one-off verification for the Total Transactions double-counting fix (2026-09-22) —
+// logs to stdout only. ?sync=1 re-syncs BCB Solutions Ltd (the most dramatic case: Xenon=7,
+// pre-fix Akrio=711); with no query param it dumps the current local transaction_counts row.
+// Will be removed in the very next commit right after use.
+app.get(BASE_PATH + '/__debug_txcount__', async (req, res) => {
+  try {
+    const db = getDb();
+    const tenantId = 'dc8b7142-5660-4018-a9b8-967e0afd7334';
+    if (req.query.sync === '1') {
+      const started = await startJob(`${tenantId}:all:since_lock_date::`, progress =>
+        syncOrganisation(tenantId, progress, { period: { type: 'since_lock_date' } }),
+        { tenantId, mode: 'full' });
+      console.log(`[debug_txcount] enqueued: ${JSON.stringify({ id: started.job.id, existing: started.existing })}`);
+      return res.send('enqueued');
+    }
+    const row = db.prepare(
+      `SELECT total_transactions, customer_invoices, supplier_bills, credit_notes_sales, credit_notes_purchase, bank_processed, journals, synced_at
+       FROM transaction_counts WHERE org_id = 89 ORDER BY synced_at DESC LIMIT 1`
+    ).get();
+    console.log(`[debug_txcount] BCB Solutions latest transaction_counts: ${JSON.stringify(row)}`);
+    res.send('logged');
+  } catch (err) {
+    console.error('[debug_txcount] error:', err.message, err.stack);
+    res.status(500).send('error, see logs');
+  }
+});
+
 app.use(BASE_PATH + '/login', staffAuthRoutes); // reachable pre-auth
 app.use(requireStaffLogin); // everything below requires a staff session
 
