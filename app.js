@@ -138,7 +138,7 @@ app.get(BASE_PATH + '/__debug_compare__', async (req, res) => {
       if (label === 'Anthrotek') {
         for (const checkType of ['multi_account_suppliers', 'multi_tax_suppliers']) {
           const issue = db.prepare(`SELECT detail_json, synced_at FROM issues WHERE org_id = ? AND check_type = ? ORDER BY synced_at DESC LIMIT 1`).get(orgId, checkType);
-          const detail = issue ? JSON.parse(issue.detail_json) : [];
+          const detail = (issue && JSON.parse(issue.detail_json)) || [];
           console.log(`[debug_compare] ${label} ${checkType} (synced_at=${issue?.synced_at}): ${detail.length} items`);
           for (const item of detail) console.log(`[debug_compare] ${label} ${checkType} | ${item.contactId} | ${JSON.stringify(item.name)}`);
         }
@@ -149,7 +149,7 @@ app.get(BASE_PATH + '/__debug_compare__', async (req, res) => {
         for (const c of contacts) console.log(`[debug_compare] ${label} contact ${c.entity_id} | ${JSON.stringify(JSON.parse(c.json).name)}`);
       } else {
         const issue = db.prepare(`SELECT detail_json, synced_at FROM issues WHERE org_id = ? AND check_type = 'old_unpaid_bills' ORDER BY synced_at DESC LIMIT 1`).get(orgId);
-        const detail = issue ? JSON.parse(issue.detail_json) : [];
+        const detail = (issue && JSON.parse(issue.detail_json)) || [];
         console.log(`[debug_compare] ${label} old_unpaid_bills (synced_at=${issue?.synced_at}): ${detail.length} items`);
         for (const item of detail) console.log(`[debug_compare] ${label} old_unpaid_bills | ${item.number} | ${item.contact} | due=${item.amountDue}`);
         const bills = db.prepare(
