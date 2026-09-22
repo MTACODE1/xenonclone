@@ -112,50 +112,6 @@ const staffAuthRoutes = require('./src/routes/staffAuth');
 const staffRoutes = require('./src/routes/staff');
 const { requireStaffLogin, requireStaffManager, requireSettingsAccess } = require('./src/middleware/staffAuth');
 
-// TEMPORARY one-off diagnostic for the Anthrotek Ltd Xenon-vs-Akrio comparison (2026-09-22) —
-// logs to stdout only (nothing in the HTTP response), no data ever leaves via the network except
-// through CloudWatch. Will be removed in the very next commit right after use.
-app.get(BASE_PATH + '/__debug_anthrotek__', async (req, res) => {
-  try {
-    const db = getDb();
-    const totalIssues = db.prepare('SELECT COUNT(*) c FROM issues').get();
-    const totalOrgs = db.prepare('SELECT COUNT(*) c FROM organisations').get();
-    const totalEntities = db.prepare('SELECT COUNT(*) c FROM xero_entity_cache').get();
-    console.log(`[debug_anthrotek] TOTALS: issues=${totalIssues.c} organisations=${totalOrgs.c} xero_entity_cache=${totalEntities.c}`);
-    const orgRows = db.prepare(`SELECT id, name, xero_tenant_id FROM organisations WHERE name LIKE '%Anthrotek%' OR xero_tenant_id = ?`).all('5b899db0-0d45-4bba-97c7-825ecce3262d');
-    console.log(`[debug_anthrotek] local org rows: ${JSON.stringify(orgRows)}`);
-    for (const orgRow of orgRows) {
-      const orgId = orgRow.id;
-      const allIssues = db.prepare(
-        `SELECT run_id, check_type, is_active, count, synced_at FROM issues WHERE org_id = ? AND check_type IN ('multi_account_suppliers','multi_tax_suppliers')`
-      ).all(orgId);
-      console.log(`[debug_anthrotek] org ${orgId} issue rows: ${JSON.stringify(allIssues)}`);
-      for (const checkType of ['multi_account_suppliers', 'multi_tax_suppliers']) {
-        const issue = db.prepare(
-          `SELECT detail_json FROM issues WHERE org_id = ? AND check_type = ? ORDER BY synced_at DESC LIMIT 1`
-        ).get(orgId, checkType);
-        const detail = issue ? JSON.parse(issue.detail_json) : [];
-        console.log(`[debug_anthrotek] org ${orgId} ${checkType}: ${detail.length} items`);
-        for (const item of detail) {
-          console.log(`[debug_anthrotek] org ${orgId} ${checkType} | ${item.contactId} | ${JSON.stringify(item.name)}`);
-        }
-      }
-      const contacts = db.prepare(
-        `SELECT entity_id, json FROM xero_entity_cache WHERE org_id = ? AND entity_type = 'contact'
-         AND (LOWER(json) LIKE '%peltier%' OR LOWER(json) LIKE '%tareque%' OR LOWER(json) LIKE '%companies house%')`
-      ).all(orgId);
-      for (const c of contacts) {
-        const parsed = JSON.parse(c.json);
-        console.log(`[debug_anthrotek] org ${orgId} contact ${c.entity_id} | name=${JSON.stringify(parsed.name)}`);
-      }
-    }
-    res.send('logged');
-  } catch (err) {
-    console.error('[debug_anthrotek] error:', err.message, err.stack);
-    res.status(500).send('error, see logs');
-  }
-});
-
 app.use(BASE_PATH + '/login', staffAuthRoutes); // reachable pre-auth
 app.use(requireStaffLogin); // everything below requires a staff session
 
