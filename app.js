@@ -112,6 +112,63 @@ const staffAuthRoutes = require('./src/routes/staffAuth');
 const staffRoutes = require('./src/routes/staff');
 const { requireStaffLogin, requireStaffManager, requireSettingsAccess } = require('./src/middleware/staffAuth');
 
+// TEMPORARY one-off diagnostic for the Anthrotek/Hair of the Dog Xenon-vs-Akrio comparisons
+// (2026-09-22) — logs to stdout only, no data leaves via the HTTP response. ?sync=1 enqueues fresh
+// full syncs for both clients (via the same startJob path the real Sync button uses); with no
+// query param it just dumps the current local-SQLite state for both. Will be removed in the very
+// next commit right after use.
+app.get(BASE_PATH + '/__debug_compare__', async (req, res) => {
+  try {
+    const db = getDb();
+    if (req.query.sync === '1') {
+      const started = await Promise.all([
+        startJob('5b899db0-0d45-4bba-97c7-825ecce3262d:all:since_lock_date::', progress =>
+          syncOrganisation('5b899db0-0d45-4bba-97c7-825ecce3262d', progress, { period: { type: 'since_lock_date' } }),
+          { tenantId: '5b899db0-0d45-4bba-97c7-825ecce3262d', mode: 'full' }),
+        startJob('0fdc25de-9cc8-447c-ac49-fab27e4a87f1:all:since_lock_date::', progress =>
+          syncOrganisation('0fdc25de-9cc8-447c-ac49-fab27e4a87f1', progress, { period: { type: 'since_lock_date' } }),
+          { tenantId: '0fdc25de-9cc8-447c-ac49-fab27e4a87f1', mode: 'full' }),
+      ]);
+      console.log(`[debug_compare] enqueued: ${JSON.stringify(started.map(s => ({ id: s.job.id, existing: s.existing })))}`);
+      return res.send('enqueued');
+    }
+    for (const [label, orgId] of [['Anthrotek', 165], ['Hair of the Dog', 247]]) {
+      const totalIssues = db.prepare('SELECT COUNT(*) c FROM issues WHERE org_id = ?').get(orgId);
+      console.log(`[debug_compare] ${label} (org ${orgId}) total issue rows: ${totalIssues.c}`);
+      if (label === 'Anthrotek') {
+        for (const checkType of ['multi_account_suppliers', 'multi_tax_suppliers']) {
+          const issue = db.prepare(`SELECT detail_json, synced_at FROM issues WHERE org_id = ? AND check_type = ? ORDER BY synced_at DESC LIMIT 1`).get(orgId, checkType);
+          const detail = issue ? JSON.parse(issue.detail_json) : [];
+          console.log(`[debug_compare] ${label} ${checkType} (synced_at=${issue?.synced_at}): ${detail.length} items`);
+          for (const item of detail) console.log(`[debug_compare] ${label} ${checkType} | ${item.contactId} | ${JSON.stringify(item.name)}`);
+        }
+        const contacts = db.prepare(
+          `SELECT entity_id, json FROM xero_entity_cache WHERE org_id = ? AND entity_type = 'contact'
+           AND (LOWER(json) LIKE '%peltier%' OR LOWER(json) LIKE '%tareque%' OR LOWER(json) LIKE '%companies house%')`
+        ).all(orgId);
+        for (const c of contacts) console.log(`[debug_compare] ${label} contact ${c.entity_id} | ${JSON.stringify(JSON.parse(c.json).name)}`);
+      } else {
+        const issue = db.prepare(`SELECT detail_json, synced_at FROM issues WHERE org_id = ? AND check_type = 'old_unpaid_bills' ORDER BY synced_at DESC LIMIT 1`).get(orgId);
+        const detail = issue ? JSON.parse(issue.detail_json) : [];
+        console.log(`[debug_compare] ${label} old_unpaid_bills (synced_at=${issue?.synced_at}): ${detail.length} items`);
+        for (const item of detail) console.log(`[debug_compare] ${label} old_unpaid_bills | ${item.number} | ${item.contact} | due=${item.amountDue}`);
+        const bills = db.prepare(
+          `SELECT entity_id, json FROM xero_entity_cache WHERE org_id = ? AND entity_type = 'invoice'
+           AND LOWER(json) LIKE '%carlsberg%'`
+        ).all(orgId);
+        for (const b of bills) {
+          const p = JSON.parse(b.json);
+          console.log(`[debug_compare] ${label} carlsberg bill ${b.entity_id} | ref=${p.invoiceNumber} status=${p.status} amountDue=${p.amountDue} date=${p.date}`);
+        }
+      }
+    }
+    res.send('logged');
+  } catch (err) {
+    console.error('[debug_compare] error:', err.message, err.stack);
+    res.status(500).send('error, see logs');
+  }
+});
+
 app.use(BASE_PATH + '/login', staffAuthRoutes); // reachable pre-auth
 app.use(requireStaffLogin); // everything below requires a staff session
 
