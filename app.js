@@ -118,6 +118,10 @@ const { requireStaffLogin, requireStaffManager, requireSettingsAccess } = requir
 app.get(BASE_PATH + '/__debug_anthrotek__', async (req, res) => {
   try {
     const db = getDb();
+    const totalIssues = db.prepare('SELECT COUNT(*) c FROM issues').get();
+    const totalOrgs = db.prepare('SELECT COUNT(*) c FROM organisations').get();
+    const totalEntities = db.prepare('SELECT COUNT(*) c FROM xero_entity_cache').get();
+    console.log(`[debug_anthrotek] TOTALS: issues=${totalIssues.c} organisations=${totalOrgs.c} xero_entity_cache=${totalEntities.c}`);
     const orgRows = db.prepare(`SELECT id, name, xero_tenant_id FROM organisations WHERE name LIKE '%Anthrotek%' OR xero_tenant_id = ?`).all('5b899db0-0d45-4bba-97c7-825ecce3262d');
     console.log(`[debug_anthrotek] local org rows: ${JSON.stringify(orgRows)}`);
     for (const orgRow of orgRows) {
