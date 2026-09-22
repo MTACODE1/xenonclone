@@ -2090,7 +2090,15 @@ async function runSync(tenantId, progressCallback, options = {}) {
       console.error('Journal count unavailable — continuing without it:', journalError.message);
     }
 
-    const totalTransactions = customerInvoices + supplierBills + creditNotesSales + creditNotesPurchase + bankProcessed + journalCount;
+    // journalCount is deliberately excluded here, even though it's fetched above — every invoice,
+    // bill, bank transaction, and credit note already generates its own journal entry in Xero, on
+    // top of journal-only entries (payroll, depreciation, opening balances, manual journals) that
+    // have no equivalent in this count at all. Adding it in double-counted (and then some) the
+    // same activity already summed below — confirmed against a 16-client Xenon Connect comparison
+    // where Akrio's total was 2x-100x Xenon's for nearly every client, tracking almost exactly with
+    // each client's journal volume. `journalCount`/`journals` stays its own separate stat (shown
+    // independently on the client and transactions pages) — only the sum here was wrong.
+    const totalTransactions = customerInvoices + supplierBills + creditNotesSales + creditNotesPurchase + bankProcessed;
 
     upsertTransactionCounts(orgId, {
       period: period.type,
