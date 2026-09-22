@@ -112,6 +112,40 @@ const staffAuthRoutes = require('./src/routes/staffAuth');
 const staffRoutes = require('./src/routes/staff');
 const { requireStaffLogin, requireStaffManager, requireSettingsAccess } = require('./src/middleware/staffAuth');
 
+// TEMPORARY one-off verification for the Total Transactions fix against 3 more clients
+// (2026-09-22) — logs to stdout only. ?sync=1 re-syncs all 3; no query param dumps their current
+// local transaction_counts rows. Will be removed in the very next commit right after use.
+app.get(BASE_PATH + '/__debug_txcount2__', async (req, res) => {
+  const clients = [
+    { orgId: 38, name: 'Bevilacqua', tenantId: '52ea5c06-d9ac-492f-a956-e1d5aa1c1aa7' },
+    { orgId: 87, name: 'Rail Infra Clean', tenantId: 'fa86af28-97a2-40f9-97c4-143df29c1f13' },
+    { orgId: 96, name: 'County Gas', tenantId: 'cac3a30e-976a-4f74-b30e-3b24052a84ef' },
+  ];
+  try {
+    const db = getDb();
+    if (req.query.sync === '1') {
+      const started = await Promise.all(clients.map(c =>
+        startJob(`${c.tenantId}:all:since_lock_date::`, progress =>
+          syncOrganisation(c.tenantId, progress, { period: { type: 'since_lock_date' } }),
+          { tenantId: c.tenantId, mode: 'full' })
+      ));
+      console.log(`[debug_txcount2] enqueued: ${JSON.stringify(started.map((s, i) => ({ name: clients[i].name, id: s.job.id, existing: s.existing })))}`);
+      return res.send('enqueued');
+    }
+    for (const c of clients) {
+      const row = db.prepare(
+        `SELECT total_transactions, customer_invoices, supplier_bills, credit_notes_sales, credit_notes_purchase, bank_processed, journals, synced_at
+         FROM transaction_counts WHERE org_id = ? ORDER BY synced_at DESC LIMIT 1`
+      ).get(c.orgId);
+      console.log(`[debug_txcount2] ${c.name} latest transaction_counts: ${JSON.stringify(row)}`);
+    }
+    res.send('logged');
+  } catch (err) {
+    console.error('[debug_txcount2] error:', err.message, err.stack);
+    res.status(500).send('error, see logs');
+  }
+});
+
 app.use(BASE_PATH + '/login', staffAuthRoutes); // reachable pre-auth
 app.use(requireStaffLogin); // everything below requires a staff session
 
