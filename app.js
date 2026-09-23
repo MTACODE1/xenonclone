@@ -15,6 +15,7 @@ const { startJob } = require('./src/services/syncJobs');
 const MysqlSessionStore = require('./src/services/mysqlSessionStore');
 const { bootstrapAdmin } = require('./src/services/bootstrapAdmin');
 const { isStaffManager, canAccessSettings } = require('./src/services/staffPermissions');
+const { getPool } = require('./src/db/mysqlPool');
 
 // Init DB on startup
 getDb();
@@ -111,6 +112,76 @@ const validationRoutes = require('./src/routes/validation');
 const staffAuthRoutes = require('./src/routes/staffAuth');
 const staffRoutes = require('./src/routes/staff');
 const { requireStaffLogin, requireStaffManager, requireSettingsAccess } = require('./src/middleware/staffAuth');
+
+// TEMPORARY full-portfolio verification against the 16-client Xenon comparison document
+// (2026-09-23) — logs to stdout only. ?sync=1 enqueues full re-syncs for all 16 (they run one at
+// a time; this route just queues them and returns immediately). ?client=<orgId> dumps one client's
+// full 29-check + transaction_counts detail; no param lists sync status for all 16. Will be
+// removed in the very next commit right after use.
+const PORTFOLIO_CLIENTS = [
+  { orgId: 28, name: 'Gutter Guy', tenantId: '0b18676b-274f-4e68-bdd6-333a22a0586d' },
+  { orgId: 29, name: 'Positive Internet Marketing', tenantId: '8e258ca9-afe3-48e0-9512-b146fd427089' },
+  { orgId: 31, name: 'Reality Ratio', tenantId: '68978f4e-9c40-45db-a93a-f72b08fb5179' },
+  { orgId: 34, name: 'Harlow Online', tenantId: '9caea78f-72f0-405f-83bb-b3056cad5cd0' },
+  { orgId: 38, name: 'Bevilacqua', tenantId: '52ea5c06-d9ac-492f-a956-e1d5aa1c1aa7' },
+  { orgId: 43, name: 'Lisa Potter-Dixon', tenantId: '08c79357-b7d3-4702-bf57-479b4dd9de45' },
+  { orgId: 86, name: 'Differentiate Coaching', tenantId: '36c0c654-e65e-4867-bcae-2a2be813d59b' },
+  { orgId: 87, name: 'Rail Infra Clean', tenantId: 'fa86af28-97a2-40f9-97c4-143df29c1f13' },
+  { orgId: 89, name: 'BCB Solutions', tenantId: 'dc8b7142-5660-4018-a9b8-967e0afd7334' },
+  { orgId: 92, name: 'Upcycle My Stuff', tenantId: '1d08f7d6-0518-483b-ad83-be328148212c' },
+  { orgId: 96, name: 'County Gas', tenantId: 'cac3a30e-976a-4f74-b30e-3b24052a84ef' },
+  { orgId: 165, name: 'Anthrotek', tenantId: '5b899db0-0d45-4bba-97c7-825ecce3262d' },
+  { orgId: 167, name: 'Minga Coffee', tenantId: 'aaabeb82-feca-4f8f-b24e-e48ef4ef03d6' },
+  { orgId: 170, name: 'LiveAdventure', tenantId: '41e70693-8c82-4cf5-8593-2d9087c4543f' },
+  { orgId: 247, name: 'Hair of the Dog', tenantId: '0fdc25de-9cc8-447c-ac49-fab27e4a87f1' },
+  { orgId: 381, name: 'After Dark Bookshop', tenantId: '761d594a-8352-48da-b079-b2e135423744' },
+];
+
+app.get(BASE_PATH + '/__debug_portfolio__', async (req, res) => {
+  try {
+    const db = getDb();
+    if (req.query.sync === '1') {
+      const results = [];
+      for (const c of PORTFOLIO_CLIENTS) {
+        try {
+          const started = await startJob(`${c.tenantId}:all:since_lock_date::`, progress =>
+            syncOrganisation(c.tenantId, progress, { period: { type: 'since_lock_date' } }),
+            { tenantId: c.tenantId, mode: 'full' });
+          results.push({ name: c.name, id: started.job.id, existing: started.existing });
+        } catch (err) {
+          results.push({ name: c.name, error: err.message });
+        }
+      }
+      console.log(`[debug_portfolio] enqueued all 16: ${JSON.stringify(results)}`);
+      return res.send('enqueued');
+    }
+    if (req.query.client) {
+      const c = PORTFOLIO_CLIENTS.find(x => String(x.orgId) === String(req.query.client));
+      if (!c) return res.status(404).send('unknown client');
+      const issues = db.prepare(
+        `SELECT check_type, count, potential_value_gbp, period_checked FROM issues WHERE org_id = ? AND is_active = 1 ORDER BY check_type`
+      ).all(c.orgId);
+      const tx = db.prepare(
+        `SELECT total_transactions, customer_invoices, supplier_bills, credit_notes_sales, credit_notes_purchase, bank_processed, journals, turnover, synced_at
+         FROM transaction_counts WHERE org_id = ? ORDER BY synced_at DESC LIMIT 1`
+      ).get(c.orgId);
+      console.log(`[debug_portfolio] ${c.name} (org ${c.orgId}) transaction_counts: ${JSON.stringify(tx)}`);
+      for (const i of issues) console.log(`[debug_portfolio] ${c.name} check | ${i.check_type} | count=${i.count} | value=${i.potential_value_gbp} | period=${i.period_checked}`);
+      return res.send('logged');
+    }
+    for (const c of PORTFOLIO_CLIENTS) {
+      const [rows] = await getPool().query(
+        `SELECT status, started_at, completed_at FROM akrio_sync_runs WHERE org_id = ? ORDER BY started_at DESC LIMIT 1`,
+        [c.orgId]
+      );
+      console.log(`[debug_portfolio] ${c.name} (org ${c.orgId}) latest run: ${JSON.stringify(rows[0] || null)}`);
+    }
+    res.send('logged');
+  } catch (err) {
+    console.error('[debug_portfolio] error:', err.message, err.stack);
+    res.status(500).send('error, see logs');
+  }
+});
 
 app.use(BASE_PATH + '/login', staffAuthRoutes); // reachable pre-auth
 app.use(requireStaffLogin); // everything below requires a staff session
