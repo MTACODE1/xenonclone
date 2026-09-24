@@ -327,8 +327,10 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
               </div>
 
               <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
-                <button type="button" class="btn btn-ghost-primary btn-sm"
-                  onclick="event.stopPropagation();reanalyseCheck('<%= check.type %>',this)">Reanalyse</button>
+                <% if (!org.freeagent_company_id) { %>
+                  <button type="button" class="btn btn-ghost-primary btn-sm"
+                    onclick="event.stopPropagation();reanalyseCheck('<%= check.type %>',this)">Reanalyse</button>
+                <% } %>
                 <% if (hasIssues) { %>
                   <a href="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= check.type %>?<%= periodQuery %>"
                      onclick="event.stopPropagation()"

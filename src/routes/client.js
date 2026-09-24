@@ -765,6 +765,13 @@ router.post('/:tenantId/check/:checkType/reanalyse', verifyCsrf, async (req, res
   if (!CHECK_DEFINITIONS.some(check => check.type === checkType)) {
     return res.status(404).json({ error: 'Unknown check type' });
   }
+  // FreeAgent sync (Stage 1) only supports full syncs — see the comment at the top of
+  // freeagentSync.js. A scoped reanalyse here only persists the issue row for `checkType`
+  // and reactivates just that one, leaving every other check's issue row untouched/inactive,
+  // so it silently reads as "Not synced" on the dashboard until a real full sync runs.
+  if (org.freeagent_company_id) {
+    return res.status(400).json({ error: 'Per-check reanalyse is not yet supported for FreeAgent clients — run a full sync instead.' });
+  }
   let period, resolvedPeriod;
   try {
     period = periodInput(req.query, org.period_type || getSetting('default_sync_period') || 'since_lock_date');
