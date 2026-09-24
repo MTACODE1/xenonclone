@@ -69,10 +69,14 @@ async function getOrganisationByTenantId(tenantId) {
   return rows[0] || null;
 }
 
+// tenantId here is the same universal identifier getOrganisationByTenantId resolves — either a
+// Xero tenant id or a FreeAgent company id. Matching on both columns (only one is ever non-null
+// per org) means this silently updates 0 rows for a FreeAgent org otherwise, since its
+// xero_tenant_id is null.
 async function updateOrganisationMeta(tenantId, { client_ref, tag }) {
   await getPool().query(
-    `UPDATE akrio_organisations SET client_ref = ?, tag = ? WHERE xero_tenant_id = ?`,
-    [client_ref, tag, tenantId]
+    `UPDATE akrio_organisations SET client_ref = ?, tag = ? WHERE xero_tenant_id = ? OR freeagent_company_id = ?`,
+    [client_ref, tag, tenantId, tenantId]
   );
 }
 

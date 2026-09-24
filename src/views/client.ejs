@@ -1,6 +1,15 @@
 <%- include('partials/header', { currentPage: 'client' }) %>
 
 <%
+// These fields store plain YYYY-MM-DD strings — reformat to UK DD/MM/YYYY for display.
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+function fmtDisplayDate(val) {
+  if (typeof val !== 'string' || !ISO_DATE_RE.test(val)) return val;
+  const [y, m, d] = val.split('-');
+  return `${d}/${m}/${y}`;
+}
+%>
+<%
 const score = org.score || 0;
 const scoreColor = score >= 80 ? '#13DEB9' : score >= 60 ? '#FFAE1F' : '#FA896B';
 const totalIssues = org.total_issues || 0;
@@ -401,7 +410,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
           <% statementImports.forEach(item => { %>
             <tr style="border-top:1px solid #f2f6fa;">
               <td style="padding:8px 12px;"><strong><%= item.bank_account_name %></strong><div><%= item.original_filename %></div><small style="color:#7C8FAC;"><%= item.file_sha256.slice(0,12) %>… · <%= item.imported_at %></small></td>
-              <td><%= item.statement_start_date %> – <%= item.statement_end_date %>
+              <td><%= fmtDisplayDate(item.statement_start_date) %> – <%= fmtDisplayDate(item.statement_end_date) %>
                 <% const evidenceAgeDays = Math.floor((Date.now() - new Date(item.statement_end_date + 'T00:00:00Z')) / 86400000); %>
                 <span class="chip" style="margin-left:4px;background:<%= evidenceAgeDays > 35 ? '#FFF4E5' : '#E6FFFA' %>;color:<%= evidenceAgeDays > 35 ? '#B45309' : '#047857' %>;"><%= evidenceAgeDays > 35 ? 'Stale evidence' : 'Current evidence' %></span>
                 <div>Opening: <%= item.opening_balance == null ? '—' : '£' + Number(item.opening_balance).toFixed(2) %> · Closing: £<%= Number(item.closing_balance).toFixed(2) %></div>
@@ -515,7 +524,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
         <div style="border-top:1px solid #e5eaef;padding:12px 20px;font-size:0.8rem;">
           <% filedAccounts.forEach(item => { %>
             <div style="padding:6px 0;border-bottom:1px solid #f2f6fa;">
-              <strong><%= item.filing_date %></strong> · Filed net assets £<%= Number(item.net_assets).toLocaleString('en-GB',{minimumFractionDigits:2}) %> · Xero: <%= item.xero_net_assets == null ? 'Needs sync' : '£' + Number(item.xero_net_assets).toLocaleString('en-GB',{minimumFractionDigits:2}) %>
+              <strong><%= fmtDisplayDate(item.filing_date) %></strong> · Filed net assets £<%= Number(item.net_assets).toLocaleString('en-GB',{minimumFractionDigits:2}) %> · Xero: <%= item.xero_net_assets == null ? 'Needs sync' : '£' + Number(item.xero_net_assets).toLocaleString('en-GB',{minimumFractionDigits:2}) %>
               <span style="font-size:0.7rem;padding:1px 6px;border-radius:3px;background:<%= item.source === 'companies_house' ? '#E1F5EE' : '#F1EFE8' %>;color:<%= item.source === 'companies_house' ? '#0F6E56' : '#5F5E5A' %>;"><%= item.source === 'companies_house' ? 'Companies House (automatic)' : 'Accountant entered' %></span>
               <% if (item.source_note) { %> · <%= item.source_note %><% } %><% if (item.source_document_path) { %> · document stored privately<% } %>
               <% if (item.taxonomy_concept) { %>

@@ -1,9 +1,21 @@
 <%- include('partials/header', { currentPage: 'client' }) %>
+<%
+const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
+// Finding values store dates as plain YYYY-MM-DD strings (toDateString() throughout the app) —
+// reformat to UK DD/MM/YYYY for display without touching the underlying data or any other check
+// that reads these same fields.
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+function fmtDisplayDate(val) {
+  if (typeof val !== 'string' || !ISO_DATE_RE.test(val)) return val;
+  const [y, m, d] = val.split('-');
+  return `${d}/${m}/${y}`;
+}
+%>
 
 <nav class="breadcrumb">
   <a href="<%= basePath %>/">Home</a>
   <span>/</span>
-  <a href="<%= basePath %>/client/<%= org.xero_tenant_id %>"><%= org.name %></a>
+  <a href="<%= basePath %>/client/<%= orgIdentifier %>"><%= org.name %></a>
   <span>/</span>
   <span class="breadcrumb-current"><%= def ? def.label : checkType %></span>
 </nav>
@@ -96,7 +108,7 @@
 %>
 <div class="bb-account-card <%= !hasDisc ? 'bb-card-ok' : '' %>" data-has-disc="<%= hasDisc ? '1' : '0' %>" data-account-id="<%= acc.bank_account_id %>">
   <%# Exclude button %>
-  <form method="POST" action="<%= basePath %>/client/<%= org.xero_tenant_id %>/bank-account-exclusion" style="position:absolute;top:10px;right:10px;">
+  <form method="POST" action="<%= basePath %>/client/<%= orgIdentifier %>/bank-account-exclusion" style="position:absolute;top:10px;right:10px;">
     <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
     <input type="hidden" name="bank_account_id" value="<%= acc.bank_account_id %>">
     <input type="hidden" name="excluded" value="<%= isExcluded ? '0' : '1' %>">
@@ -118,7 +130,7 @@
   <%# Inline add-balance form (hidden until "Click to add balance" clicked) %>
   <% if (acc.statement_balance == null) { %>
   <div id="bb-add-form-<%= acc.bank_account_id %>" style="display:none;margin:4px 0 8px;">
-    <form method="POST" action="<%= basePath %>/client/<%= org.xero_tenant_id %>/bank-reconciliation" style="display:flex;gap:6px;align-items:center;">
+    <form method="POST" action="<%= basePath %>/client/<%= orgIdentifier %>/bank-reconciliation" style="display:flex;gap:6px;align-items:center;">
       <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
       <input type="hidden" name="bank_account_id" value="<%= acc.bank_account_id %>">
       <input type="number" step="0.01" name="statement_balance" class="form-input" style="flex:1;padding:5px 8px;font-size:0.82rem;" placeholder="Enter closing balance" autofocus>
@@ -128,7 +140,7 @@
   </div>
   <% } else { %>
   <div id="bb-edit-form-<%= acc.bank_account_id %>" style="display:none;margin:4px 0 8px;">
-    <form method="POST" action="<%= basePath %>/client/<%= org.xero_tenant_id %>/bank-reconciliation" style="display:flex;gap:6px;align-items:center;">
+    <form method="POST" action="<%= basePath %>/client/<%= orgIdentifier %>/bank-reconciliation" style="display:flex;gap:6px;align-items:center;">
       <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
       <input type="hidden" name="bank_account_id" value="<%= acc.bank_account_id %>">
       <input type="number" step="0.01" name="statement_balance" value="<%= acc.statement_balance %>" class="form-input" style="flex:1;padding:5px 8px;font-size:0.82rem;">
@@ -153,16 +165,16 @@
 
   <% if (acc.xero_balance_as_of) { %><p style="font-size:0.7rem;color:var(--text-muted);margin:6px 0 10px;">Xero balance as of <%= acc.xero_balance_as_of %></p><% } %>
 
-  <a href="<%= basePath %>/client/<%= org.xero_tenant_id %>#statement-evidence" class="bb-upload-link">Upload Supporting Documents</a>
+  <a href="<%= basePath %>/client/<%= orgIdentifier %>#statement-evidence" class="bb-upload-link">Upload Supporting Documents</a>
 
   <div class="bb-action-row">
-    <a href="<%= basePath %>/client/<%= org.xero_tenant_id %>#bank-reconciliation" class="btn btn-primary btn-sm" style="background:#16a34a;border-color:#16a34a;min-width:90px;">Process</a>
+    <a href="<%= basePath %>/client/<%= orgIdentifier %>#bank-reconciliation" class="btn btn-primary btn-sm" style="background:#16a34a;border-color:#16a34a;min-width:90px;">Process</a>
     <% if (acc.statement_balance != null) { %>
       <button type="button" class="btn btn-outlined btn-sm" onclick="toggleBbEditForm('<%= acc.bank_account_id %>')">Edit Balance</button>
     <% } %>
   </div>
   <div style="margin-top:8px;">
-    <a href="<%= basePath %>/client/<%= org.xero_tenant_id %>#bank-reconciliation" class="btn btn-outlined btn-sm" style="width:100%;text-align:center;border-color:#16a34a;color:#16a34a;">Mark as "OK"</a>
+    <a href="<%= basePath %>/client/<%= orgIdentifier %>#bank-reconciliation" class="btn btn-outlined btn-sm" style="width:100%;text-align:center;border-color:#16a34a;color:#16a34a;">Mark as "OK"</a>
   </div>
   <% if (isExcluded) { %><div style="margin-top:6px;font-size:0.75rem;color:var(--text-muted);text-align:center;">Excluded from checks</div><% } %>
 </div>
@@ -225,9 +237,9 @@ function toggleBbEditForm(id) {
         </label>
       </div>
     <% } %>
-    <form id="bulkReview" method="post" action="<%= basePath %>/client/<%= org.xero_tenant_id %>/check/<%= checkType %>/review"></form>
+    <form id="bulkReview" method="post" action="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= checkType %>/review"></form>
     <% if (status === 'active' && pagination.total > 0) { %>
-      <form id="bulkAll" method="post" action="<%= basePath %>/client/<%= org.xero_tenant_id %>/check/<%= checkType %>/review"></form>
+      <form id="bulkAll" method="post" action="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= checkType %>/review"></form>
       <div class="table-filters">
         <input form="bulkAll" type="hidden" name="csrf_token" value="<%= csrfToken %>">
         <input form="bulkAll" type="hidden" name="return_status" value="<%= status %>">
@@ -354,7 +366,7 @@ function toggleBbEditForm(id) {
                   <% } else if (Array.isArray(val)) { %>
                     <%= val.join(', ') %>
                   <% } else { %>
-                    <%= val != null ? val : '—' %>
+                    <%= val != null ? fmtDisplayDate(val) : '—' %>
                   <% } %>
                 </td>
                 <% if (key === 'date' && mainHasAge) { %>
@@ -383,7 +395,7 @@ function toggleBbEditForm(id) {
                   <div class="text-muted">Until <%= new Date(item.ignored_until).toLocaleDateString('en-GB') %></div>
                 <% } %>
                 <% if (item.notes) { %><div class="text-muted"><%= item.notes %></div><% } %>
-                <form method="post" action="<%= basePath %>/client/<%= org.xero_tenant_id %>/check/<%= checkType %>/review" style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap;">
+                <form method="post" action="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= checkType %>/review" style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap;">
                   <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
                   <input type="hidden" name="finding_key" value="<%= item.finding_key %>">
                   <input type="hidden" name="return_status" value="<%= status %>">
@@ -397,7 +409,7 @@ function toggleBbEditForm(id) {
                   <% } %>
                 </form>
                 <% if (item.standaloneNote) { %><div class="text-muted" style="margin-top:4px;"><%= item.standaloneNote %></div><% } %>
-                <form method="post" action="<%= basePath %>/client/<%= org.xero_tenant_id %>/check/<%= checkType %>/note" style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;">
+                <form method="post" action="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= checkType %>/note" style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;">
                   <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
                   <input type="hidden" name="finding_key" value="<%= item.finding_key %>">
                   <input type="hidden" name="return_status" value="<%= status %>">
@@ -407,7 +419,7 @@ function toggleBbEditForm(id) {
                 </form>
                 <% const contactName = item.contact || item.name; %>
                 <% if (contactName) { %>
-                  <form method="post" action="<%= basePath %>/client/<%= org.xero_tenant_id %>/check/<%= checkType %>/ignore-contact" style="margin-top:4px;"
+                  <form method="post" action="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= checkType %>/ignore-contact" style="margin-top:4px;"
                     onsubmit="return confirm('Permanently ignore <%= contactName %> from this check? This applies from the next sync onward, for every finding on this contact.')">
                     <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
                     <input type="hidden" name="contact_name" value="<%= contactName %>">
@@ -459,7 +471,7 @@ function toggleBbEditForm(id) {
                                   <% } else if (key === 'amount' && typeof val === 'number') { %>
                                     £<%= Number(val).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}) %>
                                   <% } else { %>
-                                    <%= val != null ? val : '—' %>
+                                    <%= val != null ? fmtDisplayDate(val) : '—' %>
                                   <% } %>
                                 </td>
                               <% }) %>
@@ -483,7 +495,7 @@ function toggleBbEditForm(id) {
                                     <%= tx.ok ? 'OK' : 'Unreviewed' %>
                                   </span>
                                   <% if (tx.notes) { %><div class="text-muted"><%= tx.notes %></div><% } %>
-                                  <form method="post" action="<%= basePath %>/client/<%= org.xero_tenant_id %>/check/<%= checkType %>/line-review" style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;">
+                                  <form method="post" action="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= checkType %>/line-review" style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;">
                                     <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
                                     <input type="hidden" name="finding_key" value="<%= item.finding_key %>">
                                     <input type="hidden" name="line_key" value="<%= tx.lineKey %>">

@@ -1,4 +1,13 @@
 <%- include('partials/header', { currentPage: 'panorama' }) %>
+<%
+// These fields store plain YYYY-MM-DD strings — reformat to UK DD/MM/YYYY for display.
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+function fmtDisplayDate(val) {
+  if (typeof val !== 'string' || !ISO_DATE_RE.test(val)) return val;
+  const [y, m, d] = val.split('-');
+  return `${d}/${m}/${y}`;
+}
+%>
 
 <div class="page-header">
   <h4>Data Quality Panorama</h4>
@@ -94,16 +103,16 @@
         <% if (orgs.length === 0) { %>
           <tr><td colspan="9" class="text-center text-muted" style="padding: 48px;">No clients found.</td></tr>
         <% } %>
-        <% orgs.forEach(org => { %>
+        <% orgs.forEach(org => { const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id; %>
           <tr>
             <td>
-              <a href="<%= basePath %>/client/<%= org.xero_tenant_id %>" class="font-medium"><%= org.name %></a>
+              <a href="<%= basePath %>/client/<%= orgIdentifier %>" class="font-medium"><%= org.name %></a>
               <% if (org.client_ref) { %><div class="text-muted" style="font-size: 0.75rem;"><%= org.client_ref %></div><% } %>
               <% if (org.connection_status === 'disconnected') { %>
                 <div class="text-error" style="font-size: 0.75rem;">Disconnected</div>
               <% } %>
               <% if (org.isStale) { %>
-                <div class="text-warning" style="font-size: 0.75rem;">Verified sync stale<%= org.last_successful_sync_at ? ' · ' + org.last_successful_sync_at.slice(0,10) : '' %></div>
+                <div class="text-warning" style="font-size: 0.75rem;">Verified sync stale<%= org.last_successful_sync_at ? ' · ' + fmtDisplayDate(org.last_successful_sync_at.slice(0,10)) : '' %></div>
               <% } %>
             </td>
             <td class="text-center">
@@ -122,7 +131,7 @@
                   <summary style="cursor:pointer;color:var(--primary)"><%= org.total_issues %></summary>
                   <div style="position:absolute;background:white;border:1px solid var(--divider);padding:8px 12px;z-index:5;text-align:left;box-shadow:var(--shadow-md);min-width:220px">
                     <% org.issueBreakdown.forEach(issue => { %>
-                      <a style="display:flex;justify-content:space-between;gap:12px;padding:4px 0" href="<%= basePath %>/client/<%= org.xero_tenant_id %>/check/<%= issue.checkType %>">
+                      <a style="display:flex;justify-content:space-between;gap:12px;padding:4px 0" href="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= issue.checkType %>">
                         <span><%= issue.checkType.replaceAll('_',' ') %></span><strong><%= issue.count %></strong>
                       </a>
                     <% }) %>
@@ -133,15 +142,15 @@
             <td class="text-right text-muted">
               <%= org.total_potential_errors_gbp ? '£' + Number(org.total_potential_errors_gbp).toLocaleString('en-GB', {minimumFractionDigits:2,maximumFractionDigits:2}) : '—' %>
             </td>
-            <td class="text-center text-muted" style="font-size: 0.75rem;"><%= org.most_recent_transaction || '—' %></td>
-            <td class="text-center text-muted" style="font-size: 0.75rem;"><%= org.last_bank_reconciled || '—' %></td>
+            <td class="text-center text-muted" style="font-size: 0.75rem;"><%= org.most_recent_transaction ? fmtDisplayDate(org.most_recent_transaction) : '—' %></td>
+            <td class="text-center text-muted" style="font-size: 0.75rem;"><%= org.last_bank_reconciled ? fmtDisplayDate(org.last_bank_reconciled) : '—' %></td>
             <td class="text-center <%= (org.unreconciled_bank_items || 0) > 0 ? 'text-error font-medium' : 'text-muted' %>">
               <%= org.unreconciled_bank_items != null ? org.unreconciled_bank_items : '—' %>
             </td>
-            <td class="text-center text-muted" style="font-size: 0.75rem;"><%= org.lock_date || '—' %></td>
+            <td class="text-center text-muted" style="font-size: 0.75rem;"><%= org.lock_date ? fmtDisplayDate(org.lock_date) : '—' %></td>
             <td class="text-right">
-              <a href="<%= basePath %>/client/<%= org.xero_tenant_id %>" class="btn btn-ghost-primary btn-sm">Open</a>
-              <button onclick="syncClient('<%= org.xero_tenant_id %>', this)" class="btn btn-ghost-primary btn-sm">Sync</button>
+              <a href="<%= basePath %>/client/<%= orgIdentifier %>" class="btn btn-ghost-primary btn-sm">Open</a>
+              <button onclick="syncClient('<%= orgIdentifier %>', this)" class="btn btn-ghost-primary btn-sm">Sync</button>
             </td>
           </tr>
         <% }) %>

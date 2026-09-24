@@ -280,16 +280,16 @@ function addBandRow() {
       </tr>
     </thead>
     <tbody>
-      <% orgs.forEach(org => { %>
+      <% orgs.forEach(org => { const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id; %>
         <tr class="tag-row" data-name="<%= org.name.toLowerCase() %>">
           <td style="position:sticky;left:0;z-index:1;background:var(--surface);font-weight:500;">
-            <a href="<%= basePath %>/client/<%= org.xero_tenant_id %>"><%= org.name %></a>
+            <a href="<%= basePath %>/client/<%= orgIdentifier %>"><%= org.name %></a>
           </td>
           <% allTags.forEach(tag => { %>
             <td style="text-align:center;">
               <form method="POST" action="<%= basePath %>/settings/tags/assign">
                 <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
-                <input type="hidden" name="tenant_id" value="<%= org.xero_tenant_id %>">
+                <input type="hidden" name="tenant_id" value="<%= orgIdentifier %>">
                 <input type="hidden" name="tag_name" value="<%= tag %>">
                 <label class="toggle-switch" title="<%= org.tag === tag ? 'Remove tag' : 'Assign tag' %>">
                   <input type="checkbox" onchange="this.form.submit()" <%= org.tag === tag ? 'checked' : '' %>>

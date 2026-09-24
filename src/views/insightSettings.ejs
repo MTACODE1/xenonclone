@@ -1,6 +1,7 @@
 <%- include('partials/header', { currentPage: 'client' }) %>
 
 <%
+const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
 function selectedFor(category) { return mappings[category] || []; }
 const accountsJson = JSON.stringify(accounts.map(a => ({ code: a.account_code, name: a.account_name })));
 const widgetLabels = {
@@ -99,7 +100,7 @@ const navItems = [
 </div>
 
 <div style="margin-top:12px;">
-  <a href="<%= basePath %>/client/<%= org.xero_tenant_id %>?panel=insight" class="btn btn-outline-primary btn-sm">← Back to Insight</a>
+  <a href="<%= basePath %>/client/<%= orgIdentifier %>?panel=insight" class="btn btn-outline-primary btn-sm">← Back to Insight</a>
 </div>
 
 <% if (query && query.saved) { %>
@@ -119,7 +120,7 @@ const navItems = [
   </nav>
 
   <div class="ins-main">
-<form method="POST" action="<%= basePath %>/client/<%= org.xero_tenant_id %>/insight/settings" id="insightSettingsForm">
+<form method="POST" action="<%= basePath %>/client/<%= orgIdentifier %>/insight/settings" id="insightSettingsForm">
   <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
 
   <%
