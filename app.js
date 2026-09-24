@@ -112,37 +112,6 @@ const staffAuthRoutes = require('./src/routes/staffAuth');
 const staffRoutes = require('./src/routes/staff');
 const { requireStaffLogin, requireStaffManager, requireSettingsAccess } = require('./src/middleware/staffAuth');
 
-// TEMPORARY — trigger + verify a real MTA Uae (FreeAgent) sync ON THE LIVE SERVER, not a local
-// copy. Logs to stdout only. Will be removed in the very next commit right after use.
-app.get(BASE_PATH + '/__debug_mtauae__', async (req, res) => {
-  try {
-    const db = getDb();
-    if (req.query.sync === '1') {
-      const started = await startJob('freeagent:35963:all:since_lock_date::', progress =>
-        syncFreeAgentOrganisation('35963', progress),
-        { tenantId: '35963', orgId: 390, mode: 'full' });
-      console.log(`[debug_mtauae] enqueued: ${JSON.stringify({ id: started.job.id, existing: started.existing })}`);
-      return res.send('enqueued');
-    }
-    const issues = db.prepare(
-      `SELECT check_type, count, period_checked, detail_json FROM issues WHERE org_id = 390 AND is_active = 1 ORDER BY check_type`
-    ).all();
-    for (const i of issues) {
-      let sampleDate = null;
-      try {
-        const parsed = JSON.parse(i.detail_json);
-        sampleDate = parsed[0]?.date || null;
-      } catch (e) { /* ignore */ }
-      console.log(`[debug_mtauae] ${i.check_type} | count=${i.count} | period=${i.period_checked} | sample_date=${sampleDate}`);
-    }
-    console.log(`[debug_mtauae] total active issue rows: ${issues.length}`);
-    res.send('logged');
-  } catch (err) {
-    console.error('[debug_mtauae] error:', err.message, err.stack);
-    res.status(500).send('error, see logs');
-  }
-});
-
 app.use(BASE_PATH + '/login', staffAuthRoutes); // reachable pre-auth
 app.use(requireStaffLogin); // everything below requires a staff session
 
