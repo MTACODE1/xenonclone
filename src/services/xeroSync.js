@@ -192,6 +192,25 @@ async function fetchAllBankTransactions(tenantId, ifModifiedSince = undefined) {
   return rows;
 }
 
+// Manual journals aren't otherwise fetched anywhere in this sync — needed for Turnover so a
+// POSTED journal line coded straight to a revenue account (e.g. Hair of the Dog's rent income)
+// counts, since it never appears as an invoice, credit note, or bank transaction line.
+async function fetchAllManualJournals(tenantId, ifModifiedSince = undefined) {
+  const rows = [];
+  for (let page = 1; ; page++) {
+    const batch = await apiCall(tenantId, async (xero, tid) => {
+      const resp = await xero.accountingApi.getManualJournals(
+        tid, ifModifiedSince, undefined, 'UpdatedDateUTC ASC', page
+      );
+      return resp.body.manualJournals || [];
+    });
+    rows.push(...batch);
+    if (batch.length < 100) break;
+    await pageDelay();
+  }
+  return rows;
+}
+
 async function fetchAllPayments(tenantId, ifModifiedSince = undefined) {
   const rows = [];
   for (let page = 1; ; page++) {
@@ -511,6 +530,20 @@ async function runSync(tenantId, progressCallback, options = {}) {
   );
   const expenseAccountCodes = new Set((chartOfAccounts || []).filter(a => a._class === 'EXPENSE').map(a => a.code).filter(Boolean));
   const revenueAccountCodes = new Set((chartOfAccounts || []).filter(a => a._class === 'REVENUE').map(a => a.code).filter(Boolean));
+  // Turnover is a stricter subset of revenueAccountCodes: Xero's UK P&L splits Class=REVENUE
+  // accounts into a "Turnover" section (Type REVENUE/SALES) and a separate "Other Income"
+  // section (Type OTHERINCOME) — confirmed against the practice's own client data (F2: Minga's
+  // Interest Income sits in Turnover, Hair of the Dog's sits in Other Income, same account name,
+  // different Type). Currency gain/loss accounts need no special exclusion here: verified live
+  // against 3 real clients (Minga, Gutter Guy, Hair of the Dog) that Xero's own
+  // "Realised/Unrealised Currency Gains" accounts are Type=EXPENSE, Class=EXPENSE — already
+  // outside this set on their own.
+  const turnoverAccountCodes = new Set(
+    (chartOfAccounts || [])
+      .filter(a => a._class === 'REVENUE' && ['REVENUE', 'SALES'].includes(a.type))
+      .map(a => a.code)
+      .filter(Boolean)
+  );
   const accountNameByCode = {};
   for (const a of (chartOfAccounts || [])) if (a.code) accountNameByCode[a.code] = a.name;
   if (chartOfAccountsAvailable) upsertChartOfAccountsCache(orgId, chartOfAccounts);
@@ -560,6 +593,15 @@ async function runSync(tenantId, progressCallback, options = {}) {
   );
   const bankReceiveTxns = allBankTransactions.filter(item =>
     item.type === 'RECEIVE' && item.status === 'AUTHORISED' && isWithinPeriod(toDateString(item.date), period)
+  );
+
+  emit({ step: 'fetch_manual_journals', message: 'Refreshing manual journal cache...' });
+  const allManualJournals = await refreshCachedEntities(
+    orgId, tenantId, runId, 'manual_journal',
+    since => fetchAllManualJournals(tenantId, since), options
+  );
+  const recentManualJournals = allManualJournals.filter(item =>
+    item.status === 'POSTED' && isWithinPeriod(toDateString(item.date), period)
   );
 
   // Cache the standard Accounting API bank-side records used for local statement matching.
@@ -2054,10 +2096,86 @@ async function runSync(tenantId, progressCallback, options = {}) {
     const recentPurchaseCN = inPeriod(purchaseCredits)
       .filter(c => c.status === 'AUTHORISED' || c.status === 'PAID' || c.status === 'VOIDED');
 
-    // Turnover = sum of SubTotal (ex-VAT) for AUTHORISED+PAID ACCREC invoices in period
-    const turnover = recentAccrec
-      .filter(i => i.status === 'AUTHORISED' || i.status === 'PAID')
-      .reduce((s, i) => s + (i.subTotal || 0), 0);
+    // Turnover: net-of-VAT, base-currency total of every posting to a Turnover-section account
+    // (Class=REVENUE, Type in REVENUE/SALES — see turnoverAccountCodes above) across invoices,
+    // credit notes, revenue-coded bank lines and manual journals — not just summed invoice
+    // totals. A prior investigation (Turnover Mismatch handover doc, 24 Sep 2026) found the old
+    // invoice-only SubTotal sum wrong on 3/3 real clients checked: it missed non-invoice revenue
+    // entirely (Gutter Guy: £0 vs Xero's £85,840.34, 100% booked via bank Receive Money), counted
+    // foreign-currency invoices at face value instead of base currency (Minga: +£32,781.33), and
+    // never netted sales credit notes (Minga: CN-251 £5,166 left in). See F1-F12/RC1-RC4 in that
+    // document for the full evidence trail.
+    const netAmountBase = (line, doc) => {
+      const net = doc.lineAmountTypes === 'Inclusive'
+        ? (line.lineAmount || 0) - (line.taxAmount || 0)
+        : (line.lineAmount || 0);
+      // ManualJournalLine carries no CurrencyRate — Xero manual journals are always base currency.
+      return net / (doc.currencyRate || 1);
+    };
+    const turnoverLineAmount = (line, doc) =>
+      (line.accountCode && turnoverAccountCodes.has(line.accountCode)) ? netAmountBase(line, doc) : 0;
+
+    let turnover = 0;
+    for (const inv of recentAccrec.filter(i => i.status === 'AUTHORISED' || i.status === 'PAID')) {
+      for (const line of (inv.lineItems || [])) turnover += turnoverLineAmount(line, inv);
+    }
+    // Credit notes reverse revenue on the accounts they're coded to (RC3) — subtracted, not ignored.
+    for (const cn of recentSalesCN.filter(c => c.status === 'AUTHORISED' || c.status === 'PAID')) {
+      for (const line of (cn.lineItems || [])) turnover -= turnoverLineAmount(line, cn);
+    }
+    // A RECEIVE bank line coded to a revenue account is a cash sale, just as valid as an invoice
+    // (F6: Gutter Guy books 100% of its revenue this way and has zero invoices).
+    for (const bt of bankReceiveTxns) {
+      for (const line of (bt.lineItems || [])) turnover += turnoverLineAmount(line, bt);
+    }
+    // A SPEND line on a revenue account is a refund/contra against a cash sale — deducted.
+    for (const bt of bankSpendTxns) {
+      for (const line of (bt.lineItems || [])) turnover -= turnoverLineAmount(line, bt);
+    }
+    // A POSTED manual journal line to a revenue account is revenue (F8: Hair of the Dog's £12,000
+    // rent journal). ManualJournalLine.LineAmount is signed debit-positive/credit-negative, so a
+    // credit (negative) to a revenue account must increase turnover: contribution = -LineAmount.
+    for (const mj of recentManualJournals) {
+      for (const line of (mj.journalLines || [])) {
+        if (!line.accountCode || !turnoverAccountCodes.has(line.accountCode)) continue;
+        const net = mj.lineAmountTypes === 'Inclusive'
+          ? (line.lineAmount || 0) - (line.taxAmount || 0)
+          : (line.lineAmount || 0);
+        turnover += -net;
+      }
+    }
+
+    // Cross-check against Xero's own P&L for the same period — this is what a client's accountant
+    // actually sees, so it's the authoritative figure; a mismatch means our account-set/dataset
+    // assumptions have drifted from this client's real chart of accounts, not that Xero is wrong.
+    // A relative tolerance (not a flat £1) avoids constant false-positive flags on a
+    // multi-million-pound client's routine FX/rounding noise while still catching a real
+    // miscalculation on a small one. Never fails the sync — this is a diagnostic, not a gate.
+    let turnoverPlValue = null;
+    let turnoverPlMismatch = 0;
+    try {
+      const plResp = await apiCall(tenantId, async (xero, tid) => xero.accountingApi.getReportProfitAndLoss(
+        tid, period.start, period.end, undefined, undefined,
+        undefined, undefined, undefined, undefined, true
+      ));
+      const report = (plResp.body.reports || [])[0];
+      for (const section of (report?.rows || [])) {
+        for (const row of (section.rows || [])) {
+          if (row.rowType === 'SummaryRow' && ['Total Income', 'Total Turnover'].includes(row.cells?.[0]?.value)) {
+            turnoverPlValue = parseFloat(row.cells[row.cells.length - 1].value) || 0;
+          }
+        }
+      }
+      if (turnoverPlValue != null) {
+        const tolerance = Math.max(1, Math.abs(turnoverPlValue) * 0.005);
+        turnoverPlMismatch = Math.abs(turnover - turnoverPlValue) > tolerance ? 1 : 0;
+        if (turnoverPlMismatch) {
+          console.warn(`[turnover_pl_mismatch] org ${orgId}: calculated £${turnover.toFixed(2)} vs Xero P&L £${turnoverPlValue.toFixed(2)} (period ${period.key})`);
+        }
+      }
+    } catch (plError) {
+      console.error('Turnover P&L cross-check unavailable — continuing without it:', plError.message);
+    }
 
     const customerInvoices = recentAccrec.length;
     const supplierBills = recentAccpay.length;
@@ -2113,6 +2231,8 @@ async function runSync(tenantId, progressCallback, options = {}) {
       credit_notes_purchase: creditNotesPurchase,
       bank_processed: bankProcessed,
       journals: journalCount,
+      turnover_pl_value: turnoverPlValue,
+      turnover_pl_mismatch: turnoverPlMismatch,
       run_id: runId,
       is_active: 0,
     });

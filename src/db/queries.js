@@ -1748,11 +1748,16 @@ function upsertTransactionCounts(orgId, data) {
   return db.prepare(`
     INSERT INTO transaction_counts (org_id, period, period_start, period_end, months_covered,
       turnover, total_transactions, customer_invoices, supplier_bills,
-      credit_notes_sales, credit_notes_purchase, bank_processed, journals, run_id, is_active)
+      credit_notes_sales, credit_notes_purchase, bank_processed, journals,
+      turnover_pl_value, turnover_pl_mismatch, run_id, is_active)
     VALUES (@org_id, @period, @period_start, @period_end, @months_covered,
       @turnover, @total_transactions, @customer_invoices, @supplier_bills,
-      @credit_notes_sales, @credit_notes_purchase, @bank_processed, @journals, @run_id, @is_active)
-  `).run({ run_id: null, is_active: 1, org_id: orgId, ...data });
+      @credit_notes_sales, @credit_notes_purchase, @bank_processed, @journals,
+      @turnover_pl_value, @turnover_pl_mismatch, @run_id, @is_active)
+  `).run({
+    run_id: null, is_active: 1, turnover_pl_value: null, turnover_pl_mismatch: 0,
+    org_id: orgId, ...data,
+  });
 }
 
 function getTransactionCountsForOrg(orgId, periodType = null, periodStart = null, periodEnd = null) {

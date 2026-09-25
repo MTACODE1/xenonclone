@@ -714,6 +714,20 @@ function initSchema() {
     if (!columns.has('run_id')) db.exec(`ALTER TABLE ${table} ADD COLUMN run_id INTEGER REFERENCES sync_runs(id)`);
     if (!columns.has('is_active')) db.exec(`ALTER TABLE ${table} ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1`);
   }
+
+  // Turnover cross-check (D2 of the Turnover fix): turnover_pl_value is what Xero's own P&L
+  // "Total Turnover" report row said for the same period, fetched alongside the calculated
+  // figure so a future drift between the two is visible instead of silently trusted. A relative
+  // tolerance (not a flat £1) decides turnover_pl_mismatch — see resolveTurnoverPlMismatch in
+  // xeroSync.js — because a flat absolute threshold fires constantly on FX/rounding noise for a
+  // large client while being too loose for a tiny one.
+  const transactionCountColumns = new Set(db.prepare(`PRAGMA table_info(transaction_counts)`).all().map(column => column.name));
+  if (!transactionCountColumns.has('turnover_pl_value')) {
+    db.exec(`ALTER TABLE transaction_counts ADD COLUMN turnover_pl_value REAL`);
+  }
+  if (!transactionCountColumns.has('turnover_pl_mismatch')) {
+    db.exec(`ALTER TABLE transaction_counts ADD COLUMN turnover_pl_mismatch INTEGER NOT NULL DEFAULT 0`);
+  }
   const issueFindingColumns = new Set(db.prepare(`PRAGMA table_info(issue_findings)`).all().map(column => column.name));
   if (!issueFindingColumns.has('run_id')) {
     db.exec(`ALTER TABLE issue_findings ADD COLUMN run_id INTEGER REFERENCES sync_runs(id)`);
