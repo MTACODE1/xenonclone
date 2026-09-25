@@ -2153,28 +2153,51 @@ async function runSync(tenantId, progressCallback, options = {}) {
     // miscalculation on a small one. Never fails the sync — this is a diagnostic, not a gate.
     let turnoverPlValue = null;
     let turnoverPlMismatch = 0;
-    try {
-      const plResp = await apiCall(tenantId, async (xero, tid) => xero.accountingApi.getReportProfitAndLoss(
-        tid, period.start, period.end, undefined, undefined,
-        undefined, undefined, undefined, undefined, true
-      ));
-      const report = (plResp.body.reports || [])[0];
-      for (const section of (report?.rows || [])) {
-        for (const row of (section.rows || [])) {
-          if (row.rowType === 'SummaryRow' && ['Total Income', 'Total Turnover'].includes(row.cells?.[0]?.value)) {
-            turnoverPlValue = parseFloat(row.cells[row.cells.length - 1].value) || 0;
+    // Xero's Reports/ProfitAndLoss endpoint hard-rejects any fromDate/toDate more than 365 days
+    // apart (confirmed live: "The fromDate and toDate parameters must be with 365 days of each
+    // other"). A client with an old or unset lock date (since_lock_date falls back to
+    // 2000-01-01) routinely produces a multi-year window, so skip the call rather than let every
+    // such client fail this check on every sync — the calculated turnover itself has no such
+    // limit, only this secondary cross-check does.
+    const periodDays = (new Date(`${period.end}T00:00:00Z`) - new Date(`${period.start}T00:00:00Z`)) / 86400000;
+    if (periodDays > 365) {
+      console.warn(`[turnover_pl_mismatch] org ${orgId}: skipped, period spans ${Math.round(periodDays)} days (Xero's P&L report caps at 365)`);
+    } else {
+      // isWithinPeriod (periodResolver.js) deliberately excludes the lock date itself for
+      // since_lock_date periods, matching Xenon's own "Activity Since <date>" convention — but
+      // Xero's Reports/ProfitAndLoss fromDate is inclusive of that day. Left unadjusted, any
+      // client with a transaction dated exactly on their lock date gets a false mismatch flag
+      // every run (confirmed live: County Gas Services' £460 lock-date-dated receipt accounted
+      // for its entire £2,300-vs-£2,760 "mismatch" — the £2,300 figure was correct all along).
+      const plFromDate = period.type === 'since_lock_date'
+        ? new Date(new Date(`${period.start}T00:00:00Z`).getTime() + 86400000).toISOString().slice(0, 10)
+        : period.start;
+      try {
+        const plResp = await apiCall(tenantId, async (xero, tid) => xero.accountingApi.getReportProfitAndLoss(
+          tid, plFromDate, period.end, undefined, undefined,
+          undefined, undefined, undefined, undefined, true
+        ));
+        const report = (plResp.body.reports || [])[0];
+        for (const section of (report?.rows || [])) {
+          for (const row of (section.rows || [])) {
+            if (row.rowType === 'SummaryRow' && ['Total Income', 'Total Turnover'].includes(row.cells?.[0]?.value)) {
+              turnoverPlValue = parseFloat(row.cells[row.cells.length - 1].value) || 0;
+            }
           }
         }
-      }
-      if (turnoverPlValue != null) {
-        const tolerance = Math.max(1, Math.abs(turnoverPlValue) * 0.005);
-        turnoverPlMismatch = Math.abs(turnover - turnoverPlValue) > tolerance ? 1 : 0;
-        if (turnoverPlMismatch) {
-          console.warn(`[turnover_pl_mismatch] org ${orgId}: calculated £${turnover.toFixed(2)} vs Xero P&L £${turnoverPlValue.toFixed(2)} (period ${period.key})`);
+        if (turnoverPlValue != null) {
+          const tolerance = Math.max(1, Math.abs(turnoverPlValue) * 0.005);
+          turnoverPlMismatch = Math.abs(turnover - turnoverPlValue) > tolerance ? 1 : 0;
+          if (turnoverPlMismatch) {
+            console.warn(`[turnover_pl_mismatch] org ${orgId}: calculated £${turnover.toFixed(2)} vs Xero P&L £${turnoverPlValue.toFixed(2)} (period ${period.key})`);
+          }
         }
+      } catch (plError) {
+        // xero-node rejects with the raw HTTP response object, not a normal Error — the real
+        // reason lives at response.body.Message, and plError.message is always undefined here.
+        const reason = plError?.response?.body?.Message || plError.message;
+        console.error('Turnover P&L cross-check unavailable — continuing without it:', reason);
       }
-    } catch (plError) {
-      console.error('Turnover P&L cross-check unavailable — continuing without it:', plError.message);
     }
 
     const customerInvoices = recentAccrec.length;
