@@ -382,9 +382,21 @@ async function runFreeAgentSync(companyId, progressCallback, options = {}) {
   const recentAccrec = inPeriod(invoices.filter(i => i.type === 'ACCREC' && ['AUTHORISED', 'PAID', 'VOIDED'].includes(i.status)));
   const recentAccpay = inPeriod(invoices.filter(i => i.type === 'ACCPAY' && ['AUTHORISED', 'PAID', 'VOIDED'].includes(i.status)));
   const recentSalesCN = inPeriod(salesCredits).filter(c => ['AUTHORISED', 'PAID', 'VOIDED'].includes(c.status));
+  // Turnover still has two known gaps vs. the Xero calculation (currency conversion and account
+  // classification) — deliberately deferred, not overlooked. Currency: FreeAgent's exchange-rate
+  // field direction is the opposite convention from Xero's and this Stage 1 integration has no
+  // live multi-currency data to verify it against (the one connected client is GBP-locked) — do
+  // not guess it blind on real client money. Classification: FreeAgent doesn't fetch its own
+  // chart-of-accounts/categories at all yet (Group B, not built), so there's no revenue-account
+  // filter equivalent to Xero's turnoverAccountCodes; every ACCREC invoice line still counts,
+  // whatever category it's coded to. Credit-note netting below IS safe to ship now — the
+  // direction is unambiguous and doesn't depend on either of those two gaps.
   const turnover = recentAccrec
     .filter(i => i.status === 'AUTHORISED' || i.status === 'PAID')
-    .reduce((s, i) => s + (i.subTotal || 0), 0);
+    .reduce((s, i) => s + (i.subTotal || 0), 0)
+    - recentSalesCN
+      .filter(c => c.status === 'AUTHORISED' || c.status === 'PAID')
+      .reduce((s, c) => s + (c.subTotal || 0), 0);
   upsertTransactionCounts(orgId, {
     period: period.type,
     period_start: period.start,

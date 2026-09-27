@@ -190,6 +190,7 @@ async function fetchAllCreditNotes(companyId, ifModifiedSince = undefined) {
         contact: contactsByUrl.get(creditNote.contact) || { contactID: null, name: null },
         date: creditNote.dated_on,
         total: Number(creditNote.total_value) || 0,
+        subTotal: Number(creditNote.net_value) || 0,
         remainingCredit: Number(creditNote.due_value) || 0,
       });
     }
