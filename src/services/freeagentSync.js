@@ -311,9 +311,20 @@ async function runFreeAgentSync(companyId, progressCallback, options = {}) {
   }
 
   try {
-    // FreeAgent contacts have no isCustomer/isSupplier flag (unlike Xero) — active status alone
-    // is the closest equivalent filter available.
-    const activeContacts = contacts.filter(c => c.contactStatus === 'ACTIVE');
+    // FreeAgent contacts have no isCustomer/isSupplier flag (unlike Xero), but the same role
+    // still exists in FreeAgent's own data: a contact is a customer if it's ever appeared on an
+    // invoice, a supplier if it's ever appeared on a bill. `invoices` here is the full merged
+    // invoice+bill cache (all statuses, all time), matching Xero's isCustomer/isSupplier being a
+    // persistent role rather than something scoped to the current period.
+    const customerContactIds = new Set(
+      invoices.filter(i => i.type === 'ACCREC' && i.contact?.contactID).map(i => i.contact.contactID)
+    );
+    const supplierContactIds = new Set(
+      invoices.filter(i => i.type === 'ACCPAY' && i.contact?.contactID).map(i => i.contact.contactID)
+    );
+    const activeContacts = contacts.filter(c =>
+      c.contactStatus === 'ACTIVE' && (customerContactIds.has(c.contactID) || supplierContactIds.has(c.contactID))
+    );
     const duplicates = findDuplicateContacts(activeContacts);
     persistIssue({
       org_id: orgId, check_type: 'duplicate_contacts', importance: 'low',
