@@ -538,11 +538,18 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // against 3 real clients (Minga, Gutter Guy, Hair of the Dog) that Xero's own
   // "Realised/Unrealised Currency Gains" accounts are Type=EXPENSE, Class=EXPENSE — already
   // outside this set on their own.
+  // Uppercased: confirmed live on a real client (Especially For You Parties Ltd) that Xero's own
+  // /Accounts endpoint and an Invoice LineItem's AccountCode can carry different case for the
+  // IDENTICAL account with a custom alphanumeric code ("001a" vs "001A") — an exact-match Set
+  // silently missed every line on that account, producing £0 turnover against a real P&L of
+  // £357,672.27. Numeric-only codes (the overwhelming majority of clients checked) have no case
+  // to differ, which is why this went unnoticed until a client with a custom code was tested.
   const turnoverAccountCodes = new Set(
     (chartOfAccounts || [])
       .filter(a => a._class === 'REVENUE' && ['REVENUE', 'SALES'].includes(a.type))
       .map(a => a.code)
       .filter(Boolean)
+      .map(code => code.toUpperCase())
   );
   const accountNameByCode = {};
   for (const a of (chartOfAccounts || [])) if (a.code) accountNameByCode[a.code] = a.name;
@@ -2113,7 +2120,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       return net / (doc.currencyRate || 1);
     };
     const turnoverLineAmount = (line, doc) =>
-      (line.accountCode && turnoverAccountCodes.has(line.accountCode)) ? netAmountBase(line, doc) : 0;
+      (line.accountCode && turnoverAccountCodes.has(line.accountCode.toUpperCase())) ? netAmountBase(line, doc) : 0;
 
     let turnover = 0;
     for (const inv of recentAccrec.filter(i => i.status === 'AUTHORISED' || i.status === 'PAID')) {
@@ -2137,7 +2144,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     // credit (negative) to a revenue account must increase turnover: contribution = -LineAmount.
     for (const mj of recentManualJournals) {
       for (const line of (mj.journalLines || [])) {
-        if (!line.accountCode || !turnoverAccountCodes.has(line.accountCode)) continue;
+        if (!line.accountCode || !turnoverAccountCodes.has(line.accountCode.toUpperCase())) continue;
         const net = mj.lineAmountTypes === 'Inclusive'
           ? (line.lineAmount || 0) - (line.taxAmount || 0)
           : (line.lineAmount || 0);
