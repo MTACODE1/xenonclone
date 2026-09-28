@@ -1158,14 +1158,14 @@ async function runSync(tenantId, progressCallback, options = {}) {
     for (const bill of allBillsForMultiAccount) {
       const isSinceLD = isWithinPeriod(toDateString(bill.date), period);
       for (const line of (bill.lineItems || [])) record(
-        bill.contact?.contactID, bill.contact?.name, grossLineAmount(bill.lineAmountTypes, line), line.accountCode, isSinceLD,
+        bill.contact?.contactID, bill.contact?.name, grossLineAmount(bill, line), line.accountCode, isSinceLD,
         { date: toDateString(bill.date), reference: bill.reference || bill.invoiceNumber || null, description: line.description || null, source: 'bill', invoiceId: bill.invoiceID }
       );
     }
     for (const txn of bankSpendForMultiAccount) {
       const isSinceLD = isWithinPeriod(toDateString(txn.date), period);
       for (const line of (txn.lineItems || [])) record(
-        txn.contact?.contactID, txn.contact?.name, grossLineAmount(txn.lineAmountTypes, line), line.accountCode, isSinceLD,
+        txn.contact?.contactID, txn.contact?.name, grossLineAmount(txn, line), line.accountCode, isSinceLD,
         { date: toDateString(txn.date), reference: txn.reference || null, description: line.description || null, source: 'bank_spend', bankTransactionId: txn.bankTransactionID }
       );
     }
@@ -1212,7 +1212,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
   try {
     const allTimeTax = {};
     const sinceLDTaxByContact = {};
-    const processTaxSource = (contactId, contactName, lines, isSinceLD, lineAmountTypes, txMeta) => {
+    const processTaxSource = (contactId, contactName, lines, isSinceLD, doc, txMeta) => {
       if (!contactId || isMileageReimbursementContact(contactName)) return;
       if (!allTimeTax[contactId]) allTimeTax[contactId] = { name: contactName, taxAmounts: {}, transactions: [] };
       for (const line of lines) {
@@ -1230,7 +1230,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
         // reconstructing net per-line (via the transaction's own lineAmountTypes) rather than
         // trusting lineAmount's mixed inclusive/exclusive convention closed Fast Track Excavations
         // from +132% over Xenon's value to +2.6%.
-        const amt = Math.abs(netLineAmount(lineAmountTypes, line));
+        const amt = Math.abs(netLineAmount(doc, line));
         allTimeTax[contactId].taxAmounts[tax] = (allTimeTax[contactId].taxAmounts[tax] || 0) + amt;
         allTimeTax[contactId].transactions.push({
           ...txMeta, taxCode: tax, accountCode: line.accountCode,
@@ -1245,12 +1245,12 @@ async function runSync(tenantId, progressCallback, options = {}) {
     };
     for (const bill of allBillsForSupplierChecks) {
       const isSinceLD = isWithinPeriod(toDateString(bill.date), period);
-      processTaxSource(bill.contact?.contactID, bill.contact?.name, bill.lineItems || [], isSinceLD, bill.lineAmountTypes,
+      processTaxSource(bill.contact?.contactID, bill.contact?.name, bill.lineItems || [], isSinceLD, bill,
         { date: toDateString(bill.date), reference: bill.reference || bill.invoiceNumber || null, source: 'bill', invoiceId: bill.invoiceID });
     }
     for (const txn of bankSpendForSupplierChecks) {
       processTaxSource(txn.contact?.contactID, txn.contact?.name, txn.lineItems || [],
-        isWithinPeriod(toDateString(txn.date), period), txn.lineAmountTypes,
+        isWithinPeriod(toDateString(txn.date), period), txn,
         { date: toDateString(txn.date), reference: txn.reference || null, source: 'bank_spend', bankTransactionId: txn.bankTransactionID });
     }
     // Same as Multi-Account Suppliers above: no floor by default.
@@ -1315,7 +1315,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             taxMissingLines.push({
               invoiceId: bill.invoiceID, contact: bill.contact?.name,
               date: toDateString(bill.date), accountCode: line.accountCode,
-              description: line.description, amount: netLineAmount(bill.lineAmountTypes, line), source: 'bill'
+              description: line.description, amount: netLineAmount(bill, line), source: 'bill'
             });
           }
         }
@@ -1330,7 +1330,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             taxMissingLines.push({
               invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
               date: toDateString(txn.date), accountCode: line.accountCode,
-              description: line.description, amount: netLineAmount(txn.lineAmountTypes, line), source: 'bank_spend'
+              description: line.description, amount: netLineAmount(txn, line), source: 'bank_spend'
             });
           }
         }
@@ -1373,7 +1373,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             taxMissingLines.push({
               invoiceId: inv.invoiceID, number: inv.invoiceNumber, contact: inv.contact?.name,
               date: toDateString(inv.date), accountCode: line.accountCode,
-              description: line.description, amount: netLineAmount(inv.lineAmountTypes, line), source: 'invoice'
+              description: line.description, amount: netLineAmount(inv, line), source: 'invoice'
             });
           }
         }
@@ -1392,7 +1392,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             taxMissingLines.push({
               invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
               date: toDateString(txn.date), accountCode: line.accountCode,
-              description: line.description, amount: netLineAmount(txn.lineAmountTypes, line), source: 'bank_receive'
+              description: line.description, amount: netLineAmount(txn, line), source: 'bank_receive'
             });
           }
         }
@@ -1426,7 +1426,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
         for (const line of (bill.lineItems || [])) {
           // Xenon Capital Item Review compares net (ex-VAT). Bank SPEND lines are usually
           // Inclusive, so raw lineAmount would overstate and inflate the count.
-          const amount = Math.abs(netLineAmount(bill.lineAmountTypes, line));
+          const amount = Math.abs(netLineAmount(bill, line));
           const threshold = accountConfigByCode.get(line.accountCode)?.capital_review_threshold || defaultCapitalReviewThreshold;
           if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)) {
             capitalItems.push({
@@ -1439,7 +1439,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       }
       for (const txn of inPeriod(bankSpendTxns || [])) {
         for (const line of (txn.lineItems || [])) {
-          const amount = Math.abs(netLineAmount(txn.lineAmountTypes, line));
+          const amount = Math.abs(netLineAmount(txn, line));
           const threshold = accountConfigByCode.get(line.accountCode)?.capital_review_threshold || defaultCapitalReviewThreshold;
           if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)) {
             capitalItems.push({
@@ -1454,7 +1454,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       // refunded onto 473). Net basis and the same per-account threshold still apply.
       for (const txn of bankReceiveTxns) {
         for (const line of (txn.lineItems || [])) {
-          const amount = Math.abs(netLineAmount(txn.lineAmountTypes, line));
+          const amount = Math.abs(netLineAmount(txn, line));
           const threshold = accountConfigByCode.get(line.accountCode)?.capital_review_threshold || defaultCapitalReviewThreshold;
           if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)) {
             capitalItems.push({
@@ -1606,7 +1606,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       for (const line of (bill.lineItems || [])) {
         // Xenon describes and reports this threshold on net (ex-VAT) value. Xero's lineAmount is
         // mixed: Inclusive documents carry gross here, while Exclusive documents carry net.
-        const amount = Math.abs(netLineAmount(bill.lineAmountTypes, line));
+        const amount = Math.abs(netLineAmount(bill, line));
         if (amount > 0 && amount <= LOW_COST_THRESHOLD && line.accountCode && fixedAssetAccountCodes.has(line.accountCode)) {
           lowCostItems.push({
             invoiceId: bill.invoiceID, contact: bill.contact?.name,
@@ -1618,7 +1618,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     }
     for (const txn of inPeriod(bankSpendTxns || [])) {
       for (const line of (txn.lineItems || [])) {
-        const amount = Math.abs(netLineAmount(txn.lineAmountTypes, line));
+        const amount = Math.abs(netLineAmount(txn, line));
         if (amount > 0 && amount <= LOW_COST_THRESHOLD && line.accountCode && fixedAssetAccountCodes.has(line.accountCode)) {
           lowCostItems.push({
             invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
@@ -1700,7 +1700,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
         contactId: bill.contact?.contactID, contact: bill.contact?.name,
         date: toDateString(bill.date), accountCode: line.accountCode,
         expectedAccountCode: expected,
-        description: line.description, amount: Math.abs(netLineAmount(bill.lineAmountTypes, line)), source: 'bill'
+        description: line.description, amount: Math.abs(netLineAmount(bill, line)), source: 'bill'
       });
     }
     const invoicesSinceLD = sinceLD(accrecAuthorised);
@@ -1713,7 +1713,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             contactId: inv.contact?.contactID, contact: inv.contact?.name,
             date: toDateString(inv.date), accountCode: line.accountCode,
             expectedAccountCode: contact.salesDefaultAccountCode,
-            description: line.description, amount: Math.abs(netLineAmount(inv.lineAmountTypes, line)), source: 'invoice'
+            description: line.description, amount: Math.abs(netLineAmount(inv, line)), source: 'invoice'
           });
         }
       }
@@ -1727,7 +1727,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             contactId: txn.contact?.contactID, contact: txn.contact?.name,
             date: toDateString(txn.date), accountCode: line.accountCode,
             expectedAccountCode: contact.purchasesDefaultAccountCode,
-            description: line.description, amount: Math.abs(netLineAmount(txn.lineAmountTypes, line)), source: 'bank_spend'
+            description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_spend'
           });
         }
       }
@@ -1741,7 +1741,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             contactId: txn.contact?.contactID, contact: txn.contact?.name,
             date: toDateString(txn.date), accountCode: line.accountCode,
             expectedAccountCode: contact.salesDefaultAccountCode,
-            description: line.description, amount: Math.abs(netLineAmount(txn.lineAmountTypes, line)), source: 'bank_receive'
+            description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_receive'
           });
         }
       }
@@ -1769,7 +1769,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
         contactId: bill.contact?.contactID, contact: bill.contact?.name,
         date: toDateString(bill.date), taxType: line.taxType,
         expectedTaxType: expected,
-        description: line.description, amount: Math.abs(netLineAmount(bill.lineAmountTypes, line)), source: 'bill'
+        description: line.description, amount: Math.abs(netLineAmount(bill, line)), source: 'bill'
       });
     }
     const invoicesSinceLD = sinceLD(accrecAuthorised);
@@ -1782,7 +1782,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             contactId: inv.contact?.contactID, contact: inv.contact?.name,
             date: toDateString(inv.date), taxType: line.taxType,
             expectedTaxType: contact.accountsReceivableTaxType,
-            description: line.description, amount: Math.abs(netLineAmount(inv.lineAmountTypes, line)), source: 'invoice'
+            description: line.description, amount: Math.abs(netLineAmount(inv, line)), source: 'invoice'
           });
         }
       }
@@ -1796,7 +1796,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             contactId: txn.contact?.contactID, contact: txn.contact?.name,
             date: toDateString(txn.date), taxType: line.taxType,
             expectedTaxType: contact.accountsPayableTaxType,
-            description: line.description, amount: Math.abs(netLineAmount(txn.lineAmountTypes, line)), source: 'bank_spend'
+            description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_spend'
           });
         }
       }
@@ -1810,7 +1810,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             contactId: txn.contact?.contactID, contact: txn.contact?.name,
             date: toDateString(txn.date), taxType: line.taxType,
             expectedTaxType: contact.accountsReceivableTaxType,
-            description: line.description, amount: Math.abs(netLineAmount(txn.lineAmountTypes, line)), source: 'bank_receive'
+            description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_receive'
           });
         }
       }

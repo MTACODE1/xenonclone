@@ -462,30 +462,41 @@ test('resolveCheckDisplayStatus: unavailable/not_configured take precedence if a
 // bug on Fast Track Excavations (see xeroSync.js); locked here so it can't silently regress.
 
 test('grossLineAmount: Inclusive lines are already gross, Exclusive/NoTax lines need taxAmount added', () => {
-  assert.equal(grossLineAmount('Inclusive', { lineAmount: 100, taxAmount: 20 }), 100);
-  assert.equal(grossLineAmount('Exclusive', { lineAmount: 100, taxAmount: 20 }), 120);
-  assert.equal(grossLineAmount('NoTax', { lineAmount: 100, taxAmount: 0 }), 100);
+  assert.equal(grossLineAmount({ lineAmountTypes: 'Inclusive' }, { lineAmount: 100, taxAmount: 20 }), 100);
+  assert.equal(grossLineAmount({ lineAmountTypes: 'Exclusive' }, { lineAmount: 100, taxAmount: 20 }), 120);
+  assert.equal(grossLineAmount({ lineAmountTypes: 'NoTax' }, { lineAmount: 100, taxAmount: 0 }), 100);
 });
 
 test('netLineAmount: Exclusive lines are already net, Inclusive lines need taxAmount subtracted', () => {
-  assert.equal(netLineAmount('Exclusive', { lineAmount: 100, taxAmount: 20 }), 100);
-  assert.equal(netLineAmount('Inclusive', { lineAmount: 120, taxAmount: 20 }), 100);
-  assert.equal(netLineAmount('NoTax', { lineAmount: 100, taxAmount: 0 }), 100);
+  assert.equal(netLineAmount({ lineAmountTypes: 'Exclusive' }, { lineAmount: 100, taxAmount: 20 }), 100);
+  assert.equal(netLineAmount({ lineAmountTypes: 'Inclusive' }, { lineAmount: 120, taxAmount: 20 }), 100);
+  assert.equal(netLineAmount({ lineAmountTypes: 'NoTax' }, { lineAmount: 100, taxAmount: 0 }), 100);
 });
 
 test('gross and net always differ by exactly taxAmount, regardless of lineAmountTypes', () => {
   for (const lineAmountTypes of ['Inclusive', 'Exclusive', 'NoTax', undefined]) {
+    const doc = { lineAmountTypes };
     const line = { lineAmount: 87.5, taxAmount: 17.5 };
     assert.equal(
-      grossLineAmount(lineAmountTypes, line) - netLineAmount(lineAmountTypes, line),
+      grossLineAmount(doc, line) - netLineAmount(doc, line),
       line.taxAmount
     );
   }
 });
 
+test('grossLineAmount/netLineAmount apply the document currencyRate — a foreign-currency line.lineAmount is in that document\'s own currency, not GBP, and must be divided by its rate to get a real GBP value', () => {
+  // Real case: a Minga Coffee bill in Colombian Pesos, reported as £18,122,000 instead of the
+  // real £3,708.82 before this conversion was added (see xeroSync.js capital_item_review).
+  const copDoc = { lineAmountTypes: 'NoTax', currencyRate: 4886.19 };
+  const copLine = { lineAmount: 18122000, taxAmount: 0 };
+  assert.ok(Math.abs(netLineAmount(copDoc, copLine) - 3708.82) < 0.01);
+  // A base-currency (GBP) document has no currencyRate — must behave exactly as before.
+  assert.equal(grossLineAmount({ lineAmountTypes: 'Exclusive' }, { lineAmount: 100, taxAmount: 20 }), 120);
+});
+
 test('grossLineAmount/netLineAmount default missing lineAmount/taxAmount to zero rather than throwing', () => {
-  assert.equal(grossLineAmount('Exclusive', {}), 0);
-  assert.equal(netLineAmount('Inclusive', {}), 0);
+  assert.equal(grossLineAmount({ lineAmountTypes: 'Exclusive' }, {}), 0);
+  assert.equal(netLineAmount({ lineAmountTypes: 'Inclusive' }, {}), 0);
 });
 
 // resolveSupplierPatternLookbackMonths — Xenon's own docs for Multi-Account/Multi-Tax Code
@@ -610,7 +621,7 @@ test('a VAT-only Inclusive line nets to zero while remaining a real, non-zero gr
   // callers must gate "does this line have real value" on the raw lineAmount, not on
   // netLineAmount's output, or a real transaction silently disappears from detection.
   const vatOnlyLine = { lineAmount: 24, taxAmount: 24 };
-  assert.equal(netLineAmount('Inclusive', vatOnlyLine), 0);
+  assert.equal(netLineAmount({ lineAmountTypes: 'Inclusive' }, vatOnlyLine), 0);
   assert.notEqual(vatOnlyLine.lineAmount, 0);
 });
 

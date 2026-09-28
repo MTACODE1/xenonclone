@@ -264,13 +264,22 @@ function sumAbsoluteExposure(items, value = item => item.amount) {
 // taxAmount, so either basis can be reconstructed exactly per line. Shared here (rather than
 // duplicated per check) so every check that reads line.lineAmount for a total or a threshold
 // comparison can opt into a consistent basis instead of re-deriving this independently.
-function grossLineAmount(lineAmountTypes, line) {
+//
+// Both functions take the parent document (bill/invoice/bank transaction), not just its
+// lineAmountTypes string, because a foreign-currency document's line.lineAmount is in that
+// document's OWN currency — Xero never converts it. The document's own currencyRate (present on
+// every non-base-currency doc, absent/1 on base-currency ones) is required to get a real GBP
+// value; skipping it silently reports the foreign face value as if it were GBP. Confirmed via a
+// Minga Coffee (COP) bill reported as £18,122,000 instead of the real £3,709, and LiveAdventure
+// (PLN/EUR) bills reported at 4-5x their real GBP value.
+function grossLineAmount(doc, line) {
   const amount = line.lineAmount || 0;
-  return lineAmountTypes === 'Inclusive' ? amount : amount + (line.taxAmount || 0);
+  const gross = doc.lineAmountTypes === 'Inclusive' ? amount : amount + (line.taxAmount || 0);
+  return gross / (doc.currencyRate || 1);
 }
 
-function netLineAmount(lineAmountTypes, line) {
-  return grossLineAmount(lineAmountTypes, line) - (line.taxAmount || 0);
+function netLineAmount(doc, line) {
+  return grossLineAmount(doc, line) - (line.taxAmount || 0) / (doc.currencyRate || 1);
 }
 
 // Xero reports isReconciled=false on every payment posted to a non-bank ledger account
@@ -536,7 +545,7 @@ function findMisallocatedLines(documents, monitoredCodes, getThresholdForAccount
   for (const document of documents) {
     for (const line of (document.lineItems || [])) {
       if (!line.accountCode || !monitoredCodes.has(line.accountCode)) continue;
-      const amount = Math.abs(netLineAmount(document.lineAmountTypes, line));
+      const amount = Math.abs(netLineAmount(document, line));
       if (amount < getThresholdForAccount(line.accountCode)) continue;
       findings.push({
         invoiceId: document.invoiceID || document.bankTransactionID, contact: document.contact?.name,
