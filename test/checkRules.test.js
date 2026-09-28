@@ -157,6 +157,18 @@ test('purchase tax exemptions exclude core non-VAT accounts but include bank and
   assert.equal(isPurchaseTaxExemptAccount('PayPal Processing Fees', overrides, '103'), false);
   assert.equal(isPurchaseTaxExemptAccount('Merchant Card Charges', overrides, '104'), false);
   assert.equal(isPurchaseTaxExemptAccount('Ordinary Expense', overrides, '999'), true);
+  // CIS Labour is commonly reverse-charge VAT with no standard tax code (confirmed on RBC
+  // Sutherland: 116 real "CIS Labour Expense" transactions, all genuinely "No VAT" in Xero,
+  // never flagged by Xenon). "CIS Materials Purchased" is NOT part of the same reverse-charge
+  // treatment and Xenon does flag it, so it must stay in scope.
+  assert.equal(isPurchaseTaxExemptAccount('CIS Labour Expense', overrides, '321'), true);
+  assert.equal(isPurchaseTaxExemptAccount('CIS Materials Purchased', overrides, '322'), false);
+  // Dealing in securities/investments is outside the scope of VAT entirely — confirmed on Lisa
+  // Potter-Dixon Ltd: two genuine £75,000 transfers to "Investment (Aj Bell Securities Ltd)", an
+  // account Xero classifies as type FIXED (no dedicated "investment" type exists), both correctly
+  // "No VAT" in real Xero data, neither ever flagged by Xenon across all 626 of its own lines.
+  assert.equal(isPurchaseTaxExemptAccount('Investment (Aj Bell Securities Ltd)', overrides, '715'), true);
+  assert.equal(isPurchaseTaxExemptAccount('Trading/ Investment Account (Interactive Brokers)', overrides, '520'), true);
   // Residual census: Rates / donations / mileage match Xenon count+£ on MBX and Handymanz.
   assert.equal(isPurchaseTaxExemptAccount('Rates', overrides, '465'), true);
   assert.equal(isPurchaseTaxExemptAccount('Business Rates', overrides, '466'), true);

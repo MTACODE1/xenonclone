@@ -1091,11 +1091,20 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // multi-account, which is validated separately against its own 12-month default.
   const supplierPatternLookbackMonths = resolveSupplierPatternLookbackMonths(org);
   const multiAccountLookbackMonths = resolveMultiAccountPatternLookbackMonths(org);
-  const multiAccountLookbackFloor = new Date(`${period.end}T00:00:00Z`);
+  // Anchored to period.start, not period.end: the lookback exists to see a bit further back than
+  // the period itself, to catch a supplier who switched accounts just before the period began. For
+  // a long-running "since lock date" period (common — lock dates often go months without moving),
+  // period.end is today, so anchoring there made the floor land inside the period itself once the
+  // period exceeded the lookback length, silently disabling the lookback entirely. Confirmed on
+  // Rail Infra Clean: three suppliers (Benjamin Whittingham, Ealing Car Wash, SHELL) each switched
+  // accounts before the period started and never switched again, so with the floor collapsed into
+  // the period they showed only one account in scope and were missed; Xenon, whose own lookback is
+  // genuinely relative to the period start, still finds all three.
+  const multiAccountLookbackFloor = new Date(`${period.start}T00:00:00Z`);
   multiAccountLookbackFloor.setUTCMonth(multiAccountLookbackFloor.getUTCMonth() - multiAccountLookbackMonths);
   const multiAccountPatternStart = [period.start, multiAccountLookbackFloor.toISOString().slice(0, 10)]
     .filter(Boolean).sort()[0];
-  const lookbackFloorDate = new Date(`${period.end}T00:00:00Z`);
+  const lookbackFloorDate = new Date(`${period.start}T00:00:00Z`);
   lookbackFloorDate.setUTCMonth(lookbackFloorDate.getUTCMonth() - supplierPatternLookbackMonths);
   const multiTaxPatternStart = [period.start, lookbackFloorDate.toISOString().slice(0, 10)]
     .filter(Boolean).sort()[0];

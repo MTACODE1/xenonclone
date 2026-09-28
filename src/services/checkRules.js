@@ -228,7 +228,29 @@ const NON_SCORED_CHECKS = Object.freeze([
 // Paid - Shareholder 1" alongside wages/pensions/corporation tax/etc, all already covered here) —
 // a dividend distribution is an equity movement, never a VATable purchase, the company equivalent
 // of "drawings" already excluded above for sole traders/partnerships.
-const PURCHASE_TAX_EXEMPT_KEYWORDS = /\b(payroll|statutory|wages?|salar(?:y|ies)|paye|national insurance|pensions?|bank (interest|revaluations?)|depreciation|amortisation|drawings|dividends?|corporation tax|deferred tax|penalt(?:y|ies)|directors?'? remuneration|charitable|political donations|mileage)\b/i;
+//
+// "CIS Labour" added 28 Sep 2026: Construction Industry Scheme subcontractor labour is commonly
+// paid under the VAT domestic reverse charge, which legitimately carries no standard tax code —
+// confirmed on RBC Sutherland Ltd three ways: (1) real Xero data (116 real "CIS Labour Expense"
+// transactions, contacts like "A C Naylor - Labour only priced", every one genuinely "No VAT"),
+// (2) Xenon never flags a single one of these 405 lines despite reviewing all of them, and (3) our
+// check was flagging all 97 of them (£85,801) before this exclusion. Deliberately narrow — matches
+// "CIS Labour" only, not "CIS Materials Purchased", which Xenon does flag (materials aren't part of
+// the same reverse-charge treatment).
+//
+// "Investment" added 28 Sep 2026: dealing in securities/investments is a financial-services
+// transaction outside the scope of VAT entirely — never a purchase of goods or services in the
+// first place. Confirmed on Lisa Potter-Dixon Ltd three ways: (1) real Xero data (two genuine
+// £75,000 "Spend Money" transfers to "Aj Bell Securities Ltd", both correctly "No VAT"), (2) Xenon
+// never flags either of them despite reviewing all 626 of its flagged lines, and (3) our check was
+// flagging both (£150,000) before this exclusion — the account is Xero type FIXED (Xero has no
+// dedicated "investment" account type, so practices commonly file these under Fixed Assets even
+// though they're financial holdings, not tangible assets). Checked against every other "invest*"
+// account name across the whole client base before adding this: the only other one on a FIXED-type
+// account was this exact one — the rest (Interactive Brokers, Flagstone, crypto, etc.) sit on
+// CURRENT/NONCURRENT/EQUITY accounts, which this check was never in scope for anyway, so this stays
+// deliberately narrow to the one shape of false positive actually observed.
+const PURCHASE_TAX_EXEMPT_KEYWORDS = /\b(payroll|statutory|wages?|salar(?:y|ies)|paye|national insurance|pensions?|bank (interest|revaluations?)|depreciation|amortisation|drawings|dividends?|corporation tax|deferred tax|penalt(?:y|ies)|directors?'? remuneration|charitable|political donations|mileage|cis labour|investments?)\b/i;
 
 // Business rates sit outside VAT. Match the bare Rates account name only — "Rent & Rates"
 // must stay in scope because rent is ordinarily VATable (4X4 has that combined account).

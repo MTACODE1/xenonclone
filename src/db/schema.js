@@ -11,6 +11,16 @@ function getDb() {
     fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
     db = new Database(DB_PATH);
     db.pragma('journal_mode = WAL');
+    // SYNC_CONCURRENCY lets several clients' full syncs run at once (src/services/syncJobs.js),
+    // but every one of them writes to this same SQLite file (issues/transaction_counts/etc — see
+    // note below). WAL mode allows concurrent readers but still only one writer at a time; without
+    // an explicit busy_timeout, a writer that finds the file locked fails immediately (SQLITE_BUSY)
+    // instead of waiting, which silently broke upsertTransactionCounts (caught and swallowed at its
+    // call site) for ~62% of clients on a real production night — health_scores/issues (written
+    // earlier in the same sync) still succeeded, but transaction_counts never got that run's row,
+    // leaving the Transactions tab stuck showing the previous day's data as "no data yet". 30s is
+    // comfortably longer than any single check's write burst takes, even under 3-way contention.
+    db.pragma('busy_timeout = 30000');
     // organisations/health_scores/sync_runs/sync_jobs/xero_tokens moved to the shared MySQL
     // database — this local organisations table is no longer written to, so every remaining
     // SQLite table's "REFERENCES organisations(id)" foreign key (issues, xero_entity_cache,
