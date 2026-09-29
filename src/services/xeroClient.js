@@ -1,6 +1,7 @@
 const { XeroClient } = require('xero-node');
 const {
   getToken, upsertTokenForConnection, markConnectionDisconnected, getTenantsSharingRefreshToken,
+  withRefreshLock,
 } = require('../db/queries');
 
 // Xero is replacing broad scopes with granular ones; broad scopes keep working only until
@@ -55,8 +56,10 @@ function isAuthorisationFailure(err) {
     .test(err?.message || '');
 }
 
+const needsRefresh = row => Date.now() >= new Date(row.expires_at).getTime() - 60000;
+
 async function getAuthenticatedClient(tenantId) {
-  const tokenRow = await getToken(tenantId);
+  let tokenRow = await getToken(tenantId);
   if (!tokenRow) throw new Error(`No token found for tenant ${tenantId}`);
 
   const xero = createXeroClient();
@@ -64,58 +67,70 @@ async function getAuthenticatedClient(tenantId) {
   // initialize() must be called before any token operations in xero-node v4
   await xero.initialize();
 
-  const tokenSet = {
+  if (needsRefresh(tokenRow)) {
+    // Hold the whole "is it really still expired, and if so refresh it" decision inside the lock —
+    // several tenants sharing this connection (or several concurrent syncs for this same tenant)
+    // can all reach here within the same second. Whichever gets the lock first refreshes; everyone
+    // else re-reads the now-fresh row the winner just wrote instead of separately redeeming the
+    // same refresh_token against Xero.
+    await withRefreshLock(async () => {
+      const latest = await getToken(tenantId);
+      if (!needsRefresh(latest)) { tokenRow = latest; return; }
+
+      xero.setTokenSet({
+        access_token: latest.access_token,
+        refresh_token: latest.refresh_token,
+        expires_at: Math.floor(new Date(latest.expires_at).getTime() / 1000),
+        token_type: 'Bearer',
+      });
+      try {
+        const newTokenSet = await xero.refreshToken();
+        const expiresAtDate = newTokenSet.expires_at
+          ? new Date(newTokenSet.expires_at * 1000).toISOString()
+          : new Date(Date.now() + 1800000).toISOString();
+        // Rotate the token for the whole connection, not just this tenant — see
+        // upsertTokenForConnection. Passing the token we just consumed is what identifies the
+        // sibling tenants that would otherwise be stranded on it.
+        const propagated = await upsertTokenForConnection(latest.refresh_token, {
+          xero_tenant_id: tenantId,
+          access_token: newTokenSet.access_token,
+          refresh_token: newTokenSet.refresh_token,
+          expires_at: expiresAtDate,
+        });
+        if (propagated > 1) {
+          console.log(`Refreshed Xero token shared by ${propagated} tenants on this connection`);
+        }
+        tokenRow = { ...latest, access_token: newTokenSet.access_token, refresh_token: newTokenSet.refresh_token, expires_at: expiresAtDate };
+      } catch (err) {
+        if (isAuthorisationFailure(err)) {
+          // The authorisation itself is gone, which kills every tenant on this connection.
+          const affected = await markConnectionDisconnected(latest.refresh_token, tenantId);
+          const names = (await getTenantsSharingRefreshToken(latest.refresh_token))
+            .map(row => row.name).filter(Boolean);
+          const alsoAffected = affected > 1 && names.length
+            ? ` This authorisation covers ${names.length} organisations (${names.join(', ')}); all need reconnecting.`
+            : '';
+          throw new Error(
+            `Xero authorisation for tenant ${tenantId} is no longer valid (${err.message}). ` +
+            `Reconnect this organisation from the dashboard.${alsoAffected}`
+          );
+        }
+        // Not an auth problem — a network blip or a 5xx. Leave connection_status alone and preserve
+        // the original error shape so apiCall's transient retry can still see it.
+        const wrapped = new Error(`Token refresh failed for tenant ${tenantId}: ${err.message}`);
+        wrapped.code = err.code;
+        wrapped.response = err.response;
+        throw wrapped;
+      }
+    });
+  }
+
+  xero.setTokenSet({
     access_token: tokenRow.access_token,
     refresh_token: tokenRow.refresh_token,
     expires_at: Math.floor(new Date(tokenRow.expires_at).getTime() / 1000),
     token_type: 'Bearer',
-  };
-
-  xero.setTokenSet(tokenSet);
-
-  // Refresh if expired (or within 60s of expiry)
-  const expiresAt = new Date(tokenRow.expires_at).getTime();
-  if (Date.now() >= expiresAt - 60000) {
-    try {
-      const newTokenSet = await xero.refreshToken();
-      const expiresAtDate = newTokenSet.expires_at
-        ? new Date(newTokenSet.expires_at * 1000).toISOString()
-        : new Date(Date.now() + 1800000).toISOString();
-      // Rotate the token for the whole connection, not just this tenant — see
-      // upsertTokenForConnection. Passing the token we just consumed is what identifies the
-      // sibling tenants that would otherwise be stranded on it.
-      const propagated = await upsertTokenForConnection(tokenRow.refresh_token, {
-        xero_tenant_id: tenantId,
-        access_token: newTokenSet.access_token,
-        refresh_token: newTokenSet.refresh_token,
-        expires_at: expiresAtDate,
-      });
-      if (propagated > 1) {
-        console.log(`Refreshed Xero token shared by ${propagated} tenants on this connection`);
-      }
-      xero.setTokenSet(newTokenSet);
-    } catch (err) {
-      if (isAuthorisationFailure(err)) {
-        // The authorisation itself is gone, which kills every tenant on this connection.
-        const affected = await markConnectionDisconnected(tokenRow.refresh_token, tenantId);
-        const names = (await getTenantsSharingRefreshToken(tokenRow.refresh_token))
-          .map(row => row.name).filter(Boolean);
-        const alsoAffected = affected > 1 && names.length
-          ? ` This authorisation covers ${names.length} organisations (${names.join(', ')}); all need reconnecting.`
-          : '';
-        throw new Error(
-          `Xero authorisation for tenant ${tenantId} is no longer valid (${err.message}). ` +
-          `Reconnect this organisation from the dashboard.${alsoAffected}`
-        );
-      }
-      // Not an auth problem — a network blip or a 5xx. Leave connection_status alone and preserve
-      // the original error shape so apiCall's transient retry can still see it.
-      const wrapped = new Error(`Token refresh failed for tenant ${tenantId}: ${err.message}`);
-      wrapped.code = err.code;
-      wrapped.response = err.response;
-      throw wrapped;
-    }
-  }
+  });
 
   return xero;
 }

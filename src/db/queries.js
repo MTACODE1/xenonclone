@@ -1052,6 +1052,40 @@ async function getToken(tenantId) {
   return rows[0] || null;
 }
 
+// Serializes Xero token refreshes across the whole app — every tenant, every connection, every
+// concurrent sync (background sync jobs run several at once — see syncJobs.js). Without this,
+// several tenants sharing one connection independently notice "my token is about to expire" at the
+// same moment and each call Xero's refresh endpoint concurrently, redeeming the same refresh_token
+// from underneath one another. Confirmed on a real 17-tenant connection: syncing one large client
+// (Rose and Caramel, ~243k transactions, thousands of paginated calls) alone triggered 800+ refresh
+// calls in under a day without ever finishing a single check, because concurrent production syncs
+// for the other 16 tenants kept rotating the shared token out from under it mid-run.
+// A single fixed lock name — not one keyed by the refresh_token's current value — is deliberate: an
+// early version of this used `xero_refresh:${refreshToken}`, but the refresh_token IS the thing
+// rotating, so two callers racing a fraction of a second apart each read a different (already
+// stale) value and took out two different locks, never actually blocking each other at all. The
+// group of tenants sharing one connection is fixed at authorisation time and has no other stable,
+// query-free identifier to lock on, so this locks globally instead — correct for any connection,
+// and cheap enough to accept the (rare, sub-second) serialisation against unrelated organisations'
+// refreshes too.
+// GET_LOCK is MySQL's session-scoped advisory lock: held only on the specific connection checked
+// out here, released explicitly in `finally`, and inert across unrelated connections/lock names, so
+// it can't interfere with anything else running on the pool. 30s comfortably exceeds how long a
+// single refresh-and-write actually takes; a caller that can't get the lock in that time throws
+// rather than hanging forever.
+async function withRefreshLock(fn) {
+  const lockName = 'xero_token_refresh';
+  const conn = await getPool().getConnection();
+  try {
+    const [[{ locked }]] = await conn.query('SELECT GET_LOCK(?, 30) AS locked', [lockName]);
+    if (!locked) throw new Error('Timed out waiting for another sync to finish refreshing this Xero connection’s token');
+    return await fn();
+  } finally {
+    try { await conn.query('SELECT RELEASE_LOCK(?)', [lockName]); } catch { /* connection about to be released anyway */ }
+    conn.release();
+  }
+}
+
 // Tenants sharing one refresh token are one Xero connection; used to explain a dead connection.
 async function getTenantsSharingRefreshToken(refreshToken) {
   if (!refreshToken) return [];
@@ -2160,7 +2194,7 @@ module.exports = {
   setLineReviewState, getLineReviewStates, setFindingNote, getFindingNotes, getAllFindingKeysForIssue,
   addContactExclusion, getContactExclusions, removeContactExclusion,
   upsertToken, upsertTokenForConnection, markConnectionDisconnected,
-  getTenantsSharingRefreshToken, getToken, deleteToken, getSetting, setSetting,
+  getTenantsSharingRefreshToken, getToken, withRefreshLock, deleteToken, getSetting, setSetting,
   getFreeAgentToken, upsertFreeAgentToken, deleteFreeAgentToken, upsertFreeAgentOrganisation,
   getOrganisationByFreeAgentCompanyId, markOrganisationDisconnectedByFreeAgentCompany,
   upsertTransactionCounts, getTransactionCountsForOrg, getAllTransactionCounts, getPanoramaOrganisations,
