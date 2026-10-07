@@ -762,21 +762,21 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // letting one through skews this stat arbitrarily far (seen in practice: a real
   // client invoice dated 2626 instead of 2026).
   let mostRecentTransaction = null;
+  let lastBankReconciled = null;
   try {
-    const todayStr = period.end;
-    const invDates = accrecAuthorised
-      .filter(i => i.date)
-      .map(i => toDateString(i.date))
-      .filter(Boolean)
-      .filter(d => d <= period.end)
-      .sort().reverse();
-    mostRecentTransaction = invDates[0] || null;
+    const today = new Date().toISOString().slice(0, 10);
+    const latest = items => items.map(i => toDateString(i.date)).filter(d => d && d <= today).sort().pop() || null;
+    const authorisedBank = allBankTransactions.filter(t => t.status === 'AUTHORISED');
+    const candidates = [
+      latest(accrecAuthorised), latest(accpayAuthorised), latest(authorisedBank),
+    ].filter(Boolean).sort();
+    mostRecentTransaction = candidates.pop() || null;
+    lastBankReconciled = latest(authorisedBank.filter(t => t.isReconciled));
   } catch (e) {
-    console.error('mostRecentTransaction calc failed (accrecAuthorised unavailable):', e.message);
+    console.error('mostRecentTransaction / lastBankReconciled calc failed:', e.message);
   }
 
   let unreconciledCount = 0;
-  let lastBankReconciled = null;
 
   // --- CRITICAL: Bank Balance Check ---
   // This check requires EXTERNAL bank statement evidence. The Xero half is fully available and is
@@ -2216,13 +2216,15 @@ async function runSync(tenantId, progressCallback, options = {}) {
       }
     }
 
-    const customerInvoices = recentAccrec.length;
-    const supplierBills = recentAccpay.length;
-    const creditNotesSales = recentSalesCN.length;
-    const creditNotesPurchase = recentPurchaseCN.length;
+    const notVoided = item => item.status !== 'VOIDED';
+    const customerInvoices = recentAccrec.filter(notVoided).length;
+    const supplierBills = recentAccpay.filter(notVoided).length;
+    const creditNotesSales = recentSalesCN.filter(notVoided).length;
+    const creditNotesPurchase = recentPurchaseCN.filter(notVoided).length;
 
+    // Xero returns DELETED bank transactions from GET BankTransactions; they are not processed items.
     const bankProcessed = allBankTransactions
-      .filter(item => isWithinPeriod(toDateString(item.date), period)).length;
+      .filter(item => item.status === 'AUTHORISED' && isWithinPeriod(toDateString(item.date), period)).length;
 
     // Journals are only used for the panorama transaction-count card. A network blip here must
     // never discard a completed health-check run — Rose already lost an 8-hour sync that way,
