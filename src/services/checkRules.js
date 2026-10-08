@@ -35,14 +35,12 @@ function resolveCheckDisplayStatus(check) {
   return Number(check.count) > 0 ? 'issues' : 'ok';
 }
 
-// Xenon's own Multi-Account/Multi-Tax Code Suppliers documentation states the pattern-detection
-// lookback is "3 months prior to the period selected" by default, and is changeable per client on
-// Xenon's settings page — it is not a fixed value shared by every client. 12 months is this app's
-// own empirically-tuned fallback (measured against five real clients before this setting existed);
-// it stays the default for any client that hasn't been given a specific value, so nothing already
-// validated changes, but a new client whose real Xenon lookback differs can now be configured to
-// match instead of silently guessing.
-const DEFAULT_SUPPLIER_PATTERN_LOOKBACK_MONTHS = 12;
+// Xenon's own default for both lookbacks is 3 months, and all 31 clients checked against Xenon's
+// settings pages (8 Oct 2026) use exactly that. The earlier 12-month fallback was tuned before the
+// lookback was anchored to period.start (28 Sep 2026), when the window silently collapsed; with
+// the anchor fixed, 12 months pulls in pre-period bills and over-flags (YR Barda, Valoris, Rail).
+// A client whose real Xenon setting differs can still be configured per client.
+const DEFAULT_SUPPLIER_PATTERN_LOOKBACK_MONTHS = 3;
 function resolveSupplierPatternLookbackMonths(org) {
   const configured = Number(org?.supplier_pattern_lookback_months);
   return Number.isInteger(configured) && configured > 0 ? configured : DEFAULT_SUPPLIER_PATTERN_LOOKBACK_MONTHS;
@@ -202,11 +200,33 @@ const CHECK_DEFINITIONS = Object.freeze([
   { type: 'inactive_contacts', importance: 'low', label: 'Inactive Contacts' },
 ]);
 
+// Review checks the practice asked for on 8 Oct 2026. Kept apart from CHECK_DEFINITIONS, which mirrors
+// Xenon's 29 published checks and is what the validation gate compares against.
+const REVIEW_CHECK_DEFINITIONS = Object.freeze([
+  { type: 'journal_revenue_vs_expense', importance: 'medium', label: 'Revenue Journalled Against Expense' },
+  { type: 'journal_vat_control', importance: 'medium', label: 'VAT Control Journals' },
+  { type: 'journal_to_bank', importance: 'medium', label: 'Journals to Bank Accounts' },
+  { type: 'journal_fixed_asset_to_expense', importance: 'medium', label: 'Fixed Asset Credited to Expense' },
+  { type: 'suspense_open_balance', importance: 'medium', label: 'Suspense & Clearing Balances' },
+  { type: 'tax_review_by_code', importance: 'low', label: 'Tax Review by Code' },
+  { type: 'vat_scheme_threshold', importance: 'medium', label: 'VAT Scheme Thresholds' },
+]);
+const ALL_CHECK_DEFINITIONS = Object.freeze([...CHECK_DEFINITIONS, ...REVIEW_CHECK_DEFINITIONS]);
+
 const NON_SCORED_CHECKS = Object.freeze([
   'duplicate_contacts',
   'contact_defaults',
   'inactive_contacts',
   'undocumented_bills',
+  // New review checks start informational only: they must not move any client's health score
+  // until the practice has agreed their weighting.
+  'journal_revenue_vs_expense',
+  'journal_vat_control',
+  'journal_to_bank',
+  'journal_fixed_asset_to_expense',
+  'suspense_open_balance',
+  'tax_review_by_code',
+  'vat_scheme_threshold',
 ]);
 
 // Processor fees are deliberately not exempt: MBX evidence showed that Xenon includes them.
@@ -711,6 +731,8 @@ function calculateHealthScore(issues, options = {}) {
 module.exports = {
   CHECK_DEFAULTS,
   CHECK_DEFINITIONS,
+  REVIEW_CHECK_DEFINITIONS,
+  ALL_CHECK_DEFINITIONS,
   NON_SCORED_CHECKS,
   RESERVED_PERIOD_LABELS,
   NOT_APPLICABLE_PERIODS,

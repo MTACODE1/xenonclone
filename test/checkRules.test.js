@@ -512,16 +512,16 @@ test('grossLineAmount/netLineAmount default missing lineAmount/taxAmount to zero
 });
 
 // resolveSupplierPatternLookbackMonths — Xenon's own docs for Multi-Account/Multi-Tax Code
-// Suppliers state the lookback is 3 months by default and changeable per client; this app's
-// 12-month value is its own fallback, tuned before this setting existed, and must stay the
-// default for any client without an explicit override so already-validated clients don't change.
+// Xenon's lookback is 3 months by default and changeable per client; this app now defaults to the
+// same 3 months (it used 12 before the lookback was anchored to the period start), and a client with
+// an explicit override keeps that value.
 
-test('resolveSupplierPatternLookbackMonths defaults to 12 when unset, null, or invalid', () => {
-  assert.equal(resolveSupplierPatternLookbackMonths({}), 12);
-  assert.equal(resolveSupplierPatternLookbackMonths({ supplier_pattern_lookback_months: null }), 12);
-  assert.equal(resolveSupplierPatternLookbackMonths({ supplier_pattern_lookback_months: 0 }), 12);
-  assert.equal(resolveSupplierPatternLookbackMonths({ supplier_pattern_lookback_months: -3 }), 12);
-  assert.equal(resolveSupplierPatternLookbackMonths(undefined), 12);
+test('resolveSupplierPatternLookbackMonths defaults to 3 when unset, null, or invalid', () => {
+  assert.equal(resolveSupplierPatternLookbackMonths({}), 3);
+  assert.equal(resolveSupplierPatternLookbackMonths({ supplier_pattern_lookback_months: null }), 3);
+  assert.equal(resolveSupplierPatternLookbackMonths({ supplier_pattern_lookback_months: 0 }), 3);
+  assert.equal(resolveSupplierPatternLookbackMonths({ supplier_pattern_lookback_months: -3 }), 3);
+  assert.equal(resolveSupplierPatternLookbackMonths(undefined), 3);
 });
 
 test('resolveSupplierPatternLookbackMonths uses a configured positive value, matching Xenon\'s own per-client setting', () => {
@@ -534,12 +534,12 @@ test('resolveSupplierPatternLookbackMonths uses a configured positive value, mat
 // widening one client's multi-tax lookback (e.g. Handymanz to 18 months) must not also widen
 // their separately-validated multi-account default.
 
-test('resolveMultiAccountPatternLookbackMonths defaults to 12 when unset, null, or invalid', () => {
-  assert.equal(resolveMultiAccountPatternLookbackMonths({}), 12);
-  assert.equal(resolveMultiAccountPatternLookbackMonths({ multi_account_pattern_lookback_months: null }), 12);
-  assert.equal(resolveMultiAccountPatternLookbackMonths({ multi_account_pattern_lookback_months: 0 }), 12);
-  assert.equal(resolveMultiAccountPatternLookbackMonths({ multi_account_pattern_lookback_months: -3 }), 12);
-  assert.equal(resolveMultiAccountPatternLookbackMonths(undefined), 12);
+test('resolveMultiAccountPatternLookbackMonths defaults to 3 when unset, null, or invalid', () => {
+  assert.equal(resolveMultiAccountPatternLookbackMonths({}), 3);
+  assert.equal(resolveMultiAccountPatternLookbackMonths({ multi_account_pattern_lookback_months: null }), 3);
+  assert.equal(resolveMultiAccountPatternLookbackMonths({ multi_account_pattern_lookback_months: 0 }), 3);
+  assert.equal(resolveMultiAccountPatternLookbackMonths({ multi_account_pattern_lookback_months: -3 }), 3);
+  assert.equal(resolveMultiAccountPatternLookbackMonths(undefined), 3);
 });
 
 test('resolveMultiAccountPatternLookbackMonths uses a configured positive value independent of supplier_pattern_lookback_months', () => {

@@ -430,10 +430,11 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
   let summary = { active: 0, dismissed: 0, ignored: 0, ok: 0 };
   const status = ['active', 'dismissed', 'ignored', 'ok', 'all'].includes(req.query.status)
     ? req.query.status : 'all';
+  const contact = typeof req.query.contact === 'string' ? req.query.contact.trim().slice(0, 100) : '';
   if (issue) {
-    pagination = getIssueFindings(issue.id, org.id, req.query.page, 50, status);
+    pagination = getIssueFindings(issue.id, org.id, req.query.page, 50, status, contact);
     summary = getIssueFindingSummary(issue.id, org.id);
-    if (pagination.total === 0 && issue.detail_json) {
+    if (pagination.total === 0 && issue.detail_json && !contact) {
       try {
         pagination.items = JSON.parse(issue.detail_json);
         pagination.total = pagination.items.length;
@@ -490,7 +491,7 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
     extraData.bankReconciliation = getBankReconciliationForOrg(org.id);
     extraData.excludedBankAccountIds = getExcludedBankAccountIds(org.id);
   }
-  res.render('checkDetail', { org, issue, def, items, pagination, summary, status, checkType, checkDescriptions, ...extraData });
+  res.render('checkDetail', { org, issue, def, items, pagination, summary, status, contact, checkType, checkDescriptions, ...extraData });
 });
 
 function csvCell(value) {
@@ -510,7 +511,7 @@ router.get('/:tenantId/check/:checkType/export.csv', async (req, res) => {
   const status = ['active', 'dismissed', 'ignored', 'ok', 'all'].includes(req.query.status) ? req.query.status : 'all';
   const rows = [];
   for (let page = 1; ; page++) {
-    const chunk = getIssueFindings(issue.id, org.id, page, 100, status);
+    const chunk = getIssueFindings(issue.id, org.id, page, 100, status, typeof req.query.contact === 'string' ? req.query.contact : '');
     for (const item of chunk.items) {
       const { transactions, ...parent } = item;
       if (Array.isArray(transactions) && transactions.length) {

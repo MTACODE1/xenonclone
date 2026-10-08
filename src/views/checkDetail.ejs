@@ -216,8 +216,14 @@ function toggleBbEditForm(id) {
       ['all', 'All', summary.active + summary.dismissed + summary.ignored + summary.ok]
     ].forEach(([key, label, count]) => { %>
       <a class="btn btn-sm <%= status === key ? 'btn-primary' : 'btn-outlined' %>"
-         href="?status=<%= key %>"><%= label %> (<%= count %>)</a>
+         href="?status=<%= key %><%= contact ? '&contact=' + encodeURIComponent(contact) : '' %>"><%= label %> (<%= count %>)</a>
     <% }) %>
+    <form method="get" style="display:inline-flex;gap:6px;margin-left:auto;align-items:center;">
+      <input type="hidden" name="status" value="<%= status %>">
+      <input class="form-input" type="search" name="contact" value="<%= contact %>" maxlength="100" placeholder="Filter by contact" style="width:200px;">
+      <button type="submit" class="btn btn-sm btn-outlined">Filter</button>
+      <% if (contact) { %><a class="btn btn-sm btn-outlined" href="?status=<%= status %>">Clear</a><% } %>
+    </form>
   </div>
   <% if (!items || items.length === 0) { %>
     <div class="empty-state">
@@ -263,7 +269,7 @@ function toggleBbEditForm(id) {
       <input form="bulkReview" type="hidden" name="csrf_token" value="<%= csrfToken %>">
       <input form="bulkReview" type="hidden" name="return_status" value="<%= status %>">
       <input form="bulkReview" type="hidden" name="return_page" value="<%= pagination.page %>">
-      <a class="btn btn-sm btn-outlined" href="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= checkType %>/export.csv?status=<%= status %>">Export CSV</a>
+      <a class="btn btn-sm btn-outlined" href="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= checkType %>/export.csv?status=<%= status %><%= contact ? '&contact=' + encodeURIComponent(contact) : '' %>">Export CSV</a>
       <button type="button" class="btn btn-sm btn-outlined" id="selectPageBtn" onclick="toggleSelectPage(this)">Select page</button>
       <select form="bulkReview" name="action" class="form-input" style="width:auto;">
         <option value="dismissed">Dismiss</option>
@@ -533,10 +539,10 @@ function toggleBbEditForm(id) {
         </span>
         <div style="display:flex; gap:8px;">
           <% if (pagination.page > 1) { %>
-            <a class="btn btn-outlined btn-sm" href="?status=<%= status %>&page=<%= pagination.page - 1 %>">Previous</a>
+            <a class="btn btn-outlined btn-sm" href="?status=<%= status %>&page=<%= pagination.page - 1 %><%= contact ? '&contact=' + encodeURIComponent(contact) : '' %>">Previous</a>
           <% } %>
           <% if (pagination.page < pagination.totalPages) { %>
-            <a class="btn btn-outlined btn-sm" href="?status=<%= status %>&page=<%= pagination.page + 1 %>">Next</a>
+            <a class="btn btn-outlined btn-sm" href="?status=<%= status %>&page=<%= pagination.page + 1 %><%= contact ? '&contact=' + encodeURIComponent(contact) : '' %>">Next</a>
           <% } %>
         </div>
       </div>

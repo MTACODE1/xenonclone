@@ -690,7 +690,7 @@ function getIssueByCheckType(orgId, checkType) {
 // reached with a mismatched (issueId, orgId) pair. Requiring orgId here anyway means a future
 // caller that skips that lookup fails closed (returns nothing) instead of silently leaking another
 // organisation's finding detail if it ever passed the wrong issueId.
-function getIssueFindings(issueId, orgId, page = 1, pageSize = 50, status = 'active') {
+function getIssueFindings(issueId, orgId, page = 1, pageSize = 50, status = 'active', contact = '') {
   const db = getDb();
   const safeSize = Math.min(100, Math.max(1, Number(pageSize) || 50));
   const allowedStatus = ['active', 'dismissed', 'ignored', 'ok', 'all'].includes(status) ? status : 'active';
@@ -699,8 +699,17 @@ function getIssueFindings(issueId, orgId, page = 1, pageSize = 50, status = 'act
     WHEN r.state = 'ignored' AND datetime(r.ignored_until) > datetime('now') THEN 'ignored'
     WHEN r.state = 'ok' AND r.period_key = i.period_checked THEN 'ok'
     ELSE 'active' END`;
-  const where = allowedStatus === 'all' ? '' : `AND (${effectiveState}) = ?`;
-  const params = allowedStatus === 'all' ? [issueId, orgId] : [issueId, orgId, allowedStatus];
+  const contactTerm = String(contact || '').trim().slice(0, 100);
+  // Contact search: findings carry the contact under different keys depending on the check
+  // (name for supplier-pattern checks, contact/contactName for documents and bank items).
+  const contactClause = contactTerm
+    ? `AND (json_extract(f.detail_json, '$.name') LIKE ? ESCAPE '\\' OR json_extract(f.detail_json, '$.contact') LIKE ? ESCAPE '\\' OR json_extract(f.detail_json, '$.contactName') LIKE ? ESCAPE '\\')`
+    : '';
+  const like = `%${contactTerm.replace(/[\\%_]/g, ch => '\\' + ch)}%`;
+  const where = (allowedStatus === 'all' ? '' : `AND (${effectiveState}) = ?`) + ' ' + contactClause;
+  const params = [issueId, orgId];
+  if (allowedStatus !== 'all') params.push(allowedStatus);
+  if (contactTerm) params.push(like, like, like);
   const total = db.prepare(`
     SELECT COUNT(*) AS count
     FROM issue_findings f
@@ -750,8 +759,17 @@ function getAllFindingKeysForIssue(issueId, orgId, status = 'active') {
     WHEN r.state = 'ignored' AND datetime(r.ignored_until) > datetime('now') THEN 'ignored'
     WHEN r.state = 'ok' AND r.period_key = i.period_checked THEN 'ok'
     ELSE 'active' END`;
-  const where = allowedStatus === 'all' ? '' : `AND (${effectiveState}) = ?`;
-  const params = allowedStatus === 'all' ? [issueId, orgId] : [issueId, orgId, allowedStatus];
+  const contactTerm = String(contact || '').trim().slice(0, 100);
+  // Contact search: findings carry the contact under different keys depending on the check
+  // (name for supplier-pattern checks, contact/contactName for documents and bank items).
+  const contactClause = contactTerm
+    ? `AND (json_extract(f.detail_json, '$.name') LIKE ? ESCAPE '\\' OR json_extract(f.detail_json, '$.contact') LIKE ? ESCAPE '\\' OR json_extract(f.detail_json, '$.contactName') LIKE ? ESCAPE '\\')`
+    : '';
+  const like = `%${contactTerm.replace(/[\\%_]/g, ch => '\\' + ch)}%`;
+  const where = (allowedStatus === 'all' ? '' : `AND (${effectiveState}) = ?`) + ' ' + contactClause;
+  const params = [issueId, orgId];
+  if (allowedStatus !== 'all') params.push(allowedStatus);
+  if (contactTerm) params.push(like, like, like);
   return db.prepare(`
     SELECT f.finding_key
     FROM issue_findings f

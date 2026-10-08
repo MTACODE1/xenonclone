@@ -634,7 +634,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
         <p style="font-size: 0.75rem; color: #7C8FAC; margin-top: 4px;">
           Xenon looks back this many months before the checked period to spot a supplier's usual account/tax
           code — 3 months by default in Xenon, adjustable per client there too. Leave blank to use this app's
-          own 12-month default, already matched against existing clients.
+          own 3-month default, which matches Xenon's default.
         </p>
       </div>
       <form method="POST" action="<%= basePath %>/client/<%= orgIdentifier %>/supplier-pattern-lookback" style="padding: 16px 20px; display: flex; align-items: center; gap: 20px; flex-wrap: wrap;">
@@ -643,13 +643,13 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
           Multi-Tax lookback months
           <input type="number" min="1" step="1" name="supplier_pattern_lookback_months"
             value="<%= org.supplier_pattern_lookback_months == null ? '' : org.supplier_pattern_lookback_months %>"
-            placeholder="12" class="form-input" style="width: 80px; padding: 4px 6px;">
+            placeholder="3" class="form-input" style="width: 80px; padding: 4px 6px;">
         </label>
         <label style="font-size: 0.875rem; display: flex; align-items: center; gap: 8px;">
           Multi-Account lookback months
           <input type="number" min="1" step="1" name="multi_account_pattern_lookback_months"
             value="<%= org.multi_account_pattern_lookback_months == null ? '' : org.multi_account_pattern_lookback_months %>"
-            placeholder="12" class="form-input" style="width: 80px; padding: 4px 6px;">
+            placeholder="3" class="form-input" style="width: 80px; padding: 4px 6px;">
         </label>
         <button type="submit" class="btn btn-primary btn-sm">Save</button>
       </form>

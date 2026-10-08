@@ -17,7 +17,7 @@ const {
 const { fetchCompanyProfile, fetchFiledNetAssets, normalizeCompanyNumber } = require('./companiesHouse');
 const { getDb: getDatabase } = require('../db/schema');
 const {
-  CHECK_DEFAULTS, CHECK_DEFINITIONS, NON_SCORED_CHECKS, calculateHealthScore, findDirectMatches,
+  CHECK_DEFAULTS, CHECK_DEFINITIONS, ALL_CHECK_DEFINITIONS, NON_SCORED_CHECKS, calculateHealthScore, findDirectMatches,
   findDuplicateContacts, findDuplicates, excludeDuplicateDrafts, findUnexpectedDefaultLines,
   findMisallocatedLines, resolveCapitalReviewCandidateCodes,
   isOldDocument, isPurchaseTaxExemptAccount, resolvePeriodChecked, resolveSupplierPatternLookbackMonths,
@@ -33,6 +33,7 @@ const {
   withDisplayOnlyBankFindings
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
+const journalChecks = require('./journalChecks');
 const {
   allocateStatementMatches, extractNetAssetsFromBalanceSheet, balanceSheetHoldsBookkeeping,
   recomputeEvidenceIssues
@@ -567,13 +568,11 @@ async function runSync(tenantId, progressCallback, options = {}) {
   const capitalReviewCandidateCodes = resolveCapitalReviewCandidateCodes(
     accountCheckConfigurations, accountNameByCode, org.account_settings_initialised
   );
-  // £200, not the old unexplained £500 fallback — cross-checked against the practice's own real
-  // Xenon general settings (7 Sep 2026): Low Cost Assets and Capital Item Review's two default
-  // accounts (Repairs & Maintenance, Printing & Stationery) all show £200, matching the sibling
-  // low_cost_fixed_assets check's own hardcoded LOW_COST_THRESHOLD and MBX's independently
-  // confirmed per-account £200 (XENON_PARITY_SPEC.md's "Capital settings reconstructed" entry).
+  // £2,000: the firm's own Xenon default for Capital Item Review (Repairs & Maintenance, Printing &
+  // Stationery), confirmed by the practice on 8 Oct 2026 and visible in Xenon's per-client settings
+  // (e.g. Pegesus). Earlier cross-checks found £200 (7 Sep 2026); a client can still override it.
   const defaultCapitalReviewThreshold = resolveCapitalReviewDefaultThreshold(
-    org, parseFloat(getSetting('capital_review_threshold')) || 200
+    org, parseFloat(getSetting('capital_review_threshold')) || 2000
   );
 
   const purchaseTaxExemptOverrideCodes = new Set(
@@ -1908,6 +1907,79 @@ async function runSync(tenantId, progressCallback, options = {}) {
     console.error('undocumented_bills check failed — skipping (will show as "Not synced"):', err.message);
   }
 
+  // --- Review checks added 8 Oct 2026 (non-scored): unusual journals, suspense balances, tax review by
+  // code and the VAT scheme monitor. All but the suspense balance reuse data already downloaded. ---
+  if (chartOfAccountsAvailable) {
+    try {
+      const unusual = journalChecks.detectUnusualJournals({ journals: recentManualJournals, accounts: chartOfAccounts });
+      for (const [checkType, items] of Object.entries(unusual)) {
+        insertIssue({
+          org_id: orgId, check_type: checkType, importance: 'medium',
+          count: items.length, potential_value_gbp: sumAbsoluteExposure(items),
+          detail_json: JSON.stringify(items), period_checked: 'since_lock_date',
+        });
+      }
+    } catch (err) {
+      console.error('unusual journal checks failed — skipping (will show as "Not synced"):', err.message);
+    }
+    if (!options.cacheOnly) {
+      try {
+        const tbResp = await apiCall(tenantId, async (xero, tid) => xero.accountingApi.getReportTrialBalance(tid, period.end, false));
+        const items = journalChecks.suspenseOpenBalances(tbResp.body.reports?.[0], { asOf: period.end });
+        insertIssue({
+          org_id: orgId, check_type: 'suspense_open_balance', importance: 'medium',
+          count: items.length, potential_value_gbp: sumAbsoluteExposure(items),
+          detail_json: JSON.stringify(items), period_checked: 'since_lock_date',
+        });
+      } catch (err) {
+        console.error('suspense_open_balance check failed — skipping (will show as "Not synced"):', err?.response?.body?.Message || err.message);
+      }
+    }
+  }
+  try {
+    const items = journalChecks.taxReviewByCode({
+      documents: [...inPeriod(accrecAuthorised), ...inPeriod(accpayAuthorised), ...bankSpendTxns, ...bankReceiveTxns],
+      taxRates, minValue: 0,
+    });
+    insertIssue({
+      org_id: orgId, check_type: 'tax_review_by_code', importance: 'low',
+      count: items.length, potential_value_gbp: 0,
+      detail_json: JSON.stringify(items), period_checked: 'since_lock_date',
+    });
+  } catch (err) {
+    console.error('tax_review_by_code check failed — skipping (will show as "Not synced"):', err.message);
+  }
+  try {
+    const scheme = journalChecks.classifyVatScheme(orgInfo.salesTaxBasis, orgInfo.salesTaxPeriod);
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const to = period.end < todayIso ? period.end : todayIso;
+    const fromDate = new Date(`${to}T00:00:00Z`);
+    fromDate.setUTCFullYear(fromDate.getUTCFullYear() - 1);
+    fromDate.setUTCDate(fromDate.getUTCDate() + 1);
+    const documents = [
+      ...accrecAuthorised.map(d => ({ ...d, __sign: 1 })),
+      ...salesCredits.filter(c => ['AUTHORISED', 'PAID'].includes(c.status)).map(d => ({ ...d, __sign: -1 })),
+      ...allBankTransactions.filter(t => t.status === 'AUTHORISED' && t.type === 'RECEIVE').map(d => ({ ...d, __sign: 1 })),
+      ...allBankTransactions.filter(t => t.status === 'AUTHORISED' && t.type === 'SPEND').map(d => ({ ...d, __sign: -1 })),
+    ];
+    const { taxableNet, grossIncome } = journalChecks.rollingVatTurnover({
+      documents, taxRates, revenueCodes: turnoverAccountCodes, from: fromDate.toISOString().slice(0, 10), to,
+    });
+    const verdict = journalChecks.evaluateVatScheme({ scheme, taxableNet, grossIncome });
+    const flagged = verdict.level !== 'ok';
+    const items = flagged ? [{
+      documentId: 'vat-scheme', number: null, date: to, source: 'vat_scheme', accountCode: scheme,
+      description: verdict.message, amount: verdict.value, level: verdict.level, rule: verdict.rule, limit: verdict.limit,
+    }] : [];
+    insertIssue({
+      org_id: orgId, check_type: 'vat_scheme_threshold', importance: 'medium',
+      count: items.length, potential_value_gbp: 0,
+      detail_json: JSON.stringify(items), period_checked: 'rolling_12_months',
+    });
+  } catch (err) {
+    console.error('vat_scheme_threshold check failed — skipping (will show as "Not synced"):', err.message);
+  }
+
   // --- MEDIUM: Sales Tax on Bills / Purchase Tax on Invoices (wrong-direction tax code) ---
   // Uses each TaxRate's canApplyToRevenue/canApplyToExpenses flags to tell a sales-only code
   // from a purchase-only one — a tax type valid for both (or neither, e.g. "NONE") isn't an error.
@@ -2299,4 +2371,4 @@ async function runSync(tenantId, progressCallback, options = {}) {
   return { score, totalIssues, totalPotentialErrors, period };
 }
 
-module.exports = { syncOrganisation, CHECK_DEFINITIONS, calculateHealthScore };
+module.exports = { syncOrganisation, CHECK_DEFINITIONS: ALL_CHECK_DEFINITIONS, calculateHealthScore };
