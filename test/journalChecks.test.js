@@ -166,3 +166,12 @@ test('supplierPaymentSources flags suppliers paid from both a bank account and t
   const shell = out.find(i => i.name === 'Shell');
   assert.equal(shell.dlaPayments, 1);
 });
+
+test('joiningEstimates only suggests schemes to standard-scheme clients and only within the joining limits', () => {
+  const { joiningEstimates } = require('../src/services/journalChecks');
+  assert.deepEqual(joiningEstimates({ scheme: 'standard', taxableNet: 120000 }).map(r => r.rule), ['flat_rate_join', 'cash_annual_join']);
+  assert.deepEqual(joiningEstimates({ scheme: 'standard', taxableNet: 150001 }).map(r => r.rule), ['cash_annual_join']);
+  assert.deepEqual(joiningEstimates({ scheme: 'standard', taxableNet: 1350001 }), []);
+  for (const scheme of ['unregistered', 'flat_rate', 'cash', 'annual']) assert.deepEqual(joiningEstimates({ scheme, taxableNet: 50000 }), []);
+  assert.match(joiningEstimates({ scheme: 'standard', taxableNet: 100000 })[0].message, /VAT group/);
+});

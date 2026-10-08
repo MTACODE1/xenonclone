@@ -268,8 +268,11 @@ function taxReviewByCode({ documents, taxRates, minValue = 0 }) {
 const VAT_LIMITS = Object.freeze({
   registration: 90000,
   deregistration: 88000,
+  flatRateJoin: 150000,
   flatRateLeave: 230000,
+  cashJoin: 1350000,
   cashLeave: 1600000,
+  annualJoin: 1350000,
   annualLeave: 1600000,
   amberBand: 0.9,
 });
@@ -338,7 +341,27 @@ function evaluateVatScheme({ scheme, taxableNet, grossIncome, limits = VAT_LIMIT
   return { scheme, ...result };
 }
 
+// Joining tests look at expected turnover over the NEXT 12 months, which cannot be seen. The last 12
+// months is the usual guide, so these are estimates, shown as information only. HMRC's other
+// conditions (no recent exit from a scheme, not in a VAT group, returns and payments up to date) are
+// not held in Xero and must be checked by the accountant.
+function joiningEstimates({ scheme, taxableNet, limits = VAT_LIMITS }) {
+  if (scheme !== 'standard') return [];
+  const money = v => `£${Math.round(v).toLocaleString('en-GB')}`;
+  const caveat = ' This is an estimate from the last 12 months. HMRC also requires no recent exit from a scheme, not being in a VAT group, and returns and payments up to date, which Xero cannot show.';
+  const out = [];
+  if (taxableNet <= limits.flatRateJoin) {
+    out.push({ level: 'info', rule: 'flat_rate_join', value: taxableNet, limit: limits.flatRateJoin,
+      message: `Rolling 12-month taxable turnover ${money(taxableNet)} is within the £${limits.flatRateJoin.toLocaleString('en-GB')} Flat Rate joining limit, so the client may be able to join.${caveat}` });
+  }
+  if (taxableNet <= limits.cashJoin) {
+    out.push({ level: 'info', rule: 'cash_annual_join', value: taxableNet, limit: limits.cashJoin,
+      message: `Rolling 12-month taxable turnover ${money(taxableNet)} is within the £${limits.cashJoin.toLocaleString('en-GB')} Cash Accounting and Annual Accounting joining limit, so the client may be able to join either.${caveat}` });
+  }
+  return out;
+}
+
 module.exports = {
   CHECK_TYPES, VAT_LIMITS, indexAccounts, detectUnusualJournals, suspenseOpenBalances,
-  taxReviewByCode, supplierPaymentSources, classifyVatScheme, rollingVatTurnover, evaluateVatScheme,
+  taxReviewByCode, supplierPaymentSources, joiningEstimates, classifyVatScheme, rollingVatTurnover, evaluateVatScheme,
 };

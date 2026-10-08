@@ -1981,11 +1981,14 @@ async function runSync(tenantId, progressCallback, options = {}) {
       documents, taxRates, revenueCodes: turnoverAccountCodes, from: fromDate.toISOString().slice(0, 10), to,
     });
     const verdict = journalChecks.evaluateVatScheme({ scheme, taxableNet, grossIncome });
-    const flagged = verdict.level !== 'ok';
-    const items = flagged ? [{
-      documentId: 'vat-scheme', number: null, date: to, source: 'vat_scheme', accountCode: scheme,
-      description: verdict.message, amount: verdict.value, level: verdict.level, rule: verdict.rule, limit: verdict.limit,
-    }] : [];
+    const toItem = (v, suffix) => ({
+      documentId: `vat-scheme-${suffix}`, number: null, date: to, source: 'vat_scheme', accountCode: scheme,
+      description: v.message, amount: v.value, level: v.level, rule: v.rule, limit: v.limit,
+    });
+    const items = [
+      ...(verdict.level !== 'ok' ? [toItem(verdict, verdict.rule)] : []),
+      ...journalChecks.joiningEstimates({ scheme, taxableNet }).map(v => toItem(v, v.rule)),
+    ];
     insertIssue({
       org_id: orgId, check_type: 'vat_scheme_threshold', importance: 'medium',
       count: items.length, potential_value_gbp: 0,
