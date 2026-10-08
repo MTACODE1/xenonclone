@@ -31,6 +31,9 @@ function fmtDisplayDate(val) {
       <span class="font-semibold text-warning"><%= issue.count %></span> issue<%= issue.count !== 1 ? 's' : '' %> found
       <% if (issue.potential_value_gbp > 0) { %>
         &bull; Potential value: <span class="font-semibold text-error">£<%= Number(issue.potential_value_gbp).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}) %></span>
+        <% if (checkType === 'multi_account_suppliers' || checkType === 'multi_tax_suppliers') { %>
+          <span class="text-muted" style="font-size:0.8rem;">(only the amount outside each supplier's main <%= checkType === 'multi_account_suppliers' ? 'account code' : 'tax code' %>, not the supplier's full total)</span>
+        <% } %>
       <% } %>
       <% if (issue.period_checked) { %>
         &bull; Period: <%= issue.period_checked.replace(/_/g, ' ') %>
@@ -260,6 +263,7 @@ function toggleBbEditForm(id) {
       <input form="bulkReview" type="hidden" name="csrf_token" value="<%= csrfToken %>">
       <input form="bulkReview" type="hidden" name="return_status" value="<%= status %>">
       <input form="bulkReview" type="hidden" name="return_page" value="<%= pagination.page %>">
+      <a class="btn btn-sm btn-outlined" href="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= checkType %>/export.csv?status=<%= status %>">Export CSV</a>
       <button type="button" class="btn btn-sm btn-outlined" id="selectPageBtn" onclick="toggleSelectPage(this)">Select page</button>
       <select form="bulkReview" name="action" class="form-input" style="width:auto;">
         <option value="dismissed">Dismiss</option>

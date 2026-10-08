@@ -493,6 +493,43 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
   res.render('checkDetail', { org, issue, def, items, pagination, summary, status, checkType, checkDescriptions, ...extraData });
 });
 
+function csvCell(value) {
+  if (value === null || value === undefined) return '';
+  const text = typeof value === 'object' ? JSON.stringify(value) : String(value);
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+// Flat CSV of every finding for one check (one row per underlying transaction where a finding
+// carries them, e.g. multi-account/multi-tax suppliers), for comparing against Xenon's own export.
+router.get('/:tenantId/check/:checkType/export.csv', async (req, res) => {
+  const { tenantId, checkType } = req.params;
+  const org = await getOrganisationByTenantId(tenantId);
+  if (!org) return res.status(404).send('Organisation not found');
+  const issue = getIssueByCheckType(org.id, checkType);
+  if (!issue) return res.status(404).send('Check not found');
+  const status = ['active', 'dismissed', 'ignored', 'ok', 'all'].includes(req.query.status) ? req.query.status : 'all';
+  const rows = [];
+  for (let page = 1; ; page++) {
+    const chunk = getIssueFindings(issue.id, org.id, page, 100, status);
+    for (const item of chunk.items) {
+      const { transactions, ...parent } = item;
+      if (Array.isArray(transactions) && transactions.length) {
+        for (const tx of transactions) rows.push({ ...parent, ...Object.fromEntries(Object.entries(tx).map(([k, v]) => [`tx_${k}`, v])) });
+      } else {
+        rows.push(parent);
+      }
+    }
+    if (page >= chunk.totalPages) break;
+  }
+  const columns = [...rows.reduce((set, row) => { Object.keys(row).forEach(k => set.add(k)); return set; }, new Set())];
+  const csv = [columns.join(','), ...rows.map(row => columns.map(c => csvCell(row[c])).join(','))].join('\r\n');
+  res.set({
+    'Content-Type': 'text/csv; charset=utf-8',
+    'Content-Disposition': `attachment; filename="${checkType}-${tenantId}.csv"`,
+  });
+  res.send('﻿' + csv);
+});
+
 router.post(
   '/:tenantId/check/:checkType/review',
   express.urlencoded({ extended: true }),
@@ -874,7 +911,11 @@ router.get('/:tenantId/report.pdf', async (req, res) => {
     const useLocalTlsServer = process.env.XERO_REDIRECT_URI?.startsWith('https://') && process.env.NODE_ENV !== 'production';
     const protocol = useLocalTlsServer ? 'https' : 'http';
     const query = new URLSearchParams(req.query).toString();
-    const url = `${protocol}://localhost:${process.env.PORT || 3000}/client/${encodeURIComponent(tenantId)}/report${query ? `?${query}` : ''}`;
+    const basePath = (process.env.AKRIO_BASE_PATH || '').replace(/\/$/, '');
+    const url = `${protocol}://localhost:${process.env.PORT || 3000}${basePath}/client/${encodeURIComponent(tenantId)}/report${query ? `?${query}` : ''}`;
+    // The internal request must carry the caller's staff session, otherwise the report route
+    // redirects to the login page and that is what gets printed into the PDF.
+    await page.setExtraHTTPHeaders({ cookie: req.headers.cookie || '', 'x-forwarded-proto': 'https' });
     await page.goto(url, { waitUntil: 'networkidle2' });
     const pdf = await page.pdf({ format: 'A4', printBackground: true, margin: { top: '20mm', bottom: '20mm', left: '15mm', right: '15mm' } });
     res.set({ 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="health-report-${tenantId}.pdf"` });

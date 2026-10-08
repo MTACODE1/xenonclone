@@ -10,7 +10,10 @@ function getDb() {
     const fs = require('fs');
     fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
     db = new Database(DB_PATH);
-    db.pragma('journal_mode = WAL');
+    // WAL needs shared memory that network filesystems (EFS) do not provide; set
+    // SQLITE_JOURNAL_MODE=DELETE when /app/data is on EFS.
+    const journalMode = ['WAL', 'DELETE', 'TRUNCATE'].includes(process.env.SQLITE_JOURNAL_MODE) ? process.env.SQLITE_JOURNAL_MODE : 'WAL';
+    db.pragma(`journal_mode = ${journalMode}`);
     // SYNC_CONCURRENCY lets several clients' full syncs run at once (src/services/syncJobs.js),
     // but every one of them writes to this same SQLite file (issues/transaction_counts/etc — see
     // note below). WAL mode allows concurrent readers but still only one writer at a time; without
