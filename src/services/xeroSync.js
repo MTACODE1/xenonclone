@@ -1936,6 +1936,21 @@ async function runSync(tenantId, progressCallback, options = {}) {
       }
     }
   }
+  if (chartOfAccountsAvailable) {
+    try {
+      const items = journalChecks.supplierPaymentSources({
+        payments: (matchingPayments || []).filter(p => isWithinPeriod(toDateString(p.date), period)),
+        bankSpend: bankSpendTxns, accounts: chartOfAccounts,
+      });
+      insertIssue({
+        org_id: orgId, check_type: 'supplier_payment_accounts', importance: 'medium',
+        count: items.length, potential_value_gbp: sumAbsoluteExposure(items, item => item.potentialValue),
+        detail_json: JSON.stringify(items), period_checked: 'since_lock_date',
+      });
+    } catch (err) {
+      console.error('supplier_payment_accounts check failed — skipping (will show as "Not synced"):', err.message);
+    }
+  }
   try {
     const items = journalChecks.taxReviewByCode({
       documents: [...inPeriod(accrecAuthorised), ...inPeriod(accpayAuthorised), ...bankSpendTxns, ...bankReceiveTxns],

@@ -131,3 +131,38 @@ test('review checks are non-scored: adding them never changes the health score',
     assert.ok(ALL_CHECK_DEFINITIONS.some(d => d.type === type), `${type} must be listed`);
   }
 });
+
+test('supplierPaymentSources flags suppliers paid from both a bank account and the director\'s loan account only', () => {
+  const { supplierPaymentSources } = require('../src/services/journalChecks');
+  const accts = [
+    { code: '090', accountID: 'b1', name: 'Business Bank Account', type: 'BANK' },
+    { code: '091', accountID: 'b2', name: 'Savings', type: 'BANK' },
+    { code: '835', accountID: 'd1', name: "Director's Loan Account", type: 'CURRLIAB' },
+    { code: '800', accountID: 'o1', name: 'Credit Card Clearing', type: 'CURRLIAB' },
+  ];
+  const A = { contactID: 'c1', name: 'Amazon' };
+  const B = { contactID: 'c2', name: 'Tesco' };
+  const C = { contactID: 'c3', name: 'Shell' };
+  const pay = (contact, account, amount, extra = {}) => ({ status: 'AUTHORISED', paymentType: 'ACCPAYPAYMENT', date: '2026-06-01', amount, account, invoice: { contact, invoiceNumber: 'I1' }, ...extra });
+  const out = supplierPaymentSources({
+    accounts: accts,
+    payments: [
+      pay(A, { accountID: 'b1', code: '090', name: 'Business Bank Account' }, 100),
+      pay(A, { accountID: 'd1', code: '835', name: "Director's Loan Account" }, 40),
+      pay(B, { accountID: 'b1', code: '090', name: 'Business Bank Account' }, 50),
+      pay(B, { accountID: 'b2', code: '091', name: 'Savings' }, 25),
+      pay(C, { accountID: 'b1', code: '090', name: 'Business Bank Account' }, 70),
+      pay(C, { accountID: 'o1', code: '800', name: 'Credit Card Clearing' }, 30),
+      pay(A, { accountID: 'd1', code: '835', name: "Director's Loan Account" }, 999, { status: 'DELETED' }),
+    ],
+    bankSpend: [{ status: 'AUTHORISED', type: 'SPEND', contact: C, bankAccount: { accountID: 'd1', code: '835', name: 'Director loan' }, total: 12, date: '2026-06-02' }],
+  });
+  assert.deepEqual(out.map(i => i.name).sort(), ['Amazon', 'Shell']);
+  const amazon = out.find(i => i.name === 'Amazon');
+  assert.equal(amazon.bankAmount, 100);
+  assert.equal(amazon.dlaAmount, 40);
+  assert.equal(amazon.potentialValue, 40);
+  assert.equal(amazon.transactions.length, 2);
+  const shell = out.find(i => i.name === 'Shell');
+  assert.equal(shell.dlaPayments, 1);
+});

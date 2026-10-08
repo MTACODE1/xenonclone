@@ -210,6 +210,7 @@ const REVIEW_CHECK_DEFINITIONS = Object.freeze([
   { type: 'suspense_open_balance', importance: 'medium', label: 'Suspense & Clearing Balances' },
   { type: 'tax_review_by_code', importance: 'low', label: 'Tax Review by Code' },
   { type: 'vat_scheme_threshold', importance: 'medium', label: 'VAT Scheme Thresholds' },
+  { type: 'supplier_payment_accounts', importance: 'medium', label: 'Supplier Paid From Bank and DLA' },
 ]);
 const ALL_CHECK_DEFINITIONS = Object.freeze([...CHECK_DEFINITIONS, ...REVIEW_CHECK_DEFINITIONS]);
 
@@ -227,6 +228,7 @@ const NON_SCORED_CHECKS = Object.freeze([
   'suspense_open_balance',
   'tax_review_by_code',
   'vat_scheme_threshold',
+  'supplier_payment_accounts',
 ]);
 
 // Processor fees are deliberately not exempt: MBX evidence showed that Xenon includes them.
@@ -628,6 +630,7 @@ function selectOldCredits(credits, asOf, days = CHECK_DEFAULTS.oldDocumentDays) 
 
 const CONTACT_FINDING_CHECKS = new Set([
   'multi_account_suppliers', 'multi_tax_suppliers', 'contact_defaults', 'inactive_contacts',
+  'supplier_payment_accounts',
 ]);
 const ACCOUNT_FINDING_CHECKS = new Set(['bank_balance']);
 const PAIR_FINDING_CHECKS = new Set([

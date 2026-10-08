@@ -12,6 +12,7 @@ const CHECK_TYPES = Object.freeze({
   suspenseOpen: 'suspense_open_balance',
   taxReview: 'tax_review_by_code',
   vatScheme: 'vat_scheme_threshold',
+  supplierPaymentAccounts: 'supplier_payment_accounts',
 });
 
 const DISPOSAL_NAME = /disposal|gain on|loss on|profit on|sale of|sold/i;
@@ -134,6 +135,58 @@ function fixedAssetCreditedToExpense(journals, index) {
     }
   }
   return items;
+}
+
+const DLA_NAME = /director.?s?\s*(loan|current)|\bdla\b/i;
+
+// Suppliers paid from BOTH a bank account and the director's loan account in the period. Only those
+// two payment sources are considered; payments from any other account are ignored on purpose.
+function supplierPaymentSources({ payments, bankSpend, accounts }) {
+  const byCode = indexAccounts(accounts);
+  const byId = new Map();
+  for (const a of accounts || []) if (a && a.accountID) byId.set(a.accountID, a);
+  const sourceOf = acct => {
+    if (!acct) return null;
+    const known = (acct.code && byCode.get(String(acct.code).toUpperCase())) || byId.get(acct.accountID) || {};
+    const name = acct.name || known.name || '';
+    const type = acct.type || known.type || '';
+    if (DLA_NAME.test(name)) return 'dla';
+    return type === 'BANK' ? 'bank' : null;
+  };
+  const contacts = new Map();
+  const note = (contact, acct, amount, date, reference, kind) => {
+    const contactId = contact && contact.contactID;
+    const source = sourceOf(acct);
+    if (!contactId || !source) return;
+    const entry = contacts.get(contactId) || { contactId, name: contact.name || '', bank: { count: 0, amount: 0 }, dla: { count: 0, amount: 0 }, transactions: [] };
+    entry[source].count += 1;
+    entry[source].amount += Math.abs(Number(amount) || 0);
+    entry.transactions.push({
+      date: toIsoDate(date), reference: reference || null, amount: Math.abs(Number(amount) || 0),
+      accountCode: source === 'dla' ? "Director's loan account" : 'Bank account',
+      accountName: acct.name || null, source: kind,
+    });
+    contacts.set(contactId, entry);
+  };
+  for (const payment of payments || []) {
+    if (payment.status !== 'AUTHORISED' || !/ACCPAY/i.test(payment.paymentType || '')) continue;
+    note(payment.invoice && payment.invoice.contact, payment.account, payment.amount, payment.date,
+      payment.reference || (payment.invoice && payment.invoice.invoiceNumber), 'payment');
+  }
+  for (const txn of bankSpend || []) {
+    if (txn.status !== 'AUTHORISED' || txn.type !== 'SPEND') continue;
+    note(txn.contact, txn.bankAccount, txn.total, txn.date, txn.reference, 'bank_spend');
+  }
+  return [...contacts.values()]
+    .filter(c => c.bank.count > 0 && c.dla.count > 0)
+    .map(c => ({
+      contactId: c.contactId, name: c.name,
+      accountCodes: ['Bank account', "Director's loan account"],
+      bankPayments: c.bank.count, dlaPayments: c.dla.count,
+      bankAmount: c.bank.amount, dlaAmount: c.dla.amount,
+      potentialValue: Math.min(c.bank.amount, c.dla.amount),
+      transactions: c.transactions.sort((a, b) => (b.date || '').localeCompare(a.date || '')),
+    }));
 }
 
 function detectUnusualJournals({ journals, accounts }) {
@@ -287,5 +340,5 @@ function evaluateVatScheme({ scheme, taxableNet, grossIncome, limits = VAT_LIMIT
 
 module.exports = {
   CHECK_TYPES, VAT_LIMITS, indexAccounts, detectUnusualJournals, suspenseOpenBalances,
-  taxReviewByCode, classifyVatScheme, rollingVatTurnover, evaluateVatScheme,
+  taxReviewByCode, supplierPaymentSources, classifyVatScheme, rollingVatTurnover, evaluateVatScheme,
 };
