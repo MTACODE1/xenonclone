@@ -12,7 +12,7 @@ const {
   createSyncRun, finishSyncRun, activateSyncRun, getIssuesForRun, getScoringObservationsForRun,
   mergeEntityCache, getCachedEntities, getEntityCacheWatermark,
   updateOrganisationCompanyNumber, upsertCompaniesHouseProfile, getCompaniesHouseProfileForOrg,
-  upsertFiledAccountsFromCompaniesHouse, recordFiledAccountsExtraction
+  upsertFiledAccountsFromCompaniesHouse, recordFiledAccountsExtraction, getFiledAccountsExtractionsForOrg
 } = require('../db/queries');
 const { fetchCompanyProfile, fetchFiledNetAssets, normalizeCompanyNumber } = require('./companiesHouse');
 const { getDb: getDatabase } = require('../db/schema');
@@ -1924,15 +1924,23 @@ async function runSync(tenantId, progressCallback, options = {}) {
     }
     if (!options.cacheOnly) {
       try {
-        const tbResp = await apiCall(tenantId, async (xero, tid) => xero.accountingApi.getReportTrialBalance(tid, period.end, false));
-        const items = journalChecks.suspenseOpenBalances(tbResp.body.reports?.[0], { asOf: period.end });
+        const bsResp = await apiCall(tenantId, async (xero, tid) =>
+          xero.accountingApi.getReportBalanceSheet(tid, period.end, undefined, undefined, undefined, undefined, true, false));
+        const bsReport = bsResp.body.reports?.[0];
+        const suspense = journalChecks.suspenseOpenBalances(bsReport, { asOf: period.end });
         insertIssue({
           org_id: orgId, check_type: 'suspense_open_balance', importance: 'medium',
-          count: items.length, potential_value_gbp: sumAbsoluteExposure(items),
-          detail_json: JSON.stringify(items), period_checked: 'since_lock_date',
+          count: suspense.length, potential_value_gbp: sumAbsoluteExposure(suspense),
+          detail_json: JSON.stringify(suspense), period_checked: 'since_lock_date',
+        });
+        const dla = journalChecks.directorsLoanAlerts(bsReport, { asOf: period.end });
+        insertIssue({
+          org_id: orgId, check_type: 'directors_loan_overdrawn', importance: 'medium',
+          count: dla.length, potential_value_gbp: sumAbsoluteExposure(dla),
+          detail_json: JSON.stringify(dla), period_checked: 'since_lock_date',
         });
       } catch (err) {
-        console.error('suspense_open_balance check failed — skipping (will show as "Not synced"):', err?.response?.body?.Message || err.message);
+        console.error('balance sheet review checks failed — skipping (will show as "Not synced"):', err?.response?.body?.Message || err.message);
       }
     }
   }
@@ -1950,6 +1958,51 @@ async function runSync(tenantId, progressCallback, options = {}) {
     } catch (err) {
       console.error('supplier_payment_accounts check failed — skipping (will show as "Not synced"):', err.message);
     }
+  }
+  if (chartOfAccountsAvailable && orgInfo.organisationEntityType === 'COMPANY') {
+    try {
+      const fy = resolvePeriod({ type: 'current_fy' }, {
+        asOf: new Date().toISOString().slice(0, 10),
+        financialYearEndMonth: orgInfo.financialYearEndMonth, financialYearEndDay: orgInfo.financialYearEndDay,
+      });
+      const lines = [];
+      const addLines = (docs, getLines, dateOf) => {
+        for (const d of docs || []) for (const l of getLines(d) || []) lines.push({ accountCode: l.accountCode, date: toDateString(dateOf(d)) });
+      };
+      addLines(accpayAuthorised, d => d.lineItems, d => d.date);
+      addLines(allBankTransactions.filter(t => t.status === 'AUTHORISED'), d => d.lineItems, d => d.date);
+      addLines(allManualJournals.filter(j => j.status === 'POSTED'), d => d.journalLines, d => d.date);
+      const items = journalChecks.dividendStatus({ accounts: chartOfAccounts, lines, fyStart: fy.start, fyEnd: fy.end });
+      insertIssue({
+        org_id: orgId, check_type: 'dividend_status', importance: 'low',
+        count: items.length, potential_value_gbp: 0,
+        detail_json: JSON.stringify(items), period_checked: 'current_financial_year',
+      });
+    } catch (err) {
+      console.error('dividend_status check failed — skipping (will show as "Not synced"):', err.message);
+    }
+  }
+  try {
+    const filing = (getFiledAccountsExtractionsForOrg(orgId) || []).find(e => e.made_up_to && e.filing_date);
+    if (orgInfo.countryCode !== 'GB' || !filing) {
+      insertIssue({
+        org_id: orgId, check_type: 'historical_changes', importance: 'medium',
+        count: null, potential_value_gbp: 0, detail_json: '[]', period_checked: 'not_configured',
+      });
+    } else {
+      const items = journalChecks.historicalChanges({
+        journals: allManualJournals.filter(j => j.status === 'POSTED'), invoices: allInvoices,
+        creditNotes: allCredits, bankTransactions: allBankTransactions,
+        madeUpTo: toDateString(filing.made_up_to), filingDate: toDateString(filing.filing_date),
+      });
+      insertIssue({
+        org_id: orgId, check_type: 'historical_changes', importance: 'medium',
+        count: items.length, potential_value_gbp: sumAbsoluteExposure(items),
+        detail_json: JSON.stringify(items), period_checked: `filed_to_${toDateString(filing.made_up_to)}`,
+      });
+    }
+  } catch (err) {
+    console.error('historical_changes check failed — skipping (will show as "Not synced"):', err.message);
   }
   try {
     const items = journalChecks.taxReviewByCode({

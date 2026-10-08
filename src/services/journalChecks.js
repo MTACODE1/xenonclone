@@ -13,6 +13,9 @@ const CHECK_TYPES = Object.freeze({
   taxReview: 'tax_review_by_code',
   vatScheme: 'vat_scheme_threshold',
   supplierPaymentAccounts: 'supplier_payment_accounts',
+  directorsLoan: 'directors_loan_overdrawn',
+  dividendStatus: 'dividend_status',
+  historicalChanges: 'historical_changes',
 });
 
 const DISPOSAL_NAME = /disposal|gain on|loss on|profit on|sale of|sold/i;
@@ -200,33 +203,110 @@ function detectUnusualJournals({ journals, accounts }) {
   };
 }
 
-// Trial Balance report rows -> suspense/clearing accounts with a balance left open at period end.
-function suspenseOpenBalances(report, { asOf, minBalance = 1 } = {}) {
-  const items = [];
-  const walk = rows => {
+const parseNumber = v => parseFloat(String(v ?? '').replace(/[£,\s]/g, '').replace(/^\((.*)\)$/, '-$1')) || 0;
+
+// Balance Sheet rows with the section they sit in. Assets read positive when debit; liabilities and
+// equity read positive when credit, so a director's loan can only be judged together with its section.
+function balanceSheetRows(report) {
+  const out = [];
+  const walk = (rows, trail) => {
     for (const row of rows || []) {
-      if (row.rows) walk(row.rows);
-      if (row.rowType !== 'Row' || !row.cells || row.cells.length < 3) continue;
-      const label = String(row.cells[0].value || '');
-      if (!SUSPENSE_NAME.test(label)) continue;
-      const codeMatch = /\(([^)]+)\)\s*$/.exec(label);
-      const num = v => parseFloat(String(v ?? '').replace(/[£,\s]/g, '')) || 0;
-      const net = num(row.cells[1].value) - num(row.cells[2].value);
-      if (Math.abs(net) < minBalance) continue;
-      const code = codeMatch ? codeMatch[1] : label;
-      items.push({
-        documentId: `trial-balance:${code}`,
-        number: null,
-        date: asOf || null,
-        source: 'trial_balance',
-        accountCode: code,
-        accountName: label.replace(/\s*\([^)]*\)\s*$/, ''),
-        description: `Balance left open on ${label.replace(/\s*\([^)]*\)\s*$/, '')} at period end`,
-        amount: Math.abs(net),
-      });
+      if (row.rowType === 'Section') {
+        walk(row.rows, row.title ? [...trail, String(row.title)] : trail);
+      } else if (row.rowType === 'Row' && row.cells && row.cells.length >= 2) {
+        const label = String(row.cells[0].value || '').trim();
+        if (!label) continue;
+        const section = trail.join(' > ');
+        out.push({ label, value: parseNumber(row.cells[1].value), section, isAsset: /asset/i.test(section) && !/liabilit/i.test(section) });
+      }
     }
   };
-  walk(report && report.rows);
+  walk(report && report.rows, []);
+  return out;
+}
+
+// Balance Sheet -> suspense/clearing accounts with a balance left open at the report date.
+function suspenseOpenBalances(report, { asOf, minBalance = 1 } = {}) {
+  return balanceSheetRows(report)
+    .filter(r => SUSPENSE_NAME.test(r.label) && Math.abs(r.value) >= minBalance)
+    .map(r => ({
+      documentId: `balance-sheet:${r.label}`, number: null, date: asOf || null, source: 'balance_sheet',
+      accountCode: r.label, accountName: r.label,
+      description: `Balance left open on ${r.label} at period end`, amount: Math.abs(r.value),
+    }));
+}
+
+// Director's loan overdrawn (the director owes the company): amber under £10,000, red above — a
+// possible section 455 tax liability. In an asset section a positive balance is overdrawn; in a
+// liability section a negative one is.
+function directorsLoanAlerts(report, { asOf, redAbove = 10000, minOverdrawn = 1 } = {}) {
+  const items = [];
+  for (const r of balanceSheetRows(report)) {
+    if (!DLA_NAME.test(r.label)) continue;
+    const overdrawn = r.isAsset ? r.value : -r.value;
+    if (overdrawn < minOverdrawn) continue;
+    const level = overdrawn > redAbove ? 'red' : 'amber';
+    items.push({
+      documentId: `dla:${r.label}`, number: null, date: asOf || null, source: 'balance_sheet',
+      accountCode: r.label, accountName: r.label, level, rule: 'dla_overdrawn', limit: redAbove,
+      description: `${r.label} is overdrawn by £${Math.round(overdrawn).toLocaleString('en-GB')} (${level}). Possible section 455 tax liability if not cleared in time.`,
+      amount: overdrawn,
+    });
+  }
+  return items;
+}
+
+// Dividends: evidence that any dividend was declared or paid in the current financial year.
+// Looks for lines on accounts named like a dividend (excluding income accounts) dated in the year.
+function dividendStatus({ accounts, lines, fyStart, fyEnd }) {
+  const dividendCodes = new Set();
+  for (const a of accounts || []) {
+    if (a && a.code && /dividend/i.test(a.name || '') && (a._class || a.class) !== 'REVENUE') dividendCodes.add(String(a.code).toUpperCase());
+  }
+  const postings = (lines || []).filter(l => l.accountCode && dividendCodes.has(String(l.accountCode).toUpperCase())
+    && l.date && l.date >= fyStart && l.date <= fyEnd);
+  if (postings.length > 0) return [];
+  return [{
+    documentId: 'dividends-current-fy', number: null, date: fyEnd, source: 'dividend_status', accountCode: null,
+    level: 'info', rule: 'no_dividend_evidence', amount: 0,
+    description: dividendCodes.size
+      ? `No dividend postings found between ${fyStart} and ${fyEnd}.`
+      : `No dividend account was found, and no dividend postings exist between ${fyStart} and ${fyEnd}.`,
+  }];
+}
+
+// Historical changes: items dated inside an accounting period that has already been filed but created or
+// changed after the filing date. Xero's last-updated date also moves for harmless reasons, so documents
+// whose only likely change is a payment being applied are left out.
+function historicalChanges({ journals, invoices, creditNotes, bankTransactions, madeUpTo, filingDate }) {
+  if (!madeUpTo || !filingDate) return [];
+  const after = v => { const d = toIsoDate(v); return d && d > filingDate ? d : null; };
+  const inFiled = v => { const d = toIsoDate(v); return d && d <= madeUpTo ? d : null; };
+  const items = [];
+  const push = (kind, id, number, date, updated, amount, reason, contact) => items.push({
+    documentId: id, number: number || null, date, source: kind, contact: contact || null,
+    accountCode: null, description: reason, amount: Math.abs(Number(amount) || 0), updatedDate: updated, filingDate, madeUpTo,
+  });
+  for (const j of journals || []) {
+    const date = inFiled(j.date), updated = after(j.updatedDateUTC);
+    if (date && updated) push('manual_journal', j.manualJournalID, null, date, updated,
+      (j.journalLines || []).reduce((s, l) => s + Math.max(0, Number(l.lineAmount) || 0), 0), `Manual journal changed or added after accounts for the period to ${madeUpTo} were filed on ${filingDate}.`);
+  }
+  for (const doc of [...(invoices || []), ...(creditNotes || [])]) {
+    const date = inFiled(doc.date), updated = after(doc.updatedDateUTC);
+    if (!date || !updated) continue;
+    const gone = doc.status === 'VOIDED' || doc.status === 'DELETED';
+    const explainedByPayment = !gone && (Number(doc.amountPaid) > 0 || doc.status === 'PAID');
+    if (explainedByPayment) continue;
+    push(doc.invoiceID ? 'invoice' : 'credit_note', doc.invoiceID || doc.creditNoteID, doc.invoiceNumber || doc.creditNoteNumber, date, updated, doc.total,
+      gone ? `Document ${doc.status.toLowerCase()} after accounts for the period to ${madeUpTo} were filed on ${filingDate}.`
+           : `Document changed or added after accounts for the period to ${madeUpTo} were filed on ${filingDate}.`, doc.contact && doc.contact.name);
+  }
+  for (const t of bankTransactions || []) {
+    const date = inFiled(t.date), updated = after(t.updatedDateUTC);
+    if (date && updated && t.status === 'DELETED') push('bank_transaction', t.bankTransactionID, t.reference, date, updated, t.total,
+      `Bank transaction deleted after accounts for the period to ${madeUpTo} were filed on ${filingDate}.`, t.contact && t.contact.name);
+  }
   return items;
 }
 
@@ -362,6 +442,7 @@ function joiningEstimates({ scheme, taxableNet, limits = VAT_LIMITS }) {
 }
 
 module.exports = {
-  CHECK_TYPES, VAT_LIMITS, indexAccounts, detectUnusualJournals, suspenseOpenBalances,
+  CHECK_TYPES, VAT_LIMITS, indexAccounts, detectUnusualJournals, suspenseOpenBalances, balanceSheetRows,
+  directorsLoanAlerts, dividendStatus, historicalChanges,
   taxReviewByCode, supplierPaymentSources, joiningEstimates, classifyVatScheme, rollingVatTurnover, evaluateVatScheme,
 };

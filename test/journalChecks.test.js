@@ -56,15 +56,70 @@ test('ignores journals that are not POSTED and journals with unknown accounts', 
   assert.ok(Object.values(out).every(items => items.length === 0));
 });
 
-test('suspenseOpenBalances finds suspense and clearing accounts with a balance at period end', () => {
-  const report = { rows: [{ rowType: 'Section', rows: [
-    { rowType: 'Row', cells: [{ value: 'Suspense (999)' }, { value: '250.00' }, { value: '' }] },
-    { rowType: 'Row', cells: [{ value: 'Payroll Clearing (998)' }, { value: '' }, { value: '40.50' }] },
-    { rowType: 'Row', cells: [{ value: 'Sales (200)' }, { value: '' }, { value: '9000' }] },
-    { rowType: 'Row', cells: [{ value: 'Suspense Old (997)' }, { value: '0.00' }, { value: '0.00' }] },
-  ] }] };
-  const out = suspenseOpenBalances(report, { asOf: '2026-10-08' });
-  assert.deepEqual(out.map(i => [i.accountCode, i.amount]), [['999', 250], ['998', 40.5]]);
+const bsReport = {
+  rows: [
+    { rowType: 'Section', title: 'Assets', rows: [
+      { rowType: 'Section', title: 'Current Assets', rows: [
+        { rowType: 'Row', cells: [{ value: 'Suspense' }, { value: '250.00' }, { value: '0.00' }] },
+        { rowType: 'Row', cells: [{ value: 'Director Loan Account' }, { value: '4,000.00' }, { value: '0.00' }] },
+        { rowType: 'Row', cells: [{ value: 'Trade Debtors' }, { value: '9,000.00' }, { value: '0.00' }] },
+      ] },
+    ] },
+    { rowType: 'Section', title: 'Liabilities', rows: [
+      { rowType: 'Section', title: 'Current Liabilities', rows: [
+        { rowType: 'Row', cells: [{ value: 'Payroll Clearing' }, { value: '-40.50' }, { value: '0.00' }] },
+        { rowType: 'Row', cells: [{ value: "Director's Loan Account 2" }, { value: '-12,500.00' }, { value: '0.00' }] },
+        { rowType: 'Row', cells: [{ value: "Director's Loan Account 3" }, { value: '800.00' }, { value: '0.00' }] },
+        { rowType: 'Row', cells: [{ value: 'Suspense Old' }, { value: '0.00' }, { value: '0.00' }] },
+      ] },
+    ] },
+  ],
+};
+
+test('suspenseOpenBalances finds suspense and clearing accounts with a balance, in any section', () => {
+  const out = suspenseOpenBalances(bsReport, { asOf: '2026-10-08' });
+  assert.deepEqual(out.map(i => [i.accountCode, i.amount]), [['Suspense', 250], ['Payroll Clearing', 40.5]]);
+});
+
+test('directorsLoanAlerts: overdrawn is a debit in an asset section and a negative in a liability section', () => {
+  const { directorsLoanAlerts } = require('../src/services/journalChecks');
+  const out = directorsLoanAlerts(bsReport, { asOf: '2026-10-08' });
+  assert.deepEqual(out.map(i => [i.accountCode, i.amount, i.level]), [
+    ['Director Loan Account', 4000, 'amber'],
+    ["Director's Loan Account 2", 12500, 'red'],
+  ]);
+  assert.match(out[1].description, /section 455/);
+});
+
+test('dividendStatus is silent when a dividend posting exists in the year and flags when none does', () => {
+  const { dividendStatus } = require('../src/services/journalChecks');
+  const accts = [{ code: '905', name: 'Dividends Paid', _class: 'EQUITY' }, { code: '270', name: 'Dividend Income', _class: 'REVENUE' }];
+  const year = { fyStart: '2026-04-01', fyEnd: '2027-03-31' };
+  assert.deepEqual(dividendStatus({ accounts: accts, lines: [{ accountCode: '905', date: '2026-06-30' }], ...year }), []);
+  const none = dividendStatus({ accounts: accts, lines: [{ accountCode: '270', date: '2026-06-30' }, { accountCode: '905', date: '2025-12-01' }], ...year });
+  assert.equal(none.length, 1);
+  assert.equal(none[0].rule, 'no_dividend_evidence');
+  assert.match(dividendStatus({ accounts: [], lines: [], ...year })[0].description, /No dividend account was found/);
+});
+
+test('historicalChanges flags post-filing changes to filed periods but not payments or later periods', () => {
+  const { historicalChanges } = require('../src/services/journalChecks');
+  const out = historicalChanges({
+    madeUpTo: '2025-03-31', filingDate: '2025-12-01',
+    journals: [
+      { manualJournalID: 'j1', date: '2025-02-01', updatedDateUTC: '2026-02-01T10:00:00Z', journalLines: [{ lineAmount: 100 }, { lineAmount: -100 }] },
+      { manualJournalID: 'j2', date: '2025-06-01', updatedDateUTC: '2026-02-01T10:00:00Z', journalLines: [] },
+      { manualJournalID: 'j3', date: '2025-02-01', updatedDateUTC: '2025-11-01T10:00:00Z', journalLines: [] },
+    ],
+    invoices: [
+      { invoiceID: 'i1', invoiceNumber: 'INV-1', date: '2025-01-10', updatedDateUTC: '2026-03-01', status: 'AUTHORISED', amountPaid: 0, total: 50 },
+      { invoiceID: 'i2', invoiceNumber: 'INV-2', date: '2025-01-10', updatedDateUTC: '2026-03-01', status: 'PAID', amountPaid: 50, total: 50 },
+      { invoiceID: 'i3', invoiceNumber: 'INV-3', date: '2025-01-10', updatedDateUTC: '2026-03-01', status: 'VOIDED', amountPaid: 0, total: 70 },
+    ],
+    bankTransactions: [{ bankTransactionID: 'b1', date: '2025-01-05', updatedDateUTC: '2026-01-01', status: 'DELETED', total: 20 }],
+  });
+  assert.deepEqual(out.map(i => i.documentId).sort(), ['b1', 'i1', 'i3', 'j1']);
+  assert.deepEqual(historicalChanges({ journals: [{ manualJournalID: 'x', date: '2025-01-01', updatedDateUTC: '2026-01-01' }] }), []);
 });
 
 test('taxReviewByCode groups lines by tax code and applies the minimum value', () => {

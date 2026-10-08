@@ -211,6 +211,9 @@ const REVIEW_CHECK_DEFINITIONS = Object.freeze([
   { type: 'tax_review_by_code', importance: 'low', label: 'Tax Review by Code' },
   { type: 'vat_scheme_threshold', importance: 'medium', label: 'VAT Scheme Thresholds' },
   { type: 'supplier_payment_accounts', importance: 'medium', label: 'Supplier Paid From Bank and DLA' },
+  { type: 'directors_loan_overdrawn', importance: 'medium', label: "Director's Loan Overdrawn" },
+  { type: 'dividend_status', importance: 'low', label: 'Dividends Status' },
+  { type: 'historical_changes', importance: 'medium', label: 'Historical Changes' },
 ]);
 const ALL_CHECK_DEFINITIONS = Object.freeze([...CHECK_DEFINITIONS, ...REVIEW_CHECK_DEFINITIONS]);
 
@@ -229,6 +232,9 @@ const NON_SCORED_CHECKS = Object.freeze([
   'tax_review_by_code',
   'vat_scheme_threshold',
   'supplier_payment_accounts',
+  'directors_loan_overdrawn',
+  'dividend_status',
+  'historical_changes',
 ]);
 
 // Processor fees are deliberately not exempt: MBX evidence showed that Xenon includes them.
