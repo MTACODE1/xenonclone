@@ -9,6 +9,7 @@ const crypto = require('crypto');
 
 const { getDb } = require('./src/db/schema');
 const { getAllOrganisations, getSetting, getStaffById, restoreSettingsFromMysql } = require('./src/db/queries');
+const { restoreSnapshots, startSnapshotSync } = require('./src/db/snapshotStore');
 const { syncOrganisation } = require('./src/services/xeroSync');
 const { syncFreeAgentOrganisation } = require('./src/services/freeagentSync');
 const { startJob } = require('./src/services/syncJobs');
@@ -167,6 +168,9 @@ const PORT = process.env.PORT || 3000;
 bootstrapAdmin().then(() => restoreSettingsFromMysql()
   .then(count => console.log(`[settings] restored ${count} saved setting(s) from MySQL`))
   .catch(err => console.error('[settings] restore from MySQL failed:', err.message))
+).then(() => restoreSnapshots()
+  .then(r => { console.log(`[snapshot] restored ${r.restored} saved row(s) from MySQL`); startSnapshotSync(); })
+  .catch(err => console.error('[snapshot] restore failed, saving disabled this run:', err.message))
 ).then(() => {
   if (useLocalTlsServer) {
     const sslOptions = {
