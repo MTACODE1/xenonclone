@@ -140,7 +140,8 @@ function fixedAssetCreditedToExpense(journals, index) {
   return items;
 }
 
-const DLA_NAME = /director.?s?\s*(loan|current)|\bdla\b/i;
+// Clients usually call it "Directors' Loan Account" or "Drawings", often with the director's name added.
+const DLA_NAME = /director.?s?\s*(loan|current)|\bdla\b|\bdrawings?\b/i;
 
 // Suppliers paid from BOTH a bank account and the director's loan account in the period. Only those
 // two payment sources are considered; payments from any other account are ignored on purpose.
@@ -236,29 +237,47 @@ function suspenseOpenBalances(report, { asOf, minBalance = 1 } = {}) {
     }));
 }
 
-// Director's loan overdrawn (the director owes the company): amber under £10,000, red above — a
+// Director's loan overdrawn (the director owes the company): any overdrawn balance is critical — a
 // possible section 455 tax liability. In an asset section a positive balance is overdrawn; in a
 // liability section a negative one is.
-function directorsLoanAlerts(report, { asOf, redAbove = 10000, minOverdrawn = 1 } = {}) {
+function directorsLoanAlerts(report, { asOf, minOverdrawn = 0.01 } = {}) {
   const items = [];
   for (const r of balanceSheetRows(report)) {
     if (!DLA_NAME.test(r.label)) continue;
     const overdrawn = r.isAsset ? r.value : -r.value;
     if (overdrawn < minOverdrawn) continue;
-    const level = overdrawn > redAbove ? 'red' : 'amber';
     items.push({
       documentId: `dla:${r.label}`, number: null, date: asOf || null, source: 'balance_sheet',
-      accountCode: r.label, accountName: r.label, level, rule: 'dla_overdrawn', limit: redAbove,
-      description: `${r.label} is overdrawn by £${Math.round(overdrawn).toLocaleString('en-GB')} (${level}). Possible section 455 tax liability if not cleared in time.`,
+      accountCode: r.label, accountName: r.label, level: 'critical', rule: 'dla_overdrawn',
+      description: `${r.label} is overdrawn by £${Math.round(overdrawn).toLocaleString('en-GB')}. Possible section 455 tax liability if not cleared in time.`,
       amount: overdrawn,
     });
   }
   return items;
 }
 
+// Net profit from a Profit & Loss report (the "Net Profit" summary row).
+function netProfitFromReport(report) {
+  let profit = null;
+  const walk = rows => {
+    for (const row of rows || []) {
+      if (row.rowType === 'Section') walk(row.rows);
+      else if (row.rowType === 'Row' || row.rowType === 'SummaryRow') {
+        if (/^net (profit|loss)/i.test(String(row.cells?.[0]?.value || '').trim()) && row.cells.length >= 2) {
+          profit = parseNumber(row.cells[row.cells.length - 1].value);
+        }
+      }
+    }
+  };
+  walk(report && report.rows);
+  return profit;
+}
+
 // Dividends: evidence that any dividend was declared or paid in the current financial year.
 // Looks for lines on accounts named like a dividend (excluding income accounts) dated in the year.
-function dividendStatus({ accounts, lines, fyStart, fyEnd }) {
+// Only flags a company that has made a profit this year: no profit and no dividends is expected.
+function dividendStatus({ accounts, lines, fyStart, fyEnd, profit }) {
+  if (!(profit > 0)) return [];
   const dividendCodes = new Set();
   for (const a of accounts || []) {
     if (a && a.code && /dividend/i.test(a.name || '') && (a._class || a.class) !== 'REVENUE') dividendCodes.add(String(a.code).toUpperCase());
@@ -268,10 +287,12 @@ function dividendStatus({ accounts, lines, fyStart, fyEnd }) {
   if (postings.length > 0) return [];
   return [{
     documentId: 'dividends-current-fy', number: null, date: fyEnd, source: 'dividend_status', accountCode: null,
-    level: 'info', rule: 'no_dividend_evidence', amount: 0,
-    description: dividendCodes.size
-      ? `No dividend postings found between ${fyStart} and ${fyEnd}.`
-      : `No dividend account was found, and no dividend postings exist between ${fyStart} and ${fyEnd}.`,
+    level: 'info', rule: 'no_dividend_evidence',
+    description: (dividendCodes.size
+      ? `No dividend postings found between ${fyStart} and ${fyEnd}`
+      : `No dividend account was found, and no dividend postings exist between ${fyStart} and ${fyEnd}`)
+      + ` although the company made a profit of £${Math.round(profit).toLocaleString('en-GB')} this year.`,
+    amount: profit,
   }];
 }
 
@@ -443,6 +464,6 @@ function joiningEstimates({ scheme, taxableNet, limits = VAT_LIMITS }) {
 
 module.exports = {
   CHECK_TYPES, VAT_LIMITS, indexAccounts, detectUnusualJournals, suspenseOpenBalances, balanceSheetRows,
-  directorsLoanAlerts, dividendStatus, historicalChanges,
+  directorsLoanAlerts, netProfitFromReport, dividendStatus, historicalChanges,
   taxReviewByCode, supplierPaymentSources, joiningEstimates, classifyVatScheme, rollingVatTurnover, evaluateVatScheme,
 };

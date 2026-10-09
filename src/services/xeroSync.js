@@ -1915,7 +1915,8 @@ async function runSync(tenantId, progressCallback, options = {}) {
       const unusual = journalChecks.detectUnusualJournals({ journals: recentManualJournals, accounts: chartOfAccounts });
       for (const [checkType, items] of Object.entries(unusual)) {
         insertIssue({
-          org_id: orgId, check_type: checkType, importance: 'medium',
+          org_id: orgId, check_type: checkType,
+          importance: ['journal_vat_control', 'journal_to_bank'].includes(checkType) ? 'critical' : 'medium',
           count: items.length, potential_value_gbp: sumAbsoluteExposure(items),
           detail_json: JSON.stringify(items), period_checked: 'since_lock_date',
         });
@@ -1930,13 +1931,15 @@ async function runSync(tenantId, progressCallback, options = {}) {
         const bsReport = bsResp.body.reports?.[0];
         const suspense = journalChecks.suspenseOpenBalances(bsReport, { asOf: period.end });
         insertIssue({
-          org_id: orgId, check_type: 'suspense_open_balance', importance: 'medium',
+          org_id: orgId, check_type: 'suspense_open_balance', importance: 'critical',
           count: suspense.length, potential_value_gbp: sumAbsoluteExposure(suspense),
           detail_json: JSON.stringify(suspense), period_checked: 'since_lock_date',
         });
-        const dla = journalChecks.directorsLoanAlerts(bsReport, { asOf: period.end });
+        // Director's loan only applies to companies ("Drawings" on a sole trader is not a loan).
+        const dla = orgInfo.organisationEntityType === 'COMPANY'
+          ? journalChecks.directorsLoanAlerts(bsReport, { asOf: period.end }) : [];
         insertIssue({
-          org_id: orgId, check_type: 'directors_loan_overdrawn', importance: 'medium',
+          org_id: orgId, check_type: 'directors_loan_overdrawn', importance: 'critical',
           count: dla.length, potential_value_gbp: sumAbsoluteExposure(dla),
           detail_json: JSON.stringify(dla), period_checked: 'since_lock_date',
         });
@@ -1973,9 +1976,19 @@ async function runSync(tenantId, progressCallback, options = {}) {
       addLines(accpayAuthorised, d => d.lineItems, d => d.date);
       addLines(allBankTransactions.filter(t => t.status === 'AUTHORISED'), d => d.lineItems, d => d.date);
       addLines(allManualJournals.filter(j => j.status === 'POSTED'), d => d.journalLines, d => d.date);
-      const items = journalChecks.dividendStatus({ accounts: chartOfAccounts, lines, fyStart: fy.start, fyEnd: fy.end });
+      // The check only applies to a company that made a profit this year, so ask Xero for the
+      // profit to date. If that isn't available the check is left as "Not synced" rather than guessed.
+      if (options.cacheOnly) throw new Error('profit needs a live Xero call');
+      const today = new Date().toISOString().slice(0, 10);
+      const plResp = await apiCall(tenantId, async (xero, tid) => xero.accountingApi.getReportProfitAndLoss(
+        tid, fy.start, fy.end < today ? fy.end : today, undefined, undefined,
+        undefined, undefined, undefined, undefined, true
+      ));
+      const profit = journalChecks.netProfitFromReport((plResp.body.reports || [])[0]);
+      if (profit == null) throw new Error('no Net Profit row in the Profit and Loss report');
+      const items = journalChecks.dividendStatus({ accounts: chartOfAccounts, lines, fyStart: fy.start, fyEnd: fy.end, profit });
       insertIssue({
-        org_id: orgId, check_type: 'dividend_status', importance: 'low',
+        org_id: orgId, check_type: 'dividend_status', importance: 'medium',
         count: items.length, potential_value_gbp: 0,
         detail_json: JSON.stringify(items), period_checked: 'current_financial_year',
       });
@@ -2011,7 +2024,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       taxRates, minValue: 0,
     });
     insertIssue({
-      org_id: orgId, check_type: 'tax_review_by_code', importance: 'low',
+      org_id: orgId, check_type: 'tax_review_by_code', importance: 'medium',
       count: items.length, potential_value_gbp: 0,
       detail_json: JSON.stringify(items), period_checked: 'since_lock_date',
     });
@@ -2044,7 +2057,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       ...journalChecks.joiningEstimates({ scheme, taxableNet }).map(v => toItem(v, v.rule)),
     ];
     insertIssue({
-      org_id: orgId, check_type: 'vat_scheme_threshold', importance: 'medium',
+      org_id: orgId, check_type: 'vat_scheme_threshold', importance: 'critical',
       count: items.length, potential_value_gbp: 0,
       detail_json: JSON.stringify(items), period_checked: 'rolling_12_months',
     });

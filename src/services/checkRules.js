@@ -204,15 +204,15 @@ const CHECK_DEFINITIONS = Object.freeze([
 // Xenon's 29 published checks and is what the validation gate compares against.
 const REVIEW_CHECK_DEFINITIONS = Object.freeze([
   { type: 'journal_revenue_vs_expense', importance: 'medium', label: 'Revenue Journalled Against Expense' },
-  { type: 'journal_vat_control', importance: 'medium', label: 'VAT Control Journals' },
-  { type: 'journal_to_bank', importance: 'medium', label: 'Journals to Bank Accounts' },
+  { type: 'journal_vat_control', importance: 'critical', label: 'VAT Control Journals' },
+  { type: 'journal_to_bank', importance: 'critical', label: 'Journals to Bank Accounts' },
   { type: 'journal_fixed_asset_to_expense', importance: 'medium', label: 'Fixed Asset Credited to Expense' },
-  { type: 'suspense_open_balance', importance: 'medium', label: 'Suspense & Clearing Balances' },
-  { type: 'tax_review_by_code', importance: 'low', label: 'Tax Review by Code' },
-  { type: 'vat_scheme_threshold', importance: 'medium', label: 'VAT Scheme Thresholds' },
+  { type: 'suspense_open_balance', importance: 'critical', label: 'Suspense & Clearing Balances' },
+  { type: 'tax_review_by_code', importance: 'medium', label: 'Tax Review by Code' },
+  { type: 'vat_scheme_threshold', importance: 'critical', label: 'VAT Scheme Thresholds' },
   { type: 'supplier_payment_accounts', importance: 'medium', label: 'Supplier Paid From Bank and DLA' },
-  { type: 'directors_loan_overdrawn', importance: 'medium', label: "Director's Loan Overdrawn" },
-  { type: 'dividend_status', importance: 'low', label: 'Dividends Status' },
+  { type: 'directors_loan_overdrawn', importance: 'critical', label: "Director's Loan Overdrawn" },
+  { type: 'dividend_status', importance: 'medium', label: 'Dividends Status' },
   { type: 'historical_changes', importance: 'medium', label: 'Historical Changes' },
 ]);
 const ALL_CHECK_DEFINITIONS = Object.freeze([...CHECK_DEFINITIONS, ...REVIEW_CHECK_DEFINITIONS]);

@@ -85,8 +85,8 @@ test('directorsLoanAlerts: overdrawn is a debit in an asset section and a negati
   const { directorsLoanAlerts } = require('../src/services/journalChecks');
   const out = directorsLoanAlerts(bsReport, { asOf: '2026-10-08' });
   assert.deepEqual(out.map(i => [i.accountCode, i.amount, i.level]), [
-    ['Director Loan Account', 4000, 'amber'],
-    ["Director's Loan Account 2", 12500, 'red'],
+    ['Director Loan Account', 4000, 'critical'],
+    ["Director's Loan Account 2", 12500, 'critical'],
   ]);
   assert.match(out[1].description, /section 455/);
 });
@@ -94,7 +94,7 @@ test('directorsLoanAlerts: overdrawn is a debit in an asset section and a negati
 test('dividendStatus is silent when a dividend posting exists in the year and flags when none does', () => {
   const { dividendStatus } = require('../src/services/journalChecks');
   const accts = [{ code: '905', name: 'Dividends Paid', _class: 'EQUITY' }, { code: '270', name: 'Dividend Income', _class: 'REVENUE' }];
-  const year = { fyStart: '2026-04-01', fyEnd: '2027-03-31' };
+  const year = { fyStart: '2026-04-01', fyEnd: '2027-03-31', profit: 25000 };
   assert.deepEqual(dividendStatus({ accounts: accts, lines: [{ accountCode: '905', date: '2026-06-30' }], ...year }), []);
   const none = dividendStatus({ accounts: accts, lines: [{ accountCode: '270', date: '2026-06-30' }, { accountCode: '905', date: '2025-12-01' }], ...year });
   assert.equal(none.length, 1);
@@ -229,4 +229,23 @@ test('joiningEstimates only suggests schemes to standard-scheme clients and only
   assert.deepEqual(joiningEstimates({ scheme: 'standard', taxableNet: 1350001 }), []);
   for (const scheme of ['unregistered', 'flat_rate', 'cash', 'annual']) assert.deepEqual(joiningEstimates({ scheme, taxableNet: 50000 }), []);
   assert.match(joiningEstimates({ scheme: 'standard', taxableNet: 100000 })[0].message, /VAT group/);
+});
+
+test('dividendStatus stays silent when the company has not made a profit', () => {
+  const { dividendStatus } = require('../src/services/journalChecks');
+  const base = { accounts: [], lines: [], fyStart: '2026-04-01', fyEnd: '2027-03-31' };
+  assert.deepEqual(dividendStatus({ ...base, profit: 0 }), []);
+  assert.deepEqual(dividendStatus({ ...base, profit: -500 }), []);
+  assert.deepEqual(dividendStatus({ ...base, profit: null }), []);
+  assert.match(dividendStatus({ ...base, profit: 1200 })[0].description, /profit of £1,200/);
+});
+
+test('Drawings and director-named loan accounts are recognised as the director loan account', () => {
+  const { directorsLoanAlerts, netProfitFromReport } = require('../src/services/journalChecks');
+  const rep = { rows: [{ rowType: 'Section', title: 'Assets', rows: [
+    { rowType: 'Row', cells: [{ value: 'Drawings' }, { value: '300' }] },
+    { rowType: 'Row', cells: [{ value: 'Director\'s Loan Account – J Smith' }, { value: '1,000' }] },
+  ] }] };
+  assert.deepEqual(directorsLoanAlerts(rep).map(i => i.accountCode), ['Drawings', 'Director\'s Loan Account – J Smith']);
+  assert.equal(netProfitFromReport({ rows: [{ rowType: 'Section', rows: [{ rowType: 'Row', cells: [{ value: 'Net Profit' }, { value: '4,321.50' }] }] }] }), 4321.5);
 });
