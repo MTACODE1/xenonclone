@@ -249,3 +249,9 @@ test('Drawings and director-named loan accounts are recognised as the director l
   assert.deepEqual(directorsLoanAlerts(rep).map(i => i.accountCode), ['Drawings', 'Director\'s Loan Account – J Smith']);
   assert.equal(netProfitFromReport({ rows: [{ rowType: 'Section', rows: [{ rowType: 'Row', cells: [{ value: 'Net Profit' }, { value: '4,321.50' }] }] }] }), 4321.5);
 });
+
+test('a Drawings account in the equity section is not treated as an overdrawn director loan', () => {
+  const { directorsLoanAlerts } = require('../src/services/journalChecks');
+  const rep = { rows: [{ rowType: 'Section', title: 'Equity', rows: [{ rowType: 'Row', cells: [{ value: 'Owner A Drawings' }, { value: '-5,000' }] }] }] };
+  assert.deepEqual(directorsLoanAlerts(rep), []);
+});

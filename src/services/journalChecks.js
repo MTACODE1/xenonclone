@@ -244,6 +244,8 @@ function directorsLoanAlerts(report, { asOf, minOverdrawn = 0.01 } = {}) {
   const items = [];
   for (const r of balanceSheetRows(report)) {
     if (!DLA_NAME.test(r.label)) continue;
+    // A plain "Drawings" account in the equity section is the owner's capital, not a loan to them.
+    if (/equity/i.test(r.section) && !/loan|current|\bdla\b/i.test(r.label)) continue;
     const overdrawn = r.isAsset ? r.value : -r.value;
     if (overdrawn < minOverdrawn) continue;
     items.push({
