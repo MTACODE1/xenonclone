@@ -568,11 +568,12 @@ async function runSync(tenantId, progressCallback, options = {}) {
   const capitalReviewCandidateCodes = resolveCapitalReviewCandidateCodes(
     accountCheckConfigurations, accountNameByCode, org.account_settings_initialised
   );
-  // £2,000: the firm's own Xenon default for Capital Item Review (Repairs & Maintenance, Printing &
-  // Stationery), confirmed by the practice on 8 Oct 2026 and visible in Xenon's per-client settings
-  // (e.g. Pegesus). Earlier cross-checks found £200 (7 Sep 2026); a client can still override it.
+  // £200 is the fallback: Xenon's own per-client capital review settings (read live on 9 Oct 2026)
+  // are £200 for 21 of the 26 comparison clients and £2,000 for the other five (Pegesus, Bevilacqua,
+  // Harlow, Positive Internet, MNM Automotive), which carry a per-client override in Akrio instead.
+  // A blanket £2,000 removed capital items Xenon still reports on the £200 clients (e.g. Highland).
   const defaultCapitalReviewThreshold = resolveCapitalReviewDefaultThreshold(
-    org, parseFloat(getSetting('capital_review_threshold')) || 2000
+    org, parseFloat(getSetting('capital_review_threshold')) || 200
   );
 
   const purchaseTaxExemptOverrideCodes = new Set(
