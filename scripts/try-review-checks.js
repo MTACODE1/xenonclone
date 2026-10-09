@@ -18,7 +18,7 @@ const pages = async (tid, fn) => { const out = []; for (let p = 1; ; p++) { cons
   const inPeriod = d => d && d >= lock && d <= today;
   console.log(`== ${org.name} | ${info.organisationEntityType} | period ${lock} to ${today}`);
   const accounts = await apiCall(tid, async (x, t) => (await x.accountingApi.getAccounts(t, undefined, undefined, 'Code ASC')).body.accounts || []);
-  console.log('accounts named like a director loan:', accounts.filter(a => /director.?s?\s*(loan|current)|\bdla\b|\bdrawings?\b/i.test(a.name)).map(a => `${a.code} ${a.name} [${a.type}]`).join('; ') || 'none');
+  console.log('accounts named like a director loan:', accounts.filter(a => /director[s'’\s]{0,3}(loan|current)|\bdla\b|\bdrawings?\b/i.test(a.name)).map(a => `${a.code} ${a.name} [${a.type}]`).join('; ') || 'none');
 
   const mj = (await pages(tid, (x, t, p) => x.accountingApi.getManualJournals(t, undefined, undefined, 'UpdatedDateUTC ASC', p).then(r => r.body.manualJournals || [])))
     .filter(j => j.status === 'POSTED' && inPeriod(iso(j.date)));

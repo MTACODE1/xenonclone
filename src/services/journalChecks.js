@@ -141,7 +141,7 @@ function fixedAssetCreditedToExpense(journals, index) {
 }
 
 // Clients usually call it "Directors' Loan Account" or "Drawings", often with the director's name added.
-const DLA_NAME = /director.?s?\s*(loan|current)|\bdla\b|\bdrawings?\b/i;
+const DLA_NAME = /director[s'’\s]{0,3}(loan|current)|\bdla\b|\bdrawings?\b/i;
 
 // Suppliers paid from BOTH a bank account and the director's loan account in the period. Only those
 // two payment sources are considered; payments from any other account are ignored on purpose.

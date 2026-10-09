@@ -255,3 +255,11 @@ test('a Drawings account in the equity section is not treated as an overdrawn di
   const rep = { rows: [{ rowType: 'Section', title: 'Equity', rows: [{ rowType: 'Row', cells: [{ value: 'Owner A Drawings' }, { value: '-5,000' }] }] }] };
   assert.deepEqual(directorsLoanAlerts(rep), []);
 });
+
+test("the director loan account is recognised whatever the apostrophe style", () => {
+  const { directorsLoanAlerts } = require('../src/services/journalChecks');
+  for (const name of ["Directors' Loan Account", "Director's Loan Account", 'Directors’ Loan Account', 'Directors Loan Account', 'Director Loan', 'Directors Current Account']) {
+    const rep = { rows: [{ rowType: 'Section', title: 'Current Liabilities', rows: [{ rowType: 'Row', cells: [{ value: name }, { value: '-500' }] }] }] };
+    assert.equal(directorsLoanAlerts(rep).length, 1, name);
+  }
+});
