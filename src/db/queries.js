@@ -1611,9 +1611,31 @@ function getSetting(key) {
   return row ? row.value : null;
 }
 
+const UPSERT_SETTING_SQL = `INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`;
+
 function setSetting(key, value) {
   const db = getDb();
-  db.prepare(`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(key, value);
+  db.prepare(UPSERT_SETTING_SQL).run(key, value);
+  // The SQLite file lives inside the container and is wiped by every deploy, so each setting is also
+  // mirrored to the shared MySQL database (akrio_settings) and reloaded at start-up.
+  if (process.env.AKRIO_DB_USER) {
+    getPool().query(
+      'INSERT INTO akrio_settings (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
+      [key, value]
+    ).catch(err => console.error('[settings] could not save to MySQL:', err.message));
+  }
+}
+
+async function restoreSettingsFromMysql() {
+  if (!process.env.AKRIO_DB_USER) return 0;
+  const pool = getPool();
+  await pool.query('CREATE TABLE IF NOT EXISTS akrio_settings (`key` VARCHAR(255) PRIMARY KEY, value TEXT) ENGINE=InnoDB')
+    .catch(() => {});
+  const [rows] = await pool.query('SELECT `key`, value FROM akrio_settings');
+  const db = getDb();
+  const upsert = db.prepare(UPSERT_SETTING_SQL);
+  db.transaction(() => { for (const row of rows) upsert.run(row.key, row.value); })();
+  return rows.length;
 }
 
 // Xenon validation evidence and cancellation gate
@@ -2212,7 +2234,7 @@ module.exports = {
   setLineReviewState, getLineReviewStates, setFindingNote, getFindingNotes, getAllFindingKeysForIssue,
   addContactExclusion, getContactExclusions, removeContactExclusion,
   upsertToken, upsertTokenForConnection, markConnectionDisconnected,
-  getTenantsSharingRefreshToken, getToken, withRefreshLock, deleteToken, getSetting, setSetting,
+  getTenantsSharingRefreshToken, getToken, withRefreshLock, deleteToken, getSetting, setSetting, restoreSettingsFromMysql,
   getFreeAgentToken, upsertFreeAgentToken, deleteFreeAgentToken, upsertFreeAgentOrganisation,
   getOrganisationByFreeAgentCompanyId, markOrganisationDisconnectedByFreeAgentCompany,
   upsertTransactionCounts, getTransactionCountsForOrg, getAllTransactionCounts, getPanoramaOrganisations,

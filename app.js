@@ -8,7 +8,7 @@ const cron = require('node-cron');
 const crypto = require('crypto');
 
 const { getDb } = require('./src/db/schema');
-const { getAllOrganisations, getSetting, getStaffById } = require('./src/db/queries');
+const { getAllOrganisations, getSetting, getStaffById, restoreSettingsFromMysql } = require('./src/db/queries');
 const { syncOrganisation } = require('./src/services/xeroSync');
 const { syncFreeAgentOrganisation } = require('./src/services/freeagentSync');
 const { startJob } = require('./src/services/syncJobs');
@@ -164,7 +164,10 @@ const PORT = process.env.PORT || 3000;
 
 // bootstrapAdmin needs the staff table (now in MySQL) before anything can log in, so the server
 // only starts accepting connections once it's confirmed done.
-bootstrapAdmin().then(() => {
+bootstrapAdmin().then(() => restoreSettingsFromMysql()
+  .then(count => console.log(`[settings] restored ${count} saved setting(s) from MySQL`))
+  .catch(err => console.error('[settings] restore from MySQL failed:', err.message))
+).then(() => {
   if (useLocalTlsServer) {
     const sslOptions = {
       key: fs.readFileSync(path.join(__dirname, 'certs/localhost-key.pem')),
