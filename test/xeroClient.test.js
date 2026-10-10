@@ -60,3 +60,14 @@ test('isTransientError still recognises transient network error codes', () => {
   assert.equal(isTransientError({ code: 'ETIMEDOUT' }), true);
   assert.equal(isTransientError({ code: 'SOME_OTHER_CODE' }), false);
 });
+
+const { isDailyLimit } = require('../src/services/xeroClient');
+test('isDailyLimit spots the daily allowance (header or long Retry-After) but not a normal minute limit', () => {
+  const make = headers => ({ response: { statusCode: 429, headers } });
+  assert.equal(isDailyLimit(make({ 'x-rate-limit-problem': 'day' })), true);
+  assert.equal(isDailyLimit(make({ 'retry-after': '40000' })), true);
+  assert.equal(isDailyLimit(make({ 'retry-after': '30' })), false);
+  assert.equal(isDailyLimit(make({ 'x-rate-limit-problem': 'minute', 'retry-after': '20' })), false);
+  assert.equal(isDailyLimit({ response: { statusCode: 500, headers: {} } }), false);
+  assert.equal(isDailyLimit(new Error('boom')), false);
+});

@@ -16,6 +16,7 @@ const listeners = new Map();
 const runners = new Map();
 const MAX_JOBS = Math.max(10, Number(process.env.SYNC_JOB_HISTORY_LIMIT) || 200);
 const CONCURRENCY = Math.max(1, Number(process.env.SYNC_CONCURRENCY) || 1);
+const JOB_MAX_MS = Math.max(60000, Number(process.env.SYNC_JOB_MAX_MS) || 60 * 60 * 1000);
 let active = 0;
 let scheduled = false;
 
@@ -120,13 +121,22 @@ async function drain() {
     }
     active++;
     await publish(job.id);
-    Promise.resolve().then(() => runner(event => {
+    // One client must never hold the whole one-at-a-time queue: if it has produced no result after
+    // this long, mark it failed and move on. (The wording avoids "timeout" so it is not auto-retried.)
+    const withJobCap = promise => Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error('This sync took longer than 60 minutes and was stopped so the queue could move on. Run it again.')),
+        JOB_MAX_MS
+      ).unref()),
+    ]);
+    withJobCap(Promise.resolve().then(() => runner(event => {
       getPool().query(`
         UPDATE akrio_sync_jobs SET progress_json = ?, progress_at = CURRENT_TIMESTAMP WHERE id = ?
       `, [JSON.stringify(event), job.id])
         .then(() => publish(job.id))
         .catch(error => console.error('[syncJobs] progress update failed:', error.message));
-    })).then(async result => {
+    }))).then(async result => {
       await getPool().query(`
         UPDATE akrio_sync_jobs SET status = 'succeeded', result_json = ?, error = NULL,
           finished_at = CURRENT_TIMESTAMP, progress_at = CURRENT_TIMESTAMP WHERE id = ?

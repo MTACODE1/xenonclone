@@ -184,6 +184,19 @@ function retryAfterMs(err) {
 // limit window) so it is never jittered — only the blind exponential guesses are, and only to spread
 // out multiple organisations that hit a transient error at the same moment (e.g. a shared Xero
 // outage) so their retries don't all land in the same instant and re-trigger the same rate limit.
+// Xero's per-client DAILY allowance (5,000 calls) is a 429 too, but its Retry-After is hours, not
+// seconds. Waiting it out in 2-minute steps never succeeds and, with one sync running at a time,
+// freezes every client behind it. Detect it so the caller can fail that one client fast instead.
+const DAILY_LIMIT_WAIT_MS = 15 * 60 * 1000;
+function isDailyLimit(err) {
+  if (!err?.response || err.response.statusCode !== 429) return false;
+  const headers = err.response.headers || {};
+  const problem = String(headers['x-rate-limit-problem'] ?? headers['X-Rate-Limit-Problem'] ?? '').toLowerCase();
+  if (problem === 'day') return true;
+  const wait = retryAfterMs(err);
+  return wait != null && wait > DAILY_LIMIT_WAIT_MS;
+}
+
 function computeRetryDelayMs(attempt, err, randomFn = Math.random) {
   const isRateLimit = err.response && err.response.statusCode === 429;
   const headerDelay = isRateLimit ? retryAfterMs(err) : null;
@@ -201,6 +214,14 @@ async function apiCall(tenantId, fn, retries = 6) {
       const xero = await getAuthenticatedClient(tenantId);
       return await withTimeout(fn(xero, tenantId), API_CALL_TIMEOUT_MS);
     } catch (err) {
+      if (isDailyLimit(err)) {
+        // The wording avoids "rate"/"limit"/"429" on purpose so the job queue does not treat this as
+        // a transient error and retry it straight away.
+        const hours = Math.max(1, Math.round((retryAfterMs(err) || 0) / 3600000));
+        const failure = new Error(`Xero's daily allowance for this client is used up. Run it again in about ${hours} hour(s).`);
+        failure.xeroDailyAllowance = true;
+        throw failure;
+      }
       if (isTransientError(err)) {
         const { delay, reason } = computeRetryDelayMs(attempt, err);
         console.log(`${reason} (attempt ${attempt}/${retries}), waiting ${delay}ms...`);
@@ -227,6 +248,6 @@ async function getAllPages(xero, tenantId, fetchFn) {
 }
 
 module.exports = {
-  createXeroClient, getAuthenticatedClient, apiCall, getAllPages, retryAfterMs, isTransientError,
+  createXeroClient, getAuthenticatedClient, apiCall, getAllPages, retryAfterMs, isTransientError, isDailyLimit,
   computeRetryDelayMs,
 };
