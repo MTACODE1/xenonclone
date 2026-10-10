@@ -25,6 +25,8 @@ const REVIEW_TABLES = [
   'contact_exclusions', 'bank_account_exclusions', 'statement_imports', 'statement_lines',
   'insight_account_mappings', 'insight_category_settings', 'insight_widget_visibility',
   'insight_settings_kv', 'insight_corp_tax_rate_bands', 'insight_corp_tax_adjustments',
+  // per-account check settings (capital / misallocated / purchase-tax lists) live as columns here
+  'chart_of_accounts_cache',
   'validation_gate_assurances', 'validation_snapshots', 'validation_snapshot_checks',
   'companies_house_profile', 'filed_accounts', 'filed_accounts_extractions',
 ];

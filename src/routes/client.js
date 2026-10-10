@@ -225,12 +225,18 @@ router.post('/:tenantId/account-check-configuration', express.urlencoded({ exten
     const number = Number(value);
     return Number.isFinite(number) && number > 0 ? number : null;
   };
+  // A misallocated threshold of 0 is a real setting ("flag everything"), unlike the other thresholds.
+  const nonNegativeNumber = value => {
+    if (value === '' || value == null) return null;
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : null;
+  };
   const configurations = accounts.map(account => ({
     account_code: account.account_code,
     is_capital_candidate: capital.has(account.account_code),
     capital_review_threshold: positiveNumber(req.body.capital_threshold?.[account.account_code]),
     monitor_misallocated: misallocated.has(account.account_code),
-    misallocated_threshold: positiveNumber(req.body.misallocated_threshold?.[account.account_code]),
+    misallocated_threshold: nonNegativeNumber(req.body.misallocated_threshold?.[account.account_code]),
     purchase_tax_ignore: taxIgnored.has(account.account_code),
     purchase_tax_include_asset_prepayment: taxIncluded.has(account.account_code),
   }));

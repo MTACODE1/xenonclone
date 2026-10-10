@@ -586,6 +586,10 @@ async function runSync(tenantId, progressCallback, options = {}) {
     if (config?.purchase_tax_include_asset_prepayment) return true;
     const inScope = expenseAccountCodes.has(accountCode) || fixedAssetAccountCodes.has(accountCode) ||
       prepaymentAccountCodes.has(accountCode);
+    // Once a client's accounts have been configured (explicit ignore list per account, matching
+    // Xenon's per-client "ignore expense codes" setting), that list is the whole truth. The keyword
+    // guess below is only for clients nobody has configured yet.
+    if (org.account_settings_initialised) return inScope;
     return inScope &&
       !isPurchaseTaxExemptAccount(accountNameByCode[accountCode], purchaseTaxExemptOverrideCodes, accountCode);
   };
@@ -1668,14 +1672,17 @@ async function runSync(tenantId, progressCallback, options = {}) {
     // change here is purely additive for a never-configured client — expense-side detection on
     // bills/Money Out is completely unchanged, and revenue-side vague accounts (e.g. "Other Income")
     // are now ALSO monitored on invoices/Money In where they were never checked before.
+    // Once a client's accounts have been configured, an empty list means "monitor nothing" (as in
+    // Xenon) — the vague-name guess is only for clients nobody has configured yet.
+    const useVagueGuess = !configuredMisallocatedCodes.length && !org.account_settings_initialised;
     const monitoredExpenseCodes = new Set(configuredMisallocatedCodes.length
       ? configuredMisallocatedCodes
-      : [...expenseAccountCodes].filter(code => VAGUE_ACCOUNT_NAME.test(accountNameByCode[code])));
+      : useVagueGuess ? [...expenseAccountCodes].filter(code => VAGUE_ACCOUNT_NAME.test(accountNameByCode[code])) : []);
     const monitoredRevenueCodes = new Set(configuredMisallocatedCodes.length
       ? configuredMisallocatedCodes
-      : [...revenueAccountCodes].filter(code => VAGUE_ACCOUNT_NAME.test(accountNameByCode[code])));
+      : useVagueGuess ? [...revenueAccountCodes].filter(code => VAGUE_ACCOUNT_NAME.test(accountNameByCode[code])) : []);
     const getThresholdForAccount = code =>
-      accountConfigByCode.get(code)?.misallocated_threshold || defaultMisallocatedThreshold;
+      accountConfigByCode.get(code)?.misallocated_threshold ?? defaultMisallocatedThreshold;
     const misallocated = [
       ...findMisallocatedLines(inPeriod(accpayAuthorised), monitoredExpenseCodes, getThresholdForAccount, 'bill'),
       ...findMisallocatedLines(inPeriod(accrecAuthorised), monitoredRevenueCodes, getThresholdForAccount, 'invoice'),
