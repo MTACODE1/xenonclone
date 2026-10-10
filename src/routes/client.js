@@ -11,7 +11,7 @@ const {
   getTransactionCountsForOrg, getBankReconciliationForOrg, updateStatementBalance,
   getExcludedBankAccountIds, setBankAccountExcluded,
   getExpenseAccountsForOrg, getAccountCheckConfigurationForOrg,
-  setAccountCheckConfiguration, getIssueFindings, getIssueFindingSummary, setFindingReviewStates,
+  setAccountCheckConfiguration, ensureAccountCodes, getIssueFindings, getIssueFindingSummary, setFindingReviewStates,
   setLineReviewState, getLineReviewStates, setFindingNote, getFindingNotes, getAllFindingKeysForIssue,
   addContactExclusion,
   createStatementImport, deleteStatementImport, getStatementImportByHash, getStatementImportsForOrg,
@@ -215,6 +215,10 @@ router.post('/:tenantId/account-check-configuration', express.urlencoded({ exten
   const { tenantId } = req.params;
   const org = await getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).send('Organisation not found');
+  // `ensure_codes` (comma list) lets a bulk import name accounts whose chart-of-accounts row has not
+  // been cached yet (e.g. right after a restart, before the next sync); the next sync fills in the
+  // names and types without touching the settings saved here.
+  ensureAccountCodes(org.id, String(req.body.ensure_codes || '').split(',').map(c => c.trim()).filter(Boolean));
   const accounts = getAccountCheckConfigurationForOrg(org.id);
   const checked = name => new Set([req.body[name]].flat().filter(Boolean));
   const capital = checked('capital_accounts');

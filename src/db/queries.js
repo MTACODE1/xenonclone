@@ -1559,6 +1559,14 @@ function getExpenseAccountsForOrg(orgId) {
   return db.prepare(`SELECT * FROM chart_of_accounts_cache WHERE org_id = ? AND account_class = 'EXPENSE' ORDER BY account_code`).all(orgId);
 }
 
+// Makes sure a cache row exists for each account code (names/types are filled in by the next sync).
+function ensureAccountCodes(orgId, codes) {
+  if (!codes.length) return;
+  const db = getDb();
+  const insert = db.prepare('INSERT OR IGNORE INTO chart_of_accounts_cache (org_id, account_code) VALUES (?, ?)');
+  db.transaction(list => { for (const code of list) insert.run(orgId, code); })(codes);
+}
+
 function getAccountCheckConfigurationForOrg(orgId) {
   const db = getDb();
   return db.prepare(`
@@ -2248,7 +2256,7 @@ module.exports = {
   getFiledAccountsExtractionsForOrg,
   updateOrganisationCompanyNumber, upsertCompaniesHouseProfile, getCompaniesHouseProfileForOrg,
   upsertChartOfAccountsCache, getExpenseAccountsForOrg,
-  getAccountCheckConfigurationForOrg, setAccountCheckConfiguration,
+  getAccountCheckConfigurationForOrg, setAccountCheckConfiguration, ensureAccountCodes,
   createSyncRun, finishSyncRun, activateSyncRun, getLastSuccessfulRun,
   mergeEntityCache, getCachedEntities, getEntityCacheWatermark,
   createValidationSnapshot, getValidationSnapshots, getActiveValidationRuns,
