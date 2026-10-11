@@ -7,6 +7,9 @@
 // Optional env XENON_DISMISSED=<file>: same shape as the xenon file but holding Xenon's "Show dismissed (n)"
 // counts. Xenon's sidebar count EXCLUDES dismissed items, Akrio's counts everything it has not been told is
 // dismissed, so a row also matches when Akrio = Xenon active + Xenon dismissed (status DISMISSED_IN_XENON).
+// Optional env XENON_LASTSYNC=<file>: { "Client": "YYYY-MM-DD" } for clients whose Xenon data is older than
+// 8 days. Xenon's numbers for those are old snapshots, so a mismatch is XENON_STALE (settled against Xero),
+// not an Akrio failure, and is left out of the headline percentage.
 // Status per row: MATCH (Akrio = Xenon), AKRIO_OK (differs from Xenon but equals Xero),
 //   DISMISSED_IN_XENON, FAIL, BLOCKED.
 // The headline percentage counts only rows where both Akrio and Xenon have a number.
@@ -33,6 +36,8 @@ const norm = s => String(s).toUpperCase().replace(/[^A-Z0-9]/g, '');
 const xenonByName = new Map(Object.entries(xenon).map(([k, v]) => [norm(k), v]));
 const dism = process.env.XENON_DISMISSED ? JSON.parse(fs.readFileSync(process.env.XENON_DISMISSED, 'utf8')) : {};
 const dismByName = new Map(Object.entries(dism).map(([k, v]) => [norm(k), v]));
+const stale = process.env.XENON_LASTSYNC ? JSON.parse(fs.readFileSync(process.env.XENON_LASTSYNC, 'utf8')) : {};
+const staleByName = new Map(Object.entries(stale).map(([k, v]) => [norm(k), v]));
 const xeroByName = new Map(Object.entries(xero).map(([k, v]) => [norm(k), v]));
 
 const rows = [];
@@ -40,7 +45,7 @@ const clients = {};
 for (const [name, a] of Object.entries(akrio)) {
   const x = xenonByName.get(norm(name));
   const ref = xeroByName.get(norm(name));
-  const client = clients[name] = { name, xenon: !!x, xero: !!ref, match: 0, akrioOk: 0, fail: 0, blocked: 0, status: '' };
+  const client = clients[name] = { name, xenon: !!x, xero: !!ref, match: 0, akrioOk: 0, stale: 0, fail: 0, blocked: 0, status: '' };
   if (a.status !== 'connected' || !x) {
     client.status = a.status !== 'connected' ? 'BLOCKED (disconnected)' : 'BLOCKED (not in Xenon)';
     continue;
@@ -54,28 +59,28 @@ for (const [name, a] of Object.entries(akrio)) {
     else if (ak === xv) status = 'MATCH';
     else if (xr !== undefined && xr === ak) status = 'AKRIO_OK';
     else if (dv > 0 && ak === xv + dv) status = 'DISMISSED_IN_XENON';
-    else status = 'FAIL';
+    else status = staleByName.has(norm(name)) ? 'XENON_STALE' : 'FAIL';
     rows.push({ client: name, check, xenon: xv, xenonDismissed: dv ?? '', akrio: ak ?? '', xero: xr ?? '', status, akrioSynced: a.checks[check]?.syncedAt || '' });
-    client[{ MATCH: 'match', AKRIO_OK: 'akrioOk', DISMISSED_IN_XENON: 'akrioOk', FAIL: 'fail', BLOCKED: 'blocked' }[status]]++;
+    client[{ MATCH: 'match', AKRIO_OK: 'akrioOk', DISMISSED_IN_XENON: 'akrioOk', XENON_STALE: 'stale', FAIL: 'fail', BLOCKED: 'blocked' }[status]]++;
   }
-  client.status = client.fail ? 'FAIL' : 'PASS';
+  client.status = client.fail ? 'FAIL' : client.stale ? 'PASS (Xenon stale on ' + client.stale + ' rows)' : 'PASS';
 }
 
 const q = v => /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v;
 const csv = (cols, data) => [cols.join(','), ...data.map(r => cols.map(c => q(r[c])).join(','))].join('\n');
 fs.writeFileSync(`${outPrefix}-ledger.csv`, csv(['client', 'check', 'xenon', 'xenonDismissed', 'akrio', 'xero', 'status', 'akrioSynced'], rows));
-fs.writeFileSync(`${outPrefix}-clients.csv`, csv(['name', 'xenon', 'xero', 'match', 'akrioOk', 'fail', 'blocked', 'status'], Object.values(clients)));
+fs.writeFileSync(`${outPrefix}-clients.csv`, csv(['name', 'xenon', 'xero', 'match', 'akrioOk', 'stale', 'fail', 'blocked', 'status'], Object.values(clients)));
 
-const compared = rows.filter(r => r.status !== 'BLOCKED');
+const compared = rows.filter(r => !['BLOCKED', 'XENON_STALE'].includes(r.status));
 const matched = compared.filter(r => r.status !== 'FAIL');
 const withXero = compared.filter(r => r.xero !== '');
 const cl = Object.values(clients);
 console.log(JSON.stringify({
-  clients: cl.length, pass: cl.filter(c => c.status === 'PASS').length, fail: cl.filter(c => c.status === 'FAIL').length,
+  clients: cl.length, pass: cl.filter(c => c.status.startsWith('PASS')).length, fail: cl.filter(c => c.status === 'FAIL').length,
   blocked: cl.filter(c => c.status.startsWith('BLOCKED')).length,
   rowsCompared: compared.length, exactMatchWithXenon: compared.filter(r => r.status === 'MATCH').length,
   dismissedInXenon: compared.filter(r => r.status === 'DISMISSED_IN_XENON').length,
   matchPct: +(100 * matched.length / (compared.length || 1)).toFixed(1),
-  rowsBlocked: rows.length - compared.length,
+  rowsBlocked: rows.filter(r => r.status === 'BLOCKED').length, rowsXenonStale: rows.filter(r => r.status === 'XENON_STALE').length,
   xeroVerifiedRows: withXero.length, akrioEqualsXero: withXero.filter(r => r.akrio === r.xero).length,
 }, null, 1));

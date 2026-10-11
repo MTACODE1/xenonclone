@@ -1345,6 +1345,24 @@ async function runSync(tenantId, progressCallback, options = {}) {
           }
         }
       }
+      // Supplier credit notes carry the same tax-code mistakes as bills. Xenon has an explicit
+      // "purchase tax credit notes" setting (on by default) and counts them; checked against raw
+      // Xero data on 17 clients, adding them is what closes the remaining 1-3 line gaps.
+      for (const note of inPeriod(purchaseCredits.filter(c => ['AUTHORISED', 'PAID'].includes(c.status)))) {
+        for (const line of (note.lineItems || [])) {
+          if (
+            (!line.taxType || line.taxType === 'NONE') &&
+            (line.lineAmount || 0) > 0 &&
+            line.accountCode && shouldCheckPurchaseTaxAccount(line.accountCode)
+          ) {
+            taxMissingLines.push({
+              creditNoteId: note.creditNoteID, number: note.creditNoteNumber, contact: note.contact?.name,
+              date: toDateString(note.date), accountCode: line.accountCode,
+              description: line.description, amount: netLineAmount(note, line), source: 'credit_note'
+            });
+          }
+        }
+      }
       for (const txn of inPeriod(bankSpendTxns || [])) {
         for (const line of (txn.lineItems || [])) {
           if (
@@ -1399,6 +1417,22 @@ async function runSync(tenantId, progressCallback, options = {}) {
               invoiceId: inv.invoiceID, number: inv.invoiceNumber, contact: inv.contact?.name,
               date: toDateString(inv.date), accountCode: line.accountCode,
               description: line.description, amount: netLineAmount(inv, line), source: 'invoice'
+            });
+          }
+        }
+      }
+      // Sales credit notes (Xenon's "sales tax credit notes" setting, on by default).
+      for (const note of sinceLD(salesCredits.filter(c => ['AUTHORISED', 'PAID'].includes(c.status)))) {
+        for (const line of (note.lineItems || [])) {
+          if (
+            (!line.taxType || line.taxType === 'NONE') &&
+            (line.lineAmount || 0) > 0 &&
+            line.accountCode && revenueAccountCodes.has(line.accountCode)
+          ) {
+            taxMissingLines.push({
+              creditNoteId: note.creditNoteID, number: note.creditNoteNumber, contact: note.contact?.name,
+              date: toDateString(note.date), accountCode: line.accountCode,
+              description: line.description, amount: netLineAmount(note, line), source: 'credit_note'
             });
           }
         }
