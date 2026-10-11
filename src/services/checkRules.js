@@ -485,6 +485,14 @@ function excludeDuplicateDrafts(items, windowDays = CHECK_DEFAULTS.duplicateWind
   return items.filter(item => !duplicateIds.has(item.invoiceID));
 }
 
+// Unapproved BILLS count every draft/submitted bill, duplicates included. The cluster exclusion above
+// was proven on invoices (RBC Sutherland), but on supplier bills Xenon keeps the duplicates: Adeola
+// Gboyega has 46 in-period draft bills including two identical Amazon ones and Xenon, Xero and a raw
+// count all say 46 (Akrio said 40); MBX Graffix 64 vs 60 and 1st Corps 2 vs 0 go the same way.
+function selectUnapprovedBills(draftBills) {
+  return [...draftBills];
+}
+
 function isOldDocument(document, asOf, days = CHECK_DEFAULTS.oldDocumentDays) {
   const age = daysBetween(asOf, document.date);
   return age != null && age > days;
@@ -771,6 +779,7 @@ module.exports = {
   findDuplicateContacts,
   findDuplicates,
   excludeDuplicateDrafts,
+  selectUnapprovedBills,
   findUnexpectedDefaultLines,
   findMisallocatedLines,
   resolveCapitalReviewCandidateCodes,

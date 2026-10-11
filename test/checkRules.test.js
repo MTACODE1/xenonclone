@@ -12,6 +12,7 @@ const {
   findDuplicateContacts,
   findDuplicates,
   excludeDuplicateDrafts,
+  selectUnapprovedBills,
   findUnexpectedDefaultLines,
   findMisallocatedLines,
   resolveCapitalReviewCandidateCodes,
@@ -920,4 +921,14 @@ test('duplicate invoice/bill exact-total resolvers are trusted verbatim once exp
   const org = { duplicate_invoice_require_exact_total: 0, duplicate_bill_require_exact_total: 1 };
   assert.equal(resolveDuplicateInvoiceRequireExactTotal(org), false);
   assert.equal(resolveDuplicateBillRequireExactTotal(org), true);
+});
+
+test('selectUnapprovedBills keeps duplicate draft bills, matching Xenon and Xero on Adeola Gboyega (46)', () => {
+  const draft = (id, contact, date, total) => ({
+    invoiceID: id, type: 'ACCPAY', status: 'DRAFT', total, date, contact: { contactID: contact, name: contact },
+  });
+  // Two identical Amazon drafts (same contact, date and total) are exactly what excludeDuplicateDrafts drops.
+  const bills = [draft('a', 'Amazon', '2026-08-15', 14), draft('b', 'Amazon', '2026-08-15', 14), draft('c', 'PayByPhone', '2026-08-12', 13)];
+  assert.equal(excludeDuplicateDrafts(bills).length, 1);
+  assert.equal(selectUnapprovedBills(bills).length, 3);
 });

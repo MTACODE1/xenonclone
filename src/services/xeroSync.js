@@ -18,7 +18,7 @@ const { fetchCompanyProfile, fetchFiledNetAssets, normalizeCompanyNumber } = req
 const { getDb: getDatabase } = require('../db/schema');
 const {
   CHECK_DEFAULTS, CHECK_DEFINITIONS, ALL_CHECK_DEFINITIONS, NON_SCORED_CHECKS, calculateHealthScore, findDirectMatches,
-  findDuplicateContacts, findDuplicates, excludeDuplicateDrafts, findUnexpectedDefaultLines,
+  findDuplicateContacts, findDuplicates, excludeDuplicateDrafts, selectUnapprovedBills, findUnexpectedDefaultLines,
   findMisallocatedLines, resolveCapitalReviewCandidateCodes,
   isOldDocument, isPurchaseTaxExemptAccount, resolvePeriodChecked, resolveSupplierPatternLookbackMonths,
   resolveMultiAccountPatternLookbackMonths,
@@ -1068,22 +1068,14 @@ async function runSync(tenantId, progressCallback, options = {}) {
 
   // --- MEDIUM: Unapproved Bills (since lock date) ---
   try {
-    const draftBills = sinceLD(accpayDraft);
-    const duplicateBillGroups = findDuplicates(draftBills);
-    const bills = excludeDuplicateDrafts(draftBills, undefined, duplicateBillGroups);
-    const duplicateBillFindings = await buildDuplicateDraftFindings(
-      tenantId, duplicateBillGroups, Boolean(options.cacheOnly)
-    );
+    const bills = selectUnapprovedBills(sinceLD(accpayDraft));
     const issue = {
       org_id: orgId, check_type: 'unapproved_bills', importance: 'medium',
       count: bills.length, potential_value_gbp: sumAbsoluteExposure(bills, i => i.total),
-      detail_json: JSON.stringify([
-        ...bills.map(i => ({
-          id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
-          date: toDateString(i.date), total: i.total, status: i.status
-        })),
-        ...duplicateBillFindings,
-      ]),
+      detail_json: JSON.stringify(bills.map(i => ({
+        id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
+        date: toDateString(i.date), total: i.total, status: i.status
+      }))),
       period_checked: 'since_lock_date'
     };
     insertIssue(issue); issueResults.push(issue);
