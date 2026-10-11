@@ -41,6 +41,7 @@ const {
 const puppeteer = require('puppeteer');
 const { resolveOrgAccess } = require('../middleware/orgAccess');
 const { isStaffManager } = require('../services/staffPermissions');
+const { parseBankLineFilters, sendBankLinesCsv, bankLinesPageData } = require('./bankLinesShared');
 
 // Mounted with an explicit ':tenantId' path segment (not app.js's bare '/client' prefix) —
 // Express only populates req.params from a path pattern that actually contains the named
@@ -201,6 +202,28 @@ router.get('/:tenantId', async (req, res) => {
   } catch (error) {
     res.status(400).send(error.message);
   }
+});
+
+// Every bank transaction line with the chart-of-accounts account it was coded to (from MySQL, so it
+// survives deploys). Filled by each sync from the bank transactions Akrio already downloads.
+router.get('/:tenantId/bank-lines', async (req, res, next) => {
+  try {
+    const org = await getOrganisationByTenantId(req.params.tenantId);
+    const filters = { ...parseBankLineFilters(req.query), orgIds: [org.id] };
+    const data = await bankLinesPageData(filters, req.query.page);
+    res.render('bankLines', {
+      viewScope: 'client', org, clients: [], data, filters, query: req.query,
+      formAction: `${res.locals.basePath || ''}/client/${org.xero_tenant_id || org.freeagent_company_id}/bank-lines`,
+    });
+  } catch (error) { next(error); }
+});
+
+router.get('/:tenantId/bank-lines.csv', async (req, res, next) => {
+  try {
+    const org = await getOrganisationByTenantId(req.params.tenantId);
+    const filters = { ...parseBankLineFilters(req.query), orgIds: [org.id] };
+    await sendBankLinesCsv(res, filters, `bank-lines-${String(org.name).replace(/[^a-z0-9]+/gi, '_')}.csv`);
+  } catch (error) { if (res.headersSent) res.end(); else next(error); }
 });
 
 router.get('/:tenantId/score-breakdown', async (req, res) => {

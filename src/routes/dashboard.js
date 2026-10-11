@@ -5,6 +5,7 @@ const {
   getPanoramaOrganisations, getOrgIdsForStaff, getStaffForOrg, getAllStaff,
 } = require('../db/queries');
 const { isStaffManager } = require('../services/staffPermissions');
+const { parseBankLineFilters, sendBankLinesCsv, bankLinesPageData } = require('./bankLinesShared');
 const { syncOrganisation } = require('../services/xeroSync');
 const { syncFreeAgentOrganisation } = require('../services/freeagentSync');
 const {
@@ -150,6 +151,41 @@ router.post('/sync-all', verifyAjaxCsrf, async (req, res) => {
     }
   }
   res.status(202).json({ success: true, period, results });
+});
+
+// Staff see bank lines only for clients they have access to; managers see all.
+async function accessibleOrgs(req) {
+  let orgs = (await getAllOrganisations()).filter(o => o.xero_tenant_id);
+  if (!isStaffManager(req.session.staffRole)) {
+    const allowed = new Set(await getOrgIdsForStaff(req.session.staffId));
+    orgs = orgs.filter(o => allowed.has(o.id));
+  }
+  return orgs.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function bankLineFiltersFor(req, orgs) {
+  const filters = parseBankLineFilters(req.query);
+  const chosen = orgs.find(o => o.xero_tenant_id === req.query.client);
+  filters.orgIds = chosen ? [chosen.id] : orgs.map(o => o.id);
+  return filters;
+}
+
+router.get('/bank-lines', async (req, res, next) => {
+  try {
+    const orgs = await accessibleOrgs(req);
+    const filters = await bankLineFiltersFor(req, orgs);
+    const data = await bankLinesPageData(filters, req.query.page);
+    res.render('bankLines', {
+      viewScope: 'all', org: null, clients: orgs, data, filters, query: req.query, formAction: `${res.locals.basePath || ''}/bank-lines`,
+    });
+  } catch (error) { next(error); }
+});
+
+router.get('/bank-lines.csv', async (req, res, next) => {
+  try {
+    const orgs = await accessibleOrgs(req);
+    await sendBankLinesCsv(res, await bankLineFiltersFor(req, orgs), 'bank-lines-all-clients.csv');
+  } catch (error) { if (res.headersSent) res.end(); else next(error); }
 });
 
 router.get('/transactions', async (req, res, next) => {

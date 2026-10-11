@@ -33,6 +33,7 @@ const {
   withDisplayOnlyBankFindings
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
+const { saveBankLines } = require('../db/bankLines');
 const journalChecks = require('./journalChecks');
 const {
   allocateStatementMatches, extractNetAssetsFromBalanceSheet, balanceSheetHoldsBookkeeping,
@@ -599,6 +600,17 @@ async function runSync(tenantId, progressCallback, options = {}) {
     orgId, tenantId, runId, 'bank_transaction',
     since => fetchAllBankTransactions(tenantId, since), options
   );
+  // Keep the account each bank line was coded to in MySQL (survives deploys, searchable). Skipped for
+  // cache-only re-analysis, and a failure here must never fail the sync itself.
+  if (!options.cacheOnly) {
+    const accountsByCode = {};
+    for (const a of (chartOfAccounts || [])) if (a.code) accountsByCode[a.code] = { name: a.name, type: a.type };
+    try {
+      await saveBankLines(orgId, allBankTransactions, accountsByCode);
+    } catch (err) {
+      console.error(`[bank-lines] could not save for org ${orgId}: ${err.message}`);
+    }
+  }
   const bankSpendTxns = allBankTransactions.filter(item =>
     item.type === 'SPEND' && item.status === 'AUTHORISED' && isWithinPeriod(toDateString(item.date), period)
   );

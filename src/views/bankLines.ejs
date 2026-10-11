@@ -1,0 +1,110 @@
+<%- include('partials/header', { currentPage: viewScope === 'all' ? 'bank-lines' : 'clients' }) %>
+<%
+  const qs = obj => Object.entries(obj).filter(([, v]) => v !== undefined && v !== null && v !== '')
+    .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v)).join('&');
+  const current = { client: query.client, from: query.from, to: query.to, account: query.account,
+    reconciled: query.reconciled, search: query.search };
+  const csvHref = formAction + '.csv?' + qs(current);
+  const money = v => v == null ? '' : Number(v).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+%>
+
+<div class="page-header page-header-flex">
+  <div>
+    <h4>Bank transactions &amp; where they were coded</h4>
+    <p><%= viewScope === 'client' ? org.name : 'All clients' %> — every bank transaction line with the chart-of-accounts account it was coded to in Xero.
+      Updated by each sync. <strong><%= data.total.toLocaleString('en-GB') %></strong> lines match.</p>
+  </div>
+  <a href="<%= csvHref %>" class="btn btn-outlined">Download CSV</a>
+</div>
+
+<form method="GET" action="<%= formAction %>" class="form-row mb-24" style="flex-wrap:wrap;gap:8px;align-items:center;">
+  <% if (viewScope === 'all') { %>
+  <select name="client" class="form-select" style="width:auto;max-width:260px;">
+    <option value="">All clients</option>
+    <% clients.forEach(c => { %><option value="<%= c.xero_tenant_id %>" <%= query.client === c.xero_tenant_id ? 'selected' : '' %>><%= c.name %></option><% }) %>
+  </select>
+  <% } %>
+  <select name="account" class="form-select" style="width:auto;max-width:260px;">
+    <option value="">All accounts</option>
+    <% data.accounts.filter(a => a.account_code).forEach(a => { %>
+      <option value="<%= a.account_code %>" <%= query.account === a.account_code ? 'selected' : '' %>><%= a.account_code %> — <%= a.account_name || '' %></option>
+    <% }) %>
+  </select>
+  <select name="reconciled" class="form-select" style="width:auto;">
+    <option value="">Reconciled or not</option>
+    <option value="yes" <%= query.reconciled === 'yes' ? 'selected' : '' %>>Reconciled</option>
+    <option value="no" <%= query.reconciled === 'no' ? 'selected' : '' %>>Not reconciled</option>
+  </select>
+  <input type="date" name="from" class="form-input" value="<%= query.from || '' %>" style="width:auto;">
+  <span class="text-muted">to</span>
+  <input type="date" name="to" class="form-input" value="<%= query.to || '' %>" style="width:auto;">
+  <input type="text" name="search" class="form-input" placeholder="Search contact, description, account…" value="<%= query.search || '' %>" style="width:260px;">
+  <button type="submit" class="btn btn-primary btn-sm">Apply</button>
+</form>
+
+<% if (data.total === 0) { %>
+<div class="card" style="padding:24px;">
+  <strong>No bank lines stored yet.</strong>
+  <p class="text-muted" style="margin:8px 0 0;">They are saved during each sync. Run a sync for <%= viewScope === 'client' ? 'this client' : 'the clients' %> and they will appear here.</p>
+</div>
+<% } else { %>
+
+<div class="card mb-24">
+  <div style="padding:12px 16px;font-weight:600;">By account <span class="text-muted" style="font-weight:400;">(money in +, money out −)</span></div>
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead><tr><th>Code</th><th>Account</th><th>Type</th><th class="text-right">Lines</th><th class="text-right">Total (gross)</th></tr></thead>
+      <tbody>
+        <% data.accounts.forEach(a => { %>
+        <tr>
+          <td><%= a.account_code || '—' %></td>
+          <td><%= a.account_name || (a.account_code ? '' : 'Bank transfers / no account') %></td>
+          <td class="text-muted"><%= a.account_type || '' %></td>
+          <td class="text-right"><%= Number(a.line_count).toLocaleString('en-GB') %></td>
+          <td class="text-right">£<%= money(a.gross) %></td>
+        </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <% if (viewScope === 'all') { %><th>Client</th><% } %>
+          <th>Date</th><th>Contact</th><th>Description</th><th>Bank account</th>
+          <th>Code</th><th>Account</th><th>Tax</th><th class="text-right">Gross</th><th>Reconciled</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% data.rows.forEach(r => { %>
+        <tr>
+          <% if (viewScope === 'all') { %><td><%= r.client_name %></td><% } %>
+          <td style="white-space:nowrap;"><%= r.txn_date %></td>
+          <td><%= r.contact_name || '' %></td>
+          <td><%= r.description || r.reference || '' %></td>
+          <td><%= r.bank_account_name || '' %></td>
+          <td><%= r.account_code || '—' %></td>
+          <td><%= r.account_name || (String(r.txn_type || '').includes('TRANSFER') ? 'Bank transfer' : '') %></td>
+          <td class="text-muted"><%= r.tax_type || '' %></td>
+          <td class="text-right" style="white-space:nowrap;"><%= money(r.gross) %></td>
+          <td><%= r.is_reconciled ? 'Yes' : 'No' %></td>
+        </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+  <% if (data.pages > 1) { %>
+  <div style="padding:12px 16px;display:flex;gap:12px;align-items:center;justify-content:flex-end;">
+    <% if (data.page > 1) { %><a class="btn btn-outlined btn-sm" href="<%= formAction %>?<%= qs({ ...current, page: data.page - 1 }) %>">‹ Previous</a><% } %>
+    <span class="text-muted">Page <%= data.page %> of <%= data.pages %></span>
+    <% if (data.page < data.pages) { %><a class="btn btn-outlined btn-sm" href="<%= formAction %>?<%= qs({ ...current, page: data.page + 1 }) %>">Next ›</a><% } %>
+  </div>
+  <% } %>
+</div>
+<% } %>
+
+<%- include('partials/footer') %>
