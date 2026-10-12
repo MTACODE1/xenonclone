@@ -30,6 +30,7 @@ const {
   resolveDuplicateInvoiceRequireExactTotal, resolveDuplicateBillRequireExactTotal,
   selectAuthorisedUnreconciled, selectOldCredits, sumAbsoluteExposure,
   grossLineAmount, netLineAmount, toDateString,
+  buildAccountCodeCanonicaliser, canonicaliseAccountCodes,
   withDisplayOnlyBankFindings
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
@@ -527,6 +528,9 @@ async function runSync(tenantId, progressCallback, options = {}) {
     options
   );
   const chartOfAccountsAvailable = Array.isArray(chartOfAccounts);
+  // Match account codes the way Xero does (case-insensitively) before any check compares them.
+  const canonicalAccountCode = buildAccountCodeCanonicaliser(chartOfAccountsAvailable ? chartOfAccounts : []);
+  canonicaliseAccountCodes(canonicalAccountCode, { documents: [...allInvoices, ...allCredits], contacts });
   // A company not registered for VAT/sales tax has no tax scheme to apply — every
   // transaction legitimately has no tax code, so "missing tax code" isn't an issue.
   const vatRegistered = !!orgInfo.salesTaxBasis && orgInfo.salesTaxBasis !== 'NONE';
@@ -618,6 +622,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     orgId, tenantId, runId, 'bank_transaction',
     since => fetchAllBankTransactions(tenantId, since), options
   );
+  canonicaliseAccountCodes(canonicalAccountCode, { documents: allBankTransactions });
   // Keep the account each bank line was coded to in MySQL (survives deploys, searchable). Skipped for
   // cache-only re-analysis, and a failure here must never fail the sync itself.
   if (!options.cacheOnly) {
@@ -641,6 +646,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     orgId, tenantId, runId, 'manual_journal',
     since => fetchAllManualJournals(tenantId, since), options
   );
+  canonicaliseAccountCodes(canonicalAccountCode, { journals: allManualJournals });
   const recentManualJournals = allManualJournals.filter(item =>
     item.status === 'POSTED' && isWithinPeriod(toDateString(item.date), period)
   );

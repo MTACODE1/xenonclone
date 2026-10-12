@@ -284,6 +284,28 @@ const PURCHASE_TAX_EXEMPT_KEYWORDS = /\b(payroll|statutory|wages?|salar(?:y|ies)
 // must stay in scope because rent is ordinarily VATable (4X4 has that combined account).
 const PURCHASE_TAX_RATES_ACCOUNT = /^(business\s+|council\s+)?rates$/i;
 
+// Xero treats account codes as case-insensitive: a line coded '001B' and an account whose code is '001b'
+// are the same account. Every check compares codes with Set/Map lookups built from the chart, so a case
+// difference silently dropped those lines (Especially For You: about 640 untaxed expense lines, 511 vs
+// Xenon's 1,150). Rewriting each line's code to the chart's own spelling once, right after loading,
+// makes every lookup below it match. Codes not in the chart are left exactly as they were.
+function buildAccountCodeCanonicaliser(chartOfAccounts) {
+  const byUpper = new Map();
+  for (const account of chartOfAccounts || []) {
+    if (account?.code != null && account.code !== '') byUpper.set(String(account.code).toUpperCase(), account.code);
+  }
+  return code => (code == null || code === '' ? code : (byUpper.get(String(code).toUpperCase()) ?? code));
+}
+
+function canonicaliseAccountCodes(canonical, { documents = [], journals = [], contacts = [] } = {}) {
+  for (const doc of documents) for (const line of doc?.lineItems || []) line.accountCode = canonical(line.accountCode);
+  for (const journal of journals) for (const line of journal?.journalLines || []) line.accountCode = canonical(line.accountCode);
+  for (const contact of contacts) {
+    if (contact?.salesDefaultAccountCode) contact.salesDefaultAccountCode = canonical(contact.salesDefaultAccountCode);
+    if (contact?.purchasesDefaultAccountCode) contact.purchasesDefaultAccountCode = canonical(contact.purchasesDefaultAccountCode);
+  }
+}
+
 function toDateString(value) {
   if (!value) return null;
   if (value instanceof Date) return value.toISOString().split('T')[0];
@@ -794,5 +816,7 @@ module.exports = {
   grossLineAmount,
   netLineAmount,
   toDateString,
+  buildAccountCodeCanonicaliser,
+  canonicaliseAccountCodes,
   withDisplayOnlyBankFindings,
 };

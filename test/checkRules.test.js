@@ -963,3 +963,28 @@ test('historical changes explains itself for sole traders and new companies inst
   assert.equal(displayStatus({ period_checked: 'no_filed_accounts_yet', count: 0 }), 'not_applicable');
   assert.equal(displayStatus({ period_checked: 'not_configured', count: null }), 'not_configured');
 });
+
+// --- Account codes match case-insensitively, the way Xero does ---
+const { buildAccountCodeCanonicaliser, canonicaliseAccountCodes } = require('../src/services/checkRules');
+
+test('a line coded 001B is matched to the chart account 001b, and unknown codes are left alone', () => {
+  const canonical = buildAccountCodeCanonicaliser([{ code: '001b' }, { code: '200' }, { code: '151/1' }]);
+  assert.equal(canonical('001B'), '001b');
+  assert.equal(canonical('001b'), '001b');
+  assert.equal(canonical('151/1'), '151/1');
+  assert.equal(canonical('999X'), '999X', 'not in the chart: unchanged');
+  assert.equal(canonical(undefined), undefined);
+});
+
+test('documents, journals and contact defaults are all rewritten, so every set lookup downstream matches', () => {
+  const canonical = buildAccountCodeCanonicaliser([{ code: '264a' }, { code: '429' }]);
+  const doc = { lineItems: [{ accountCode: '264A' }, { accountCode: '429' }, {}] };
+  const journal = { journalLines: [{ accountCode: '264A' }] };
+  const contact = { purchasesDefaultAccountCode: '264A', salesDefaultAccountCode: '429' };
+  canonicaliseAccountCodes(canonical, { documents: [doc], journals: [journal], contacts: [contact] });
+  const expense = new Set(['264a', '429']);   // sets are built from the chart, so they use the chart's spelling
+  assert.ok(expense.has(doc.lineItems[0].accountCode));
+  assert.ok(expense.has(journal.journalLines[0].accountCode));
+  assert.equal(contact.purchasesDefaultAccountCode, '264a');
+  assert.equal(doc.lineItems[2].accountCode, undefined);
+});
