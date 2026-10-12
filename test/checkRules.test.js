@@ -401,14 +401,16 @@ test('with no active period key, a non-reserved label falls back to itself rathe
   assert.equal(resolvePeriodChecked(undefined, null), undefined);
 });
 
-test('RESERVED_PERIOD_LABELS contains exactly the six semantic states, nothing else', () => {
+test('RESERVED_PERIOD_LABELS contains exactly the eight semantic states, nothing else', () => {
   // 'not_vat_registered' and 'not_applicable_freeagent' (both the not_applicable category) joined
   // the other four across sessions — see periodStatus.js for the full model. This test exists
   // specifically to catch a future label being added without updating resolveCheckDisplayStatus to
   // handle it.
+  // 'not_a_company' and 'no_filed_accounts_yet' (Historical Changes) were added 12 Oct 2026; both are
+  // resolved to not_applicable by resolveCheckDisplayStatus (tested below).
   assert.deepEqual([...RESERVED_PERIOD_LABELS].sort(), [
-    'needs_sync', 'not_applicable_freeagent', 'not_configured', 'not_vat_registered',
-    'out_of_scope', 'unavailable',
+    'needs_sync', 'no_filed_accounts_yet', 'not_a_company', 'not_applicable_freeagent', 'not_configured',
+    'not_vat_registered', 'out_of_scope', 'unavailable',
   ]);
 });
 
@@ -941,4 +943,23 @@ test('findDuplicates with requireUnpaidPair keeps a group where one invoice is u
   const trio = [inv('a', 'INV-0010', 0), inv('b', 'INV-0011', 7200), inv('c', 'INV-0012', 0)];
   assert.equal(findDuplicates(trio, 3, { requireUnpaidPair: true }).length, 1);
   assert.equal(findDuplicates([inv('a', 'INV-0010', 0), inv('c', 'INV-0012', 0)], 3, { requireUnpaidPair: true }).length, 0);
+});
+
+// --- Companies House name matching and the clearer "nothing to check" reasons ---
+const { pickExactActiveMatch } = require('../src/services/companiesHouse');
+const { resolveCheckDisplayStatus: displayStatus } = require('../src/services/checkRules');
+
+test('a company number is only picked for an exact, single, active name match', () => {
+  const item = (title, number, status = 'active') => ({ title, company_number: number, company_status: status });
+  assert.equal(pickExactActiveMatch([item('COUNTY GAS SERVICES LTD', '16046711'), item('COUNTY GAS SERVICES LIMITED', '02780242', 'dissolved')], 'County Gas Services Ltd'), '16046711');
+  assert.equal(pickExactActiveMatch([item('A LTD', '1'), item('A LIMITED', '2')], 'A Ltd'), null, 'two active matches are ambiguous');
+  assert.equal(pickExactActiveMatch([item('ANGEL FAST TRACK LTD', '15425085')], 'Fast Track Excavations'), null, 'a near name is not a match');
+  assert.equal(pickExactActiveMatch([item('X LTD', '3', 'dissolved')], 'X Ltd'), null, 'dissolved companies are ignored');
+  assert.equal(pickExactActiveMatch([item('Smith & Sons Limited', '4')], 'SMITH AND SONS LTD'), '00000004'.slice(-8));
+});
+
+test('historical changes explains itself for sole traders and new companies instead of "not configured"', () => {
+  assert.equal(displayStatus({ period_checked: 'not_a_company', count: 0 }), 'not_applicable');
+  assert.equal(displayStatus({ period_checked: 'no_filed_accounts_yet', count: 0 }), 'not_applicable');
+  assert.equal(displayStatus({ period_checked: 'not_configured', count: null }), 'not_configured');
 });

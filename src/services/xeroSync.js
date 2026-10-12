@@ -14,7 +14,7 @@ const {
   updateOrganisationCompanyNumber, upsertCompaniesHouseProfile, getCompaniesHouseProfileForOrg,
   upsertFiledAccountsFromCompaniesHouse, recordFiledAccountsExtraction, getFiledAccountsExtractionsForOrg
 } = require('../db/queries');
-const { fetchCompanyProfile, fetchFiledNetAssets, normalizeCompanyNumber } = require('./companiesHouse');
+const { fetchCompanyProfile, findCompanyNumberByName, fetchFiledNetAssets, normalizeCompanyNumber } = require('./companiesHouse');
 const { getDb: getDatabase } = require('../db/schema');
 const {
   CHECK_DEFAULTS, CHECK_DEFINITIONS, ALL_CHECK_DEFINITIONS, NON_SCORED_CHECKS, calculateHealthScore, findDirectMatches,
@@ -356,7 +356,20 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // Xero's registrationNumber when the client hasn't set one, then refresh the register snapshot
   // only if a key is configured.
   try {
-    const companyNumber = normalizeCompanyNumber(org.company_number || orgInfo.registrationNumber);
+    let companyNumber = normalizeCompanyNumber(org.company_number || orgInfo.registrationNumber);
+    // No number stored: for a UK company, try to find it by name. Only an exact, single, active match is
+    // accepted (see pickExactActiveMatch); a sole trader or partnership has no company number at all.
+    if (!companyNumber && orgInfo.organisationEntityType === 'COMPANY' && orgInfo.countryCode === 'GB') {
+      const lookupKey = getSetting('companies_house_api_key');
+      if (lookupKey) {
+        try {
+          companyNumber = await findCompanyNumberByName(orgInfo.legalName || orgInfo.name, lookupKey);
+          if (companyNumber) console.log(`[companies-house] matched ${org.name} to company ${companyNumber} by name`);
+        } catch (lookupError) {
+          console.error('Companies House name lookup skipped:', lookupError.message);
+        }
+      }
+    }
     if (companyNumber) {
       if (companyNumber !== org.company_number) await updateOrganisationCompanyNumber(orgId, companyNumber);
       const apiKey = getSetting('companies_house_api_key');
@@ -2051,10 +2064,16 @@ async function runSync(tenantId, progressCallback, options = {}) {
   }
   try {
     const filing = (getFiledAccountsExtractionsForOrg(orgId) || []).find(e => e.made_up_to && e.filing_date);
-    if (orgInfo.countryCode !== 'GB' || !filing) {
+    // Say WHY there is nothing to check instead of a vague "not configured": only UK limited companies file
+    // accounts, and a company with no accounts filed yet has nothing to compare against.
+    const profile = getCompaniesHouseProfileForOrg(orgId);
+    const reason = orgInfo.countryCode !== 'GB' || orgInfo.organisationEntityType !== 'COMPANY' ? 'not_a_company'
+      : (!filing && profile && !profile.fetch_error && !profile.accounts_last_made_up_to) ? 'no_filed_accounts_yet'
+        : (!filing ? 'not_configured' : null);
+    if (reason) {
       insertIssue({
         org_id: orgId, check_type: 'historical_changes', importance: 'medium',
-        count: null, potential_value_gbp: 0, detail_json: '[]', period_checked: 'not_configured',
+        count: reason === 'not_configured' ? null : 0, potential_value_gbp: 0, detail_json: '[]', period_checked: reason,
       });
     } else {
       const items = journalChecks.historicalChanges({

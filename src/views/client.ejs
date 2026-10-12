@@ -294,6 +294,10 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
             sales_tax_missing: 'client is not VAT registered',
             purchase_tax_missing: 'client is not VAT registered',
           }[check.type] || 'not applicable to this client';
+          const notApplicableByPeriod = {
+            not_a_company: 'only applies to UK limited companies (this client is a sole trader, partnership or non-UK)',
+            no_filed_accounts_yet: 'this company has not filed any accounts at Companies House yet',
+          }[check.period_checked];
           const desc = checkDescriptions[check.type] || {};
         %>
         <div class="check-card check-row <%= !hasIssues ? 'check-ok' : '' %>" id="check-<%= check.type %>">
@@ -311,7 +315,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
                   <div style="font-size: 0.7rem; color: #7C8FAC;"><%= unavailableReason %></div>
                 <% } else if (isNotApplicable) { %>
                   <span style="color: #7C8FAC; font-size: 0.875rem;">Not applicable</span>
-                  <div style="font-size: 0.7rem; color: #7C8FAC;"><%= notApplicableReason %></div>
+                  <div style="font-size: 0.7rem; color: #7C8FAC;"><%= notApplicableByPeriod || notApplicableReason %></div>
                 <% } else if (isNotConfigured) { %>
                   <span style="color: #7C8FAC; font-size: 0.875rem;"><%= check.period_checked === 'needs_sync' ? 'Needs sync' : 'Not configured' %></span>
                   <div style="font-size: 0.7rem;"><a href="<%= check.type === 'opening_balance_differences' ? '#filed-accounts' : check.type === 'unprocessed_bank' ? '#statement-evidence' : '#bank-reconciliation' %>" class="font-semibold">Configure evidence →</a></div>

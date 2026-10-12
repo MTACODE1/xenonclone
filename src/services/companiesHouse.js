@@ -100,6 +100,29 @@ function parseCompanyProfile(raw) {
   };
 }
 
+// A client Xero knows as a UK company but with no registration number stored can be matched by name.
+// Only an exact (ignoring Ltd/Limited, punctuation and case), single, ACTIVE match is accepted; anything
+// ambiguous is left for a person, because a wrong company number would silently pull the wrong filings.
+const nameKey = value => String(value || '').toUpperCase().replace(/&/g, 'AND')
+  .replace(/\bLIMITED\b/g, 'LTD').replace(/[^A-Z0-9]/g, '');
+
+function pickExactActiveMatch(items, name) {
+  const hits = (items || []).filter(item => nameKey(item.title) === nameKey(name) && item.company_status === 'active');
+  return hits.length === 1 ? normalizeCompanyNumber(hits[0].company_number) : null;
+}
+
+async function findCompanyNumberByName(name, apiKey, fetchImpl = fetch) {
+  if (!name || !apiKey) return null;
+  const auth = Buffer.from(`${apiKey}:`).toString('base64');
+  const response = await fetchImpl(
+    `${CH_BASE_URL}/search/companies?q=${encodeURIComponent(name)}&items_per_page=10`,
+    { headers: { Authorization: `Basic ${auth}`, Accept: 'application/json' } }
+  );
+  if (!response.ok) return null;
+  const body = await response.json();
+  return pickExactActiveMatch(body.items, name);
+}
+
 async function fetchCompanyProfile(companyNumber, apiKey) {
   const number = normalizeCompanyNumber(companyNumber);
   if (!number) throw new Error('Enter a company number');
@@ -322,6 +345,7 @@ async function fetchFiledNetAssets(companyNumber, apiKey, { madeUpTo, fetchers =
 }
 
 module.exports = {
+  pickExactActiveMatch, findCompanyNumberByName,
   CH_BASE_URL, CH_DOCUMENT_HOSTS,
   normalizeCompanyNumber, parseCompanyProfile, fetchCompanyProfile,
   fetchFilingHistory, fetchDocumentMetadata, fetchDocumentContent,
