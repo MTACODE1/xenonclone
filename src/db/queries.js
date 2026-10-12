@@ -643,17 +643,19 @@ function mergeEntityCache(orgId, entityType, rows, { runId = null, fullRefresh =
       json = excluded.json, modified_at = excluded.modified_at,
       fetched_at = excluded.fetched_at, source_run_id = excluded.source_run_id
   `);
-  const saved = [];   // same rows, also saved to MySQL so a deploy does not lose them
+  let written = 0;    // rows saved locally; the same rows are then saved to MySQL so a deploy does not lose them
   db.transaction(() => {
     const seen = new Set();
     for (const row of rows) {
       const id = row?.[idField] ?? row?.journalNumber;
       if (id == null) continue;
       seen.add(String(id));
-      const json = JSON.stringify(row);
-      const modifiedAt = cacheDate(row.updatedDateUTC || row.updatedDateUtc);
-      insert.run(orgId, entityType, String(id), json, modifiedAt, fetchedAt, runId);
-      saved.push({ id, json, modifiedAt });
+      insert.run(
+        orgId, entityType, String(id), JSON.stringify(row),
+        cacheDate(row.updatedDateUTC || row.updatedDateUtc),
+        fetchedAt, runId
+      );
+      written++;
     }
     if (fullRefresh) {
       const existing = db.prepare(`
@@ -665,7 +667,7 @@ function mergeEntityCache(orgId, entityType, rows, { runId = null, fullRefresh =
       for (const item of existing) if (!seen.has(item.entity_id)) remove.run(orgId, entityType, item.entity_id);
     }
   })();
-  queueXeroCacheSave(orgId, entityType, saved, fetchedAt, fullRefresh);
+  queueXeroCacheSave(orgId, entityType, fetchedAt, fullRefresh, written);
 }
 
 function getCachedEntities(orgId, entityType) {

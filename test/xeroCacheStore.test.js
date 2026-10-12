@@ -10,9 +10,11 @@ process.env.AKRIO_DB_USER = 'test-user';
 
 // In-memory stand-in for the akrio_xero_cache table.
 const mysql = new Map(); // `${org}|${type}|${id}` -> row
+const insertSizes = [];  // rows per INSERT, to prove saves are paged
 const exec = async (sql, params = []) => {
   if (/^CREATE TABLE/i.test(sql)) return [[]];
   if (/^INSERT INTO akrio_xero_cache/i.test(sql)) {
+    insertSizes.push(params[0].length);
     for (const [org, type, id, modified, fetched, payload] of params[0]) {
       mysql.set(`${org}|${type}|${id}`, { org_id: org, entity_type: type, entity_id: id, modified_at: modified, fetched_at: fetched, payload });
     }
@@ -84,4 +86,14 @@ test('a full refresh removes records Xero no longer has, but an empty result nev
   mergeEntityCache(4, 'invoice', [], { fullRefresh: true });          // an empty / failed fetch
   await store.drain();
   assert.equal([...mysql.keys()].filter(k => k.startsWith('4|')).length, 1);
+});
+
+test('a big save is written in small pages, so memory stays flat for very large clients', async () => {
+  insertSizes.length = 0;
+  const many = Array.from({ length: 1500 }, (_, n) => inv('big' + String(n).padStart(5, '0')));
+  mergeEntityCache(5, 'invoice', many, { fullRefresh: true });
+  await store.drain();
+  assert.equal([...mysql.keys()].filter(k => k.startsWith('5|')).length, 1500);
+  assert.ok(insertSizes.length >= 4, 'several INSERTs, not one giant one');
+  assert.ok(Math.max(...insertSizes) <= 400, 'no INSERT larger than one page');
 });

@@ -41,25 +41,36 @@ function enqueue(job) {
   return chain;
 }
 
-// entries: [{ id, json, modifiedAt }]; fullRefresh also removes rows that are no longer in Xero.
-function queueSave(orgId, entityType, entries, fetchedAt, fullRefresh) {
-  if (!enabled() || (!entries.length && !fullRefresh)) return chain;
+// Saves the rows a merge just wrote to the local cache (those stamped with this fetchedAt). They are read
+// back from SQLite one page at a time, so memory stays small even for a client with hundreds of thousands
+// of records (the container only has 1 GB; keeping a second copy of every record ran it out of memory).
+// fullRefresh also removes MySQL rows that are no longer in Xero, but only when something was written.
+function queueSave(orgId, entityType, fetchedAt, fullRefresh, writtenCount) {
+  if (!enabled() || (!writtenCount && !fullRefresh)) return chain;
   return enqueue(async () => {
     await ensureTable();
     const pool = getPool();
+    const db = getDb();
+    const page = db.prepare(`
+      SELECT entity_id, json, modified_at FROM xero_entity_cache
+       WHERE org_id = ? AND entity_type = ? AND fetched_at = ? AND entity_id > ?
+       ORDER BY entity_id LIMIT ${BATCH}`);
     const fetched = toMysqlDate(fetchedAt);
-    for (let i = 0; i < entries.length; i += BATCH) {
-      const rows = entries.slice(i, i + BATCH).map(e => [
-        orgId, entityType, String(e.id).slice(0, 64), toMysqlDate(e.modifiedAt), fetched, zlib.gzipSync(e.json),
-      ]);
+    let last = '';
+    for (;;) {
+      const batch = page.all(orgId, entityType, fetchedAt, last);
+      if (!batch.length) break;
+      const rows = batch.map(r => [orgId, entityType, String(r.entity_id).slice(0, 64), toMysqlDate(r.modified_at), fetched, zlib.gzipSync(r.json)]);
       await pool.query(
         `INSERT INTO akrio_xero_cache (org_id, entity_type, entity_id, modified_at, fetched_at, payload) VALUES ?
          ON DUPLICATE KEY UPDATE modified_at = VALUES(modified_at), fetched_at = VALUES(fetched_at), payload = VALUES(payload)`,
         [rows]
       );
+      last = batch[batch.length - 1].entity_id;
+      await new Promise(resolve => setImmediate(resolve));   // let other work run between pages
     }
     // Only drop rows after a complete re-download, and never when it returned nothing at all.
-    if (fullRefresh && entries.length) {
+    if (fullRefresh && writtenCount) {
       await pool.query(
         'DELETE FROM akrio_xero_cache WHERE org_id = ? AND entity_type = ? AND fetched_at < ?',
         [orgId, entityType, fetched]
