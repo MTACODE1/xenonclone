@@ -1,3 +1,4 @@
+const { hydrateOrgIfEmpty, drain: drainXeroCacheSaves } = require('../db/xeroCacheStore');
 const {
   fetchAllInvoices, fetchAllBills, fetchAllContacts, fetchAllCreditNotes,
 } = require('./freeagentAdapter');
@@ -43,6 +44,7 @@ function incrementalSince(orgId, entityType, options) {
 }
 
 async function refreshCachedEntities(orgId, runId, entityType, fetcher, options) {
+  await hydrateOrgIfEmpty(orgId);
   if (options.cacheOnly) {
     const cached = getCachedEntities(orgId, entityType);
     if (!cached.length) throw new Error(`No cached ${entityType} data is available`);
@@ -51,6 +53,7 @@ async function refreshCachedEntities(orgId, runId, entityType, fetcher, options)
   const since = incrementalSince(orgId, entityType, options);
   const fetched = await fetcher(since);
   mergeEntityCache(orgId, entityType, fetched, { runId, fullRefresh: !since });
+  await drainXeroCacheSaves();
   return getCachedEntities(orgId, entityType);
 }
 

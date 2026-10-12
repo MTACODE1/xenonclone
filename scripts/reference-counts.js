@@ -91,6 +91,8 @@ function compute(d) {
   let st = 0;
   if (registered) {
     for (const i of accrec.filter(i => ['AUTHORISED', 'PAID'].includes(i.st) && inPeriod(i.d))) for (const l of i.l) if ((!l.t || l.t === 'NONE') && l.n > 0 && isRev(l.a)) st++;
+    // Sales credit notes count too (Xenon's "sales tax credit notes" setting is on by default).
+    for (const c of d.credits.filter(c => c.type === 'ACCRECCREDIT' && ['AUTHORISED', 'PAID'].includes(c.st) && inPeriod(c.d))) for (const l of c.l) if ((!l.t || l.t === 'NONE') && l.n > 0 && isRev(l.a)) st++;
     for (const b of d.bank.filter(b => b.type === 'RECEIVE' && b.st === 'AUTHORISED' && inPeriod(b.d))) for (const l of b.l) if ((!l.t || l.t === 'NONE') && l.n > 0 && isRev(l.a)) st++;
   }
   out.stmiss = st;

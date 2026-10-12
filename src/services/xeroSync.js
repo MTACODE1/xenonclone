@@ -34,6 +34,7 @@ const {
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
 const { saveBankLines } = require('../db/bankLines');
+const { hydrateOrgIfEmpty, drain: drainXeroCacheSaves } = require('../db/xeroCacheStore');
 const journalChecks = require('./journalChecks');
 const {
   allocateStatementMatches, extractNetAssetsFromBalanceSheet, balanceSheetHoldsBookkeeping,
@@ -251,13 +252,16 @@ function incrementalSince(orgId, entityType, options) {
   if (options.cacheOnly || options.forceFullRefresh) return undefined;
   const watermark = getEntityCacheWatermark(orgId, entityType);
   if (!watermark) return undefined;
-  const fullRefreshDays = Math.max(1, Number(process.env.XERO_FULL_REFRESH_DAYS) || 7);
+  const fullRefreshDays = Math.max(1, Number(getSetting('xero_full_refresh_days')) || Number(process.env.XERO_FULL_REFRESH_DAYS) || 7);
   if (Date.now() - new Date(watermark).getTime() >= fullRefreshDays * 86400000) return undefined;
   // Overlap five minutes so updates racing a paginated fetch cannot fall between watermarks.
   return new Date(new Date(watermark).getTime() - 5 * 60 * 1000);
 }
 
 async function refreshCachedEntities(orgId, tenantId, runId, entityType, fetcher, options) {
+  // After a deploy the container's cache is empty; restore this client's saved copy from MySQL first,
+  // so a normal sync only fetches what changed in Xero and a cache-only re-analysis has data to read.
+  await hydrateOrgIfEmpty(orgId);
   if (options.cacheOnly) {
     const cached = getCachedEntities(orgId, entityType);
     if (!cached.length) throw new Error(`No cached ${entityType} data is available`);
@@ -266,6 +270,7 @@ async function refreshCachedEntities(orgId, tenantId, runId, entityType, fetcher
   const since = incrementalSince(orgId, entityType, options);
   const fetched = await fetcher(since);
   mergeEntityCache(orgId, entityType, fetched, { runId, fullRefresh: !since });
+  await drainXeroCacheSaves();   // the MySQL copy is saved before this step counts as done
   return getCachedEntities(orgId, entityType);
 }
 
