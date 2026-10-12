@@ -901,8 +901,11 @@ async function runSync(tenantId, progressCallback, options = {}) {
 
   // --- HIGH: Duplicate Invoices (AUTHORISED + SUBMITTED unpaid, same calendar day) ---
   try {
+    // PAID invoices belong in the pool: Xenon reports a pair where one invoice is already paid as long
+    // as another in the group is unpaid (BCPM, Adeola, LiveAdventure and Harlow each have exactly one
+    // such group that Akrio missed). requireUnpaidPair below still drops groups where all are paid.
     const duplicateInvoicePool = inPeriod([
-      ...accrecAuthorised.filter(i => i.status === 'AUTHORISED'),
+      ...accrecAuthorised,
       ...accrecDraft.filter(i => i.status === 'SUBMITTED'),
     ]);
     // Xenon's documented default requires at least one unpaid invoice in a match (same as

@@ -932,3 +932,13 @@ test('selectUnapprovedBills keeps duplicate draft bills, matching Xenon and Xero
   assert.equal(excludeDuplicateDrafts(bills).length, 1);
   assert.equal(selectUnapprovedBills(bills).length, 3);
 });
+
+test('findDuplicates with requireUnpaidPair keeps a group where one invoice is unpaid and the others are paid (Adeola INV-0010/11/12)', () => {
+  const inv = (id, number, amountDue) => ({
+    invoiceID: id, invoiceNumber: number, total: 7200, amountDue, date: '2026-03-18',
+    contact: { contactID: 'c1', name: 'Ogilvy & Mather' },
+  });
+  const trio = [inv('a', 'INV-0010', 0), inv('b', 'INV-0011', 7200), inv('c', 'INV-0012', 0)];
+  assert.equal(findDuplicates(trio, 3, { requireUnpaidPair: true }).length, 1);
+  assert.equal(findDuplicates([inv('a', 'INV-0010', 0), inv('c', 'INV-0012', 0)], 3, { requireUnpaidPair: true }).length, 0);
+});
