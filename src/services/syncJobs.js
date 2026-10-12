@@ -108,9 +108,15 @@ async function drain() {
     const job = await claimNextJob();
     if (!job) break;
     const payload = parse(job.payload_json);
-    const runner = runners.get(job.id) || (payload?.period
-      ? progress => require('./xeroSync').syncOrganisation(job.tenant_id, progress, payload)
-      : null);
+    let runner = runners.get(job.id);
+    if (!runner && payload?.period) {
+      // A job restored after a restart has no in-memory runner: pick the sync that matches the client type.
+      const [[owner]] = await getPool().query(`SELECT freeagent_company_id FROM akrio_organisations WHERE id = ?`, [job.org_id]);
+      runner = owner?.freeagent_company_id
+        ? progress => require('./freeagentSync').syncFreeAgentOrganisation(job.tenant_id, progress, payload)
+        : progress => require('./xeroSync').syncOrganisation(job.tenant_id, progress, payload);
+    }
+    runner = runner || null;
     if (!runner) {
       await getPool().query(`
         UPDATE akrio_sync_jobs SET status = 'failed', error = ?,
@@ -179,8 +185,9 @@ async function startJob(key, runner, options = {}) {
   if (options.orgId) {
     org = { id: options.orgId };
   } else {
+    // FreeAgent clients have no Xero tenant id; their identifier is the FreeAgent company id.
     const [rows] = await pool.query(
-      `SELECT id FROM akrio_organisations WHERE xero_tenant_id = ?`, [tenantId]
+      `SELECT id FROM akrio_organisations WHERE xero_tenant_id = ? OR freeagent_company_id = ?`, [tenantId, tenantId]
     );
     org = rows[0];
   }
