@@ -22,7 +22,7 @@ function requestedPeriod(query) {
 // is ever wired up from the dashboard, it inherits the same fix rather than the bug that fix was
 // written for: cacheOnly must only skip the live Xero fetch when reanalysing a genuinely different
 // period than the one currently active, not unconditionally.
-async function startOrganisationJob(tenantId, query = {}, checkType = null) {
+async function startOrganisationJob(tenantId, query = {}, checkType = null, { priority = false } = {}) {
   const period = requestedPeriod(query);
   const key = `${tenantId}:${checkType || 'all'}:${period.type}:${period.from || ''}:${period.to || ''}`;
   const org = await getOrganisationByTenantId(tenantId);
@@ -43,7 +43,7 @@ async function startOrganisationJob(tenantId, query = {}, checkType = null) {
     ? progress => syncFreeAgentOrganisation(tenantId, progress, { period, checkType, cacheOnly, asOf })
     : progress => syncOrganisation(tenantId, progress, { period, checkType, cacheOnly, asOf });
   return startJob(key, runSync,
-    { tenantId, mode: checkType ? `check:${checkType}` : 'full', payload: { period, checkType, cacheOnly, asOf } }
+    { tenantId, priority, mode: checkType ? `check:${checkType}` : 'full', payload: { period, checkType, cacheOnly, asOf } }
   );
 }
 
@@ -126,7 +126,8 @@ router.post('/sync/:tenantId', verifyAjaxCsrf, async (req, res) => {
     return res.status(404).json({ error: 'Organisation not found' });
   }
   try {
-    const started = await startOrganisationJob(tenantId, req.query);
+    // A hand-started sync of one client goes ahead of anything a Sync All still has waiting.
+    const started = await startOrganisationJob(tenantId, req.query, null, { priority: true });
     return res.status(started.existing ? 200 : 202).json({
       success: true, jobId: started.job.id, existing: started.existing,
     });

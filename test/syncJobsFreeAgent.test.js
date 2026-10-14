@@ -22,3 +22,20 @@ test('Sync All can queue a FreeAgent client, which has no Xero tenant id', async
   assert.ok(started.job, 'a job is created instead of "Organisation not found"');
   assert.ok(calls.some(c => /INSERT INTO akrio_sync_jobs/i.test(c.sql)));
 });
+
+test('a hand-started sync is stored with priority so it jumps the Sync All queue', async () => {
+  calls.length = 0;
+  await startJob('35963:all:since_lock_date::', async () => ({}), { tenantId: '35963', mode: 'full', priority: true, payload: { period: { type: 'since_lock_date' } } });
+  const insert = calls.find(c => /INSERT INTO akrio_sync_jobs/i.test(c.sql));
+  assert.equal(JSON.parse(insert.params[6]).priority, 1);
+  assert.equal(JSON.parse(insert.params[6]).period.type, 'since_lock_date');
+  const claim = calls.find(c => /SELECT id FROM akrio_sync_jobs/i.test(c.sql));
+  if (claim) assert.match(claim.sql, /\$\.priority.*DESC, created_at/s);
+});
+
+test('a Sync All job without priority keeps its plain payload', async () => {
+  calls.length = 0;
+  await startJob('35963:all:since_lock_date::', async () => ({}), { tenantId: '35963', mode: 'full', payload: { period: { type: 'since_lock_date' } } });
+  const insert = calls.find(c => /INSERT INTO akrio_sync_jobs/i.test(c.sql));
+  assert.equal(JSON.parse(insert.params[6]).priority, undefined);
+});

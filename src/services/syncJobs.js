@@ -89,7 +89,8 @@ async function claimNextJob() {
         SELECT 1 FROM akrio_sync_jobs running
         WHERE running.org_id = akrio_sync_jobs.org_id AND running.status = 'running'
       )
-    ORDER BY created_at, id LIMIT 1
+    ORDER BY CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.priority')), 0) AS UNSIGNED) DESC, created_at, id
+    LIMIT 1
   `);
   if (!candidates.length) return null;
   const candidateId = candidates[0].id;
@@ -197,7 +198,19 @@ async function startJob(key, runner, options = {}) {
     `SELECT * FROM akrio_sync_jobs WHERE org_id = ? AND mode = ? AND status IN ('queued', 'running')`,
     [org.id, mode]
   );
-  if (existingRows.length) return { job: publicJob(existingRows[0]), existing: true };
+  if (existingRows.length) {
+    // Someone asked for this client by hand while a Sync All already has it waiting: move it to the front
+    // instead of leaving them behind the rest of the queue.
+    if (options.priority && existingRows[0].status === 'queued') {
+      await pool.query(`
+        UPDATE akrio_sync_jobs SET payload_json = IF(JSON_TYPE(payload_json) = 'OBJECT',
+          JSON_SET(payload_json, '$.priority', 1), JSON_OBJECT('priority', 1))
+        WHERE id = ? AND status = 'queued'
+      `, [existingRows[0].id]);
+      schedule();
+    }
+    return { job: publicJob(existingRows[0]), existing: true };
+  }
   const id = crypto.randomUUID();
   await pool.query(`
     INSERT INTO akrio_sync_jobs
@@ -206,7 +219,7 @@ async function startJob(key, runner, options = {}) {
   `, [
     id, org.id, tenantId, mode, key,
     Math.max(1, Number(options.maxAttempts) || 3),
-    JSON.stringify(options.payload || null),
+    JSON.stringify(options.priority ? { ...(options.payload || {}), priority: 1 } : (options.payload || null)),
     JSON.stringify({ step: 'queued', message: 'Waiting to start...' }),
   ]);
   runners.set(id, runner);

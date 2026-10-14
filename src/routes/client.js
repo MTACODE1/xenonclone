@@ -822,7 +822,7 @@ router.post('/:tenantId/sync', verifyCsrf, async (req, res) => {
   const started = await startJob(
     `${tenantId}:all:${period.type}:${period.from || ''}:${period.to || ''}`,
     runSync,
-    { tenantId, orgId: org.id, mode: 'full', payload: { period } }
+    { tenantId, orgId: org.id, mode: 'full', priority: true, payload: { period } }
   );
   return res.status(started.existing ? 200 : 202).json({
     success: true, jobId: started.job.id, existing: started.existing,
@@ -874,7 +874,7 @@ router.post('/:tenantId/check/:checkType/reanalyse', verifyCsrf, async (req, res
     `${tenantId}:${checkType}:${period.type}:${period.from || ''}:${period.to || ''}`,
     runSync,
     {
-      tenantId, orgId: org.id, mode: `check:${checkType}`,
+      tenantId, orgId: org.id, mode: `check:${checkType}`, priority: true,
       payload: { period, checkType, cacheOnly, asOf: resolvedPeriod.end, forceFullRefresh },
     }
   );
