@@ -602,9 +602,14 @@ function contactNamesOverlap(tokensA, tokensB) {
 function findDuplicateContacts(contacts, threshold = CHECK_DEFAULTS.contactSimilarityThreshold) {
   const duplicates = [];
   const tokens = contacts.map(contact => contactNameTokens(contact.name));
+  const stripped = contacts.map(contact => String(contact.name || '').toLowerCase().replace(/[^a-z0-9]/g, ''));
   for (let i = 0; i < contacts.length; i++) {
     for (let j = i + 1; j < contacts.length; j++) {
-      const similar = contactNameSimilarity(contacts[i].name, contacts[j].name) >= threshold;
+      // Names whose lengths differ too much cannot reach the similarity threshold, so skip the slow comparison.
+      const longest = Math.max(stripped[i].length, stripped[j].length);
+      const near = longest > 0 && Math.abs(stripped[i].length - stripped[j].length) / longest <= 1 - threshold
+        && contactNameSimilarity(contacts[i].name, contacts[j].name) >= threshold;
+      const similar = near;
       if (!similar && !contactNamesOverlap(tokens[i], tokens[j])) continue;
       duplicates.push({
         id1: contacts[i].contactID,

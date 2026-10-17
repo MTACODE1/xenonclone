@@ -1572,13 +1572,16 @@ async function runSync(tenantId, progressCallback, options = {}) {
 
   // --- LOW: Duplicate Contacts (strict matching — active customer/supplier contacts) ---
   try {
-    const activeContacts = contacts.filter(c => c.contactStatus === 'ACTIVE' && (c.isCustomer || c.isSupplier));
+    // Every active contact is compared, not just those Xero has marked customer or supplier: Xero only sets
+    // those flags once a contact is used on an invoice or bill, so contacts used only on Spend Money
+    // (card and bank payments) were skipped and obvious duplicates such as Deliveroo / Deliveroo London missed.
+    const activeContacts = contacts.filter(c => c.contactStatus === 'ACTIVE');
     const duplicates = findDuplicateContacts(activeContacts);
     const issue = {
       org_id: orgId, check_type: 'duplicate_contacts', importance: 'low',
       count: duplicates.length, potential_value_gbp: 0,
       detail_json: JSON.stringify(duplicates),
-      period_checked: 'active_customer_supplier_contacts'
+      period_checked: 'active_contacts'
     };
     insertIssue(issue); issueResults.push(issue);
   } catch (err) {
@@ -1595,7 +1598,11 @@ async function runSync(tenantId, progressCallback, options = {}) {
       if (c.contactStatus !== 'ACTIVE') return false;
       const missingSalesDefaults = c.isCustomer && (!c.salesDefaultAccountCode || !c.accountsReceivableTaxType);
       const missingPurchaseDefaults = c.isSupplier && (!c.purchasesDefaultAccountCode || !c.accountsPayableTaxType);
-      return missingSalesDefaults || missingPurchaseDefaults;
+      // A contact with neither flag (never on an invoice or bill) still needs defaults if it has none at all.
+      const hasAnyDefault = c.salesDefaultAccountCode || c.purchasesDefaultAccountCode
+        || c.accountsReceivableTaxType || c.accountsPayableTaxType;
+      const missingForUnflagged = !c.isCustomer && !c.isSupplier && !hasAnyDefault;
+      return missingSalesDefaults || missingPurchaseDefaults || missingForUnflagged;
     });
     const issue = {
       org_id: orgId, check_type: 'contact_defaults', importance: 'low',
@@ -1605,7 +1612,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
         salesDefaultAccountCode: c.salesDefaultAccountCode, purchasesDefaultAccountCode: c.purchasesDefaultAccountCode,
         accountsReceivableTaxType: c.accountsReceivableTaxType, accountsPayableTaxType: c.accountsPayableTaxType
       }))),
-      period_checked: 'active_customers_or_suppliers'
+      period_checked: 'active_contacts'
     };
     insertIssue(issue); issueResults.push(issue);
   } catch (err) {
