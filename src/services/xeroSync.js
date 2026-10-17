@@ -32,7 +32,7 @@ const {
   grossLineAmount, netLineAmount, toDateString,
   buildAccountCodeCanonicaliser, canonicaliseAccountCodes,
   withDisplayOnlyBankFindings,
-  dropTaxMissingNoise, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
+  findDuplicatesWithSameNumber, dropTaxMissingNoise, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
 const { saveBankLines } = require('../db/bankLines');
@@ -965,7 +965,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       ...accpayAuthorised,
       ...accpayDraft.filter(i => i.status === 'DRAFT'),
     ]);
-    const duplicates = findDuplicates(
+    const duplicates = findDuplicatesWithSameNumber(
       duplicateBillPool,
       resolveDuplicateBillWindowDays(org),
       {

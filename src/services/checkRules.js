@@ -420,13 +420,19 @@ function findDuplicates(items, windowDays = CHECK_DEFAULTS.duplicateWindowDays, 
   const requireExactReference = Boolean(options.requireExactReference);
   const requireExactTotal = options.requireExactTotal !== false;
   const referenceOf = item => item.invoiceNumber || item.reference || null;
+  // Same supplier and same invoice number is a duplicate whatever the amount or date (the team's feedback:
+  // a bill entered twice with a slightly different total still has the same number). Case and spacing are ignored.
+  const matchOnReference = options.matchOnReference === true;
+  const normalisedReference = item => String(referenceOf(item) || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   const byGroupKey = new Map();
   for (const item of items) {
     const contactId = item.contact?.contactID;
     const amount = Math.round((item.total || 0) * 100);
     // A zero-value document was never a candidate duplicate under either mode — nothing to match.
     if (!contactId || !amount) continue;
-    const key = requireExactTotal ? `${contactId}|${amount}` : contactId;
+    if (matchOnReference && !normalisedReference(item)) continue;
+    const key = matchOnReference ? `${contactId}|ref:${normalisedReference(item)}`
+      : requireExactTotal ? `${contactId}|${amount}` : contactId;
     if (!byGroupKey.has(key)) byGroupKey.set(key, []);
     byGroupKey.get(key).push(item);
   }
@@ -446,7 +452,7 @@ function findDuplicates(items, windowDays = CHECK_DEFAULTS.duplicateWindowDays, 
       const anchorReference = requireExactReference ? referenceOf(anchor) : null;
       for (let index = remaining.length - 1; index >= 0; index--) {
         const age = daysBetween(anchor.date, remaining[index].date);
-        if (age == null || age < 0 || age > windowDays) continue;
+        if (!matchOnReference && (age == null || age < 0 || age > windowDays)) continue;
         // A blank reference on both sides is not a "match" — it would let every reference-less
         // document at the same contact/amount/date silently satisfy this filter regardless of the
         // setting's intent, which is to REQUIRE a genuinely shared reference, not the absence of one.
@@ -455,7 +461,7 @@ function findDuplicates(items, windowDays = CHECK_DEFAULTS.duplicateWindowDays, 
         remaining.splice(index, 1);
       }
       if (group.length < 2) continue;
-      if (requireUnpaidPair && group.every(item => (item.amountDue || 0) <= 0.005)) continue;
+      if (!matchOnReference && requireUnpaidPair && group.every(item => (item.amountDue || 0) <= 0.005)) continue;
       groups.push(group);
     }
   }
@@ -776,7 +782,17 @@ function dropTaxMissingNoise(lines, { minAmount = 1, nameByCode = new Map(), ski
     && !(skipName && skipName.test(String(nameByCode.get(line.accountCode) || ''))));
 }
 
+// Duplicate groups from the usual rules plus any supplier/invoice-number repeats they did not already cover.
+function findDuplicatesWithSameNumber(items, windowDays, options = {}) {
+  const usual = findDuplicates(items, windowDays, options);
+  const covered = new Set(usual.flatMap(group => group.documentIds));
+  const extra = findDuplicates(items, windowDays, { ...options, matchOnReference: true })
+    .filter(group => !group.documentIds.every(id => covered.has(id)));
+  return [...usual, ...extra].sort((a, b) => String(b.date2 || '').localeCompare(String(a.date2 || '')));
+}
+
 module.exports = {
+  findDuplicatesWithSameNumber,
   BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise,
   CHECK_DEFAULTS,
   CHECK_DEFINITIONS,

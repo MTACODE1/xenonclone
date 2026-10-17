@@ -1007,3 +1007,16 @@ test('Purchase Tax Missing on a Flat Rate Scheme client shows as not applicable'
   const { NOT_APPLICABLE_PERIODS } = require('../src/services/periodStatus');
   assert.ok(NOT_APPLICABLE_PERIODS.has('flat_rate_scheme'));
 });
+
+test('Duplicate Bills also flags the same supplier and invoice number with a different amount', () => {
+  const { findDuplicatesWithSameNumber } = require('../src/services/checkRules');
+  const supplier = { contactID: 'c1', name: 'Acme' };
+  const bill = (id, number, total, date) => ({ invoiceID: id, invoiceNumber: number, total, amountDue: total, date, contact: supplier, status: 'AUTHORISED' });
+  const found = findDuplicatesWithSameNumber([bill('a', 'INV-100', 100, '2026-03-01'), bill('b', 'inv 100', 105, '2026-05-20'), bill('c', 'INV-200', 50, '2026-05-21')], 3, { requireUnpaidPair: true });
+  assert.equal(found.length, 1);
+  assert.deepEqual(found[0].documentIds.sort(), ['a', 'b']);
+  const other = findDuplicatesWithSameNumber([bill('a', 'INV-100', 100, '2026-03-01'), { ...bill('b', 'INV-100', 105, '2026-05-20'), contact: { contactID: 'c2', name: 'Other' } }], 3, {});
+  assert.equal(other.length, 0, 'a different supplier with the same number is not a duplicate');
+  const same = findDuplicatesWithSameNumber([bill('a', 'X1', 100, '2026-05-01'), bill('b', 'X9', 100, '2026-05-02')], 3, { requireUnpaidPair: true });
+  assert.equal(same.length, 1, 'the usual same-amount rule still works');
+});
