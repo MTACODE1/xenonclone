@@ -1157,7 +1157,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // than the supplier's bills is exactly the inconsistency these checks exist to surface.
   // Confirmed on Handymanz: Plumbfix has credit notes on accounts 325 and 473, making it the 4th
   // multi-account supplier that Xenon finds but we missed when checking bills only.
-  // Multi-account uses a 12-month window; multi-tax uses the configurable lookback.
+  // Multi-account uses the chosen period only (no lookback unless a client is given one); multi-tax uses the configurable lookback.
   const allBillsForMultiAccount = withinMultiAccountWindow([
     ...accpayAuthorised,
     ...purchaseCredits.filter(item => ['AUTHORISED', 'PAID'].includes(item.status)),

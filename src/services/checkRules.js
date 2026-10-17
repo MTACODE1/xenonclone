@@ -51,9 +51,13 @@ function resolveSupplierPatternLookbackMonths(org) {
 // independently, so multi-account needs its own resolver/column rather than inheriting whatever
 // multi-tax happens to be set to (Handymanz's multi-tax was widened to 18 months, which must not
 // also widen multi-account's separately-validated 12-month default).
+// The accountants want only the transactions inside the chosen dates (feedback 17 Oct 2026: bills from before the
+// period, such as a May 2025 Notion invoice, were being listed), so the default is no lookback at all. A client
+// can still be given a positive lookback explicitly.
+const DEFAULT_MULTI_ACCOUNT_LOOKBACK_MONTHS = 0;
 function resolveMultiAccountPatternLookbackMonths(org) {
   const configured = Number(org?.multi_account_pattern_lookback_months);
-  return Number.isInteger(configured) && configured > 0 ? configured : DEFAULT_SUPPLIER_PATTERN_LOOKBACK_MONTHS;
+  return Number.isInteger(configured) && configured > 0 ? configured : DEFAULT_MULTI_ACCOUNT_LOOKBACK_MONTHS;
 }
 
 // Config-isolation resolvers (2026-09): each takes the organisation row plus the practice-wide
