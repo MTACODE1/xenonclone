@@ -158,30 +158,40 @@ async function remoteHashes() {
 async function loadTable(table, hash) {
   const db = getDb();
   if (!tableExists(db, table)) return 0;
-  const [rows] = await getPool().query(
-    'SELECT payload FROM akrio_sqlite_snapshot WHERE table_name = ? ORDER BY chunk_no', [table]
-  );
-  const parsed = [];
-  for (const r of rows) parsed.push(...JSON.parse((await gunzip(r.payload)).toString()));
   const columns = new Set(db.prepare(`PRAGMA table_info("${table}")`).all().map(c => c.name));
+  // One saved chunk (about 3 MB of rows) is read, unpacked and written at a time. Loading the whole table
+  // at once held every chunk plus every row in memory together; with over a million saved findings that
+  // ran the 1 GB container out of memory during start-up, so the new version never came up.
+  const [chunkRows] = await getPool().query(
+    'SELECT chunk_no FROM akrio_sqlite_snapshot WHERE table_name = ? ORDER BY chunk_no', [table]
+  );
+  db.prepare(`DELETE FROM "${table}"`).run();
+  let total = 0;
   let insert = null;
   let insertCols = null;
-  db.transaction(() => {
-    db.prepare(`DELETE FROM "${table}"`).run();
-    for (const row of parsed) {
-      const cols = Object.keys(row).filter(c => columns.has(c));
-      const key = cols.join(',');
-      if (key !== insertCols) {
-        insert = db.prepare(`INSERT OR REPLACE INTO "${table}" (${cols.map(c => `"${c}"`).join(',')}) VALUES (${cols.map(() => '?').join(',')})`);
-        insertCols = key;
+  for (const { chunk_no: chunkNo } of chunkRows) {
+    const [[chunk]] = await getPool().query(
+      'SELECT payload FROM akrio_sqlite_snapshot WHERE table_name = ? AND chunk_no = ?', [table, chunkNo]
+    );
+    const rows = JSON.parse((await gunzip(chunk.payload)).toString());
+    db.transaction(() => {
+      for (const row of rows) {
+        const cols = Object.keys(row).filter(c => columns.has(c));
+        const key = cols.join(',');
+        if (key !== insertCols) {
+          insert = db.prepare(`INSERT OR REPLACE INTO "${table}" (${cols.map(c => `"${c}"`).join(',')}) VALUES (${cols.map(() => '?').join(',')})`);
+          insertCols = key;
+        }
+        insert.run(...cols.map(c => row[c]));
       }
-      insert.run(...cols.map(c => row[c]));
-    }
-  })();
+    })();
+    total += rows.length;
+    await tick();
+  }
   knownHash.set(table, hash);
-  remoteRows.set(table, parsed.length);
-  if (parsed.length) seenNonEmpty.add(table);
-  return parsed.length;
+  remoteRows.set(table, total);
+  if (total) seenNonEmpty.add(table);
+  return total;
 }
 
 // Start-up: fill any empty local table from the saved copy.

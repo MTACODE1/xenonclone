@@ -18,6 +18,8 @@ const exec = async (sql, params = []) => {
     for (const r of snap) { g[r.table_name] = g[r.table_name] || { table_name: r.table_name, data_hash: r.data_hash, rows_total: 0 }; g[r.table_name].rows_total += r.row_count; }
     return [Object.values(g)];
   }
+  if (/^SELECT chunk_no/i.test(sql)) return [snap.filter(r => r.table_name === params[0]).sort((a, b) => a.chunk_no - b.chunk_no).map(r => ({ chunk_no: r.chunk_no }))];
+  if (/^SELECT payload.*chunk_no = \?/i.test(sql)) return [snap.filter(r => r.table_name === params[0] && r.chunk_no === params[1])];
   if (/^SELECT payload/i.test(sql)) return [snap.filter(r => r.table_name === params[0]).sort((a, b) => a.chunk_no - b.chunk_no)];
   if (/^DELETE FROM akrio_sqlite_snapshot/i.test(sql)) { for (let i = snap.length - 1; i >= 0; i--) if (snap[i].table_name === params[0]) snap.splice(i, 1); return [[]]; }
   if (/^INSERT INTO akrio_sqlite_snapshot/i.test(sql)) {
