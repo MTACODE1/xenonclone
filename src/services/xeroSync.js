@@ -2295,7 +2295,25 @@ async function runSync(tenantId, progressCallback, options = {}) {
         const response = await xero.accountingApi.getReportBalanceSheet(tid, filed.filing_date);
         return response.body.reports?.[0];
       });
-      const netAssets = extractNetAssetsFromBalanceSheet(report);
+      let netAssets = extractNetAssetsFromBalanceSheet(report);
+      // Xero answers a Balance Sheet request with the month-end figure, so a balance date inside the month (Harpr:
+      // 29 Sep 2025) has to be brought back by the profit made after it. If that cannot be worked out the month-end
+      // figure is not a fair comparison, so nothing is written this time (a previously good figure is kept).
+      const balanceMonthEnd = journalChecks.monthEndOf(filed.filing_date);
+      if (netAssets != null && String(filed.filing_date).slice(0, 10) < balanceMonthEnd) {
+        try {
+          const plAfter = await apiCall(tenantId, async (xero, tid) => xero.accountingApi.getReportProfitAndLoss(
+            tid, journalChecks.dayAfter(filed.filing_date), balanceMonthEnd, undefined, undefined,
+            undefined, undefined, undefined, undefined, true
+          ));
+          netAssets = journalChecks.netAssetsAtBalanceDate(
+            netAssets, journalChecks.netProfitFromReport(plAfter.body.reports?.[0])
+          );
+        } catch (plError) {
+          netAssets = null;
+          console.error(`Net assets at ${filed.filing_date} could not be adjusted from month end:`, plError?.response?.body?.Message || plError.message);
+        }
+      }
       // Written even when null IF we're confident there's genuinely no bookkeeping at this date —
       // that's what separates "nothing to compare" from "not synced yet". But null can also mean
       // extraction just failed this one time (no Net Assets row found, an unparseable value, an

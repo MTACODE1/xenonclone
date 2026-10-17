@@ -292,3 +292,15 @@ test('motor vehicle expenses are listed only when the client has no vehicle asse
   assert.deepEqual(journalChecks.motorVehicleExpenses({ ...args, documents: [billOn('412', '2025-05-01')] }), [], 'outside the period');
   assert.deepEqual(journalChecks.motorVehicleExpenses({ ...args, accounts: [{ code: '400', name: 'Advertising', type: 'EXPENSE' }], documents: [fuel] }), []);
 });
+
+test('Net Assets at a balance date inside the month is the month-end figure less the profit made after it', () => {
+  const { monthEndOf, dayAfter, netAssetsAtBalanceDate } = require('../src/services/journalChecks');
+  assert.equal(monthEndOf('2025-09-29'), '2025-09-30');
+  assert.equal(monthEndOf('2024-02-10'), '2024-02-29');
+  assert.equal(dayAfter('2025-09-29'), '2025-09-30');
+  // Harpr: Xero month-end 38,853.96, a 2,478.67 loss on 30 Sep, filed accounts 41,332
+  assert.equal(netAssetsAtBalanceDate(38853.96, -2478.67), 41332.63);
+  assert.equal(netAssetsAtBalanceDate(100, 0), 100);
+  assert.equal(netAssetsAtBalanceDate(null, 5), null);
+  assert.equal(netAssetsAtBalanceDate(100, null), null);
+});

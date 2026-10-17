@@ -528,7 +528,29 @@ function motorVehicleExpenses({ accounts, documents, journals, from, to }) {
   return items.sort((a, b) => String(b.date).localeCompare(String(a.date)));
 }
 
+// Xero's Balance Sheet report always answers for the month end, whatever day inside the month is asked for
+// (asking for 29 Sep 2025 returns "As at 30 September 2025"). A company whose accounts are made up to a day that is
+// not a month end (a 52-week year, or 29 Sep) therefore gets the wrong Net Assets. The profit earned between the
+// balance date and that month end is taken back off to get the figure at the real balance date.
+function monthEndOf(isoDate) {
+  const [y, m] = String(isoDate).slice(0, 10).split('-').map(Number);
+  return new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
+}
+function dayAfter(isoDate) {
+  const d = new Date(`${String(isoDate).slice(0, 10)}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+function netAssetsAtBalanceDate(monthEndNetAssets, profitAfterBalanceDate) {
+  if (monthEndNetAssets == null || !Number.isFinite(Number(monthEndNetAssets))) return null;
+  if (profitAfterBalanceDate == null) return null;
+  const profit = Number(profitAfterBalanceDate);
+  if (!Number.isFinite(profit)) return null;
+  return Math.round((Number(monthEndNetAssets) - profit) * 100) / 100;
+}
+
 module.exports = {
+  monthEndOf, dayAfter, netAssetsAtBalanceDate,
   CHECK_TYPES, VAT_LIMITS, indexAccounts, detectUnusualJournals, suspenseOpenBalances, balanceSheetRows,
   directorsLoanAlerts, netProfitFromReport, dividendStatus, historicalChanges,
   taxReviewByCode, supplierPaymentSources, joiningEstimates, classifyVatScheme, rollingVatTurnover, evaluateVatScheme,
