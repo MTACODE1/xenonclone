@@ -210,7 +210,6 @@ const REVIEW_CHECK_DEFINITIONS = Object.freeze([
   { type: 'suspense_open_balance', importance: 'critical', label: 'Suspense & Clearing Balances' },
   { type: 'tax_review_by_code', importance: 'medium', label: 'Tax Review by Code' },
   { type: 'vat_scheme_threshold', importance: 'critical', label: 'VAT Scheme Thresholds' },
-  { type: 'supplier_payment_accounts', importance: 'medium', label: 'Supplier Paid From Bank and DLA' },
   { type: 'directors_loan_overdrawn', importance: 'critical', label: "Director's Loan Overdrawn" },
   { type: 'dividend_status', importance: 'medium', label: 'Dividends Status' },
   { type: 'historical_changes', importance: 'medium', label: 'Historical Changes' },
@@ -232,7 +231,6 @@ const NON_SCORED_CHECKS = Object.freeze([
   'suspense_open_balance',
   'tax_review_by_code',
   'vat_scheme_threshold',
-  'supplier_payment_accounts',
   'directors_loan_overdrawn',
   'dividend_status',
   'historical_changes',
@@ -769,7 +767,17 @@ function calculateHealthScore(issues, options = {}) {
   }).score;
 }
 
+// Tax Missing checks list every line with no tax code. Accountants post rounding and balancing lines of a few
+// pence, and VAT does not apply to bank fees or interest income, so those are left out of the counts.
+const BANK_FEE_ACCOUNT_NAME = /\bbank\s*(fees?|charges?)\b/i;
+const INTEREST_INCOME_ACCOUNT_NAME = /\binterest\b/i;
+function dropTaxMissingNoise(lines, { minAmount = 1, nameByCode = new Map(), skipName = null } = {}) {
+  return lines.filter(line => Math.abs(Number(line.amount) || 0) >= minAmount
+    && !(skipName && skipName.test(String(nameByCode.get(line.accountCode) || ''))));
+}
+
 module.exports = {
+  BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise,
   CHECK_DEFAULTS,
   CHECK_DEFINITIONS,
   REVIEW_CHECK_DEFINITIONS,

@@ -12,7 +12,6 @@ const CHECK_TYPES = Object.freeze({
   suspenseOpen: 'suspense_open_balance',
   taxReview: 'tax_review_by_code',
   vatScheme: 'vat_scheme_threshold',
-  supplierPaymentAccounts: 'supplier_payment_accounts',
   directorsLoan: 'directors_loan_overdrawn',
   dividendStatus: 'dividend_status',
   historicalChanges: 'historical_changes',

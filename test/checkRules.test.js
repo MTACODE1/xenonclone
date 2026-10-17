@@ -408,9 +408,10 @@ test('RESERVED_PERIOD_LABELS contains exactly the eight semantic states, nothing
   // handle it.
   // 'not_a_company' and 'no_filed_accounts_yet' (Historical Changes) were added 12 Oct 2026; both are
   // resolved to not_applicable by resolveCheckDisplayStatus (tested below).
+  // 'flat_rate_scheme' (Purchase Tax Missing on a Flat Rate Scheme client) was added 17 Oct 2026, same category.
   assert.deepEqual([...RESERVED_PERIOD_LABELS].sort(), [
-    'needs_sync', 'no_filed_accounts_yet', 'not_a_company', 'not_applicable_freeagent', 'not_configured',
-    'not_vat_registered', 'out_of_scope', 'unavailable',
+    'flat_rate_scheme', 'needs_sync', 'no_filed_accounts_yet', 'not_a_company', 'not_applicable_freeagent',
+    'not_configured', 'not_vat_registered', 'out_of_scope', 'unavailable',
   ]);
 });
 
@@ -987,4 +988,22 @@ test('documents, journals and contact defaults are all rewritten, so every set l
   assert.ok(expense.has(journal.journalLines[0].accountCode));
   assert.equal(contact.purchasesDefaultAccountCode, '264a');
   assert.equal(doc.lineItems[2].accountCode, undefined);
+});
+
+test('Tax Missing ignores pence rounding lines, bank fees and interest income', () => {
+  const { dropTaxMissingNoise, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME } = require('../src/services/checkRules');
+  const nameByCode = new Map([['404', 'Bank Fees'], ['310', 'Interest Income'], ['429', 'General Expenses'], ['461', 'Stripe fees']]);
+  const lines = [
+    { accountCode: '429', amount: 0.01 }, { accountCode: '429', amount: 0.99 }, { accountCode: '429', amount: 1 },
+    { accountCode: '404', amount: 25 }, { accountCode: '310', amount: 40 }, { accountCode: '461', amount: 12 },
+  ];
+  assert.deepEqual(dropTaxMissingNoise(lines, { nameByCode, skipName: BANK_FEE_ACCOUNT_NAME }).map(l => l.accountCode + ':' + l.amount),
+    ['429:1', '310:40', '461:12'], 'pence and the Bank Fees account are dropped; payment processor fees stay');
+  assert.deepEqual(dropTaxMissingNoise(lines, { nameByCode, skipName: INTEREST_INCOME_ACCOUNT_NAME }).map(l => l.accountCode),
+    ['429', '404', '461'], 'interest income is dropped from the sales check');
+});
+
+test('Purchase Tax Missing on a Flat Rate Scheme client shows as not applicable', () => {
+  const { NOT_APPLICABLE_PERIODS } = require('../src/services/periodStatus');
+  assert.ok(NOT_APPLICABLE_PERIODS.has('flat_rate_scheme'));
 });

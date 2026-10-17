@@ -26,7 +26,7 @@
 //   - ok / issues    : none of the above, a real period key — count === 0 is "ok", count > 0 is
 //                       "issues".
 //   - not_synced     : none of the above, but count is null — this sync attempt failed or never ran.
-const NOT_APPLICABLE_PERIODS = Object.freeze(new Set(['not_vat_registered', 'not_applicable_freeagent', 'not_a_company', 'no_filed_accounts_yet']));
+const NOT_APPLICABLE_PERIODS = Object.freeze(new Set(['not_vat_registered', 'not_applicable_freeagent', 'not_a_company', 'no_filed_accounts_yet', 'flat_rate_scheme']));
 const NOT_CONFIGURED_PERIODS = Object.freeze(new Set(['not_configured', 'needs_sync']));
 const UNAVAILABLE_PERIODS = Object.freeze(new Set(['out_of_scope', 'unavailable']));
 const RESERVED_PERIOD_LABELS = Object.freeze(new Set([

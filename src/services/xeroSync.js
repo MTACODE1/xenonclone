@@ -31,7 +31,8 @@ const {
   selectAuthorisedUnreconciled, selectOldCredits, sumAbsoluteExposure,
   grossLineAmount, netLineAmount, toDateString,
   buildAccountCodeCanonicaliser, canonicaliseAccountCodes,
-  withDisplayOnlyBankFindings
+  withDisplayOnlyBankFindings,
+  dropTaxMissingNoise, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
 const { saveBankLines } = require('../db/bankLines');
@@ -1346,6 +1347,9 @@ async function runSync(tenantId, progressCallback, options = {}) {
     if (!vatRegistered) {
       // Not VAT-registered — no tax scheme applies, so a missing tax code isn't an issue.
       issue = { org_id: orgId, check_type: 'purchase_tax_missing', importance: 'medium', count: 0, potential_value_gbp: 0, detail_json: '[]', period_checked: 'not_vat_registered' };
+    } else if (journalChecks.classifyVatScheme(orgInfo.salesTaxBasis, orgInfo.salesTaxPeriod) === 'flat_rate') {
+      // On the Flat Rate Scheme input VAT on purchases is not reclaimed, so no tax code is expected on expenses.
+      issue = { org_id: orgId, check_type: 'purchase_tax_missing', importance: 'medium', count: 0, potential_value_gbp: 0, detail_json: '[]', period_checked: 'flat_rate_scheme' };
     } else {
       const taxMissingLines = [];
       const billsToCheck = inPeriod(accpayAuthorised);
@@ -1397,6 +1401,11 @@ async function runSync(tenantId, progressCallback, options = {}) {
           }
         }
       }
+      const parsedMin = parseFloat(getSetting('tax_missing_min_amount'));
+      taxMissingLines.splice(0, taxMissingLines.length, ...dropTaxMissingNoise(taxMissingLines, {
+        minAmount: Number.isFinite(parsedMin) ? parsedMin : 1,
+        nameByCode: new Map((chartOfAccounts || []).map(a => [a.code, a.name])), skipName: BANK_FEE_ACCOUNT_NAME,
+      }));
       issue = {
         org_id: orgId, check_type: 'purchase_tax_missing', importance: 'medium',
         // Count each offending LINE, not each distinct invoice/transaction — a bill with 5 lines
@@ -1475,6 +1484,11 @@ async function runSync(tenantId, progressCallback, options = {}) {
           }
         }
       }
+      const parsedSalesMin = parseFloat(getSetting('tax_missing_min_amount'));
+      taxMissingLines.splice(0, taxMissingLines.length, ...dropTaxMissingNoise(taxMissingLines, {
+        minAmount: Number.isFinite(parsedSalesMin) ? parsedSalesMin : 1,
+        nameByCode: new Map((chartOfAccounts || []).map(a => [a.code, a.name])), skipName: INTEREST_INCOME_ACCOUNT_NAME,
+      }));
       issue = {
         org_id: orgId, check_type: 'sales_tax_missing', importance: 'medium',
         // Count each offending line, not each distinct invoice — see purchase_tax_missing above.
@@ -1677,7 +1691,8 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // --- MEDIUM: Low Cost Fixed Assets (fixed-asset-coded lines <= £200 since lock date) ---
   try {
     if (!chartOfAccountsAvailable) throw new Error('chart of accounts unavailable this sync — cannot classify fixed asset accounts');
-    const LOW_COST_THRESHOLD = 200;
+    // £2,000 by default (team feedback); the 'low_cost_fixed_assets_threshold' setting can change it.
+    const LOW_COST_THRESHOLD = parseFloat(getSetting('low_cost_fixed_assets_threshold')) || 2000;
     const lowCostItems = [];
     const billsSinceLD = inPeriod(accpayAuthorised);
     for (const bill of billsSinceLD) {
@@ -2018,21 +2033,6 @@ async function runSync(tenantId, progressCallback, options = {}) {
       } catch (err) {
         console.error('balance sheet review checks failed — skipping (will show as "Not synced"):', err?.response?.body?.Message || err.message);
       }
-    }
-  }
-  if (chartOfAccountsAvailable) {
-    try {
-      const items = journalChecks.supplierPaymentSources({
-        payments: (matchingPayments || []).filter(p => isWithinPeriod(toDateString(p.date), period)),
-        bankSpend: bankSpendTxns, accounts: chartOfAccounts,
-      });
-      insertIssue({
-        org_id: orgId, check_type: 'supplier_payment_accounts', importance: 'medium',
-        count: items.length, potential_value_gbp: sumAbsoluteExposure(items, item => item.potentialValue),
-        detail_json: JSON.stringify(items), period_checked: 'since_lock_date',
-      });
-    } catch (err) {
-      console.error('supplier_payment_accounts check failed — skipping (will show as "Not synced"):', err.message);
     }
   }
   if (chartOfAccountsAvailable) {

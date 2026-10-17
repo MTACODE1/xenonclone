@@ -297,6 +297,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
           const notApplicableByPeriod = {
             not_a_company: 'only applies to UK limited companies (this client is a sole trader, partnership or non-UK)',
             no_filed_accounts_yet: 'this company has not filed any accounts at Companies House yet',
+            flat_rate_scheme: 'this client is on the VAT Flat Rate Scheme, so VAT on purchases is not reclaimed',
           }[check.period_checked];
           const desc = checkDescriptions[check.type] || {};
         %>
