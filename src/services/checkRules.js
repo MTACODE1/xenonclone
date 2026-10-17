@@ -599,27 +599,44 @@ function contactNamesOverlap(tokensA, tokensB) {
   return shorter.join('').length >= 4;
 }
 
+// Pairs are only compared inside small groups (same first three letters for the spelling check, same first word
+// for the word rules) so a client with 20,000 contacts takes a fraction of a second, not minutes. The "one name is
+// the other plus extra words" rule is not applied to customer-only contacts: retail clients have thousands of
+// customers named "Emma", "Sarah" or "PayPal buyer", and every one of them would match every other.
 function findDuplicateContacts(contacts, threshold = CHECK_DEFAULTS.contactSimilarityThreshold) {
-  const duplicates = [];
   const tokens = contacts.map(contact => contactNameTokens(contact.name));
   const stripped = contacts.map(contact => String(contact.name || '').toLowerCase().replace(/[^a-z0-9]/g, ''));
-  for (let i = 0; i < contacts.length; i++) {
-    for (let j = i + 1; j < contacts.length; j++) {
-      // Names whose lengths differ too much cannot reach the similarity threshold, so skip the slow comparison.
-      const longest = Math.max(stripped[i].length, stripped[j].length);
-      const near = longest > 0 && Math.abs(stripped[i].length - stripped[j].length) / longest <= 1 - threshold
-        && contactNameSimilarity(contacts[i].name, contacts[j].name) >= threshold;
-      const similar = near;
-      if (!similar && !contactNamesOverlap(tokens[i], tokens[j])) continue;
-      duplicates.push({
-        id1: contacts[i].contactID,
-        name1: contacts[i].name,
-        id2: contacts[j].contactID,
-        name2: contacts[j].name,
-      });
+  const customerOnly = contacts.map(contact => Boolean(contact.isCustomer) && !contact.isSupplier);
+  const byPrefix = new Map();
+  const byFirstWord = new Map();
+  const add = (map, key, index) => { if (!key) return; if (!map.has(key)) map.set(key, []); map.get(key).push(index); };
+  contacts.forEach((_, index) => {
+    add(byPrefix, stripped[index].slice(0, 3), index);
+    add(byFirstWord, tokens[index][0], index);
+  });
+  const seen = new Set();
+  const found = [];
+  const consider = (i, j, wordRules) => {
+    if (i === j) return;
+    const [a, b] = i < j ? [i, j] : [j, i];
+    const key = a * contacts.length + b;
+    if (seen.has(key)) return;
+    let match = false;
+    if (wordRules) {
+      const sameWords = tokens[a].length === tokens[b].length && tokens[a].every((t, n) => t === tokens[b][n]);
+      match = tokens[a].length > 0 && (sameWords || (!customerOnly[a] && !customerOnly[b] && contactNamesOverlap(tokens[a], tokens[b])));
+    } else {
+      const longest = Math.max(stripped[a].length, stripped[b].length);
+      match = longest > 0 && Math.abs(stripped[a].length - stripped[b].length) / longest <= 1 - threshold
+        && contactNameSimilarity(contacts[a].name, contacts[b].name) >= threshold;
     }
-  }
-  return duplicates;
+    if (match) { seen.add(key); found.push([a, b]); }
+  };
+  for (const group of byPrefix.values()) for (let x = 0; x < group.length; x++) for (let y = x + 1; y < group.length; y++) consider(group[x], group[y], false);
+  for (const group of byFirstWord.values()) for (let x = 0; x < group.length; x++) for (let y = x + 1; y < group.length; y++) consider(group[x], group[y], true);
+  return found.sort((p, q) => p[0] - q[0] || p[1] - q[1]).map(([i, j]) => ({
+    id1: contacts[i].contactID, name1: contacts[i].name, id2: contacts[j].contactID, name2: contacts[j].name,
+  }));
 }
 
 function findUnexpectedDefaultLines(documents, contactsById, defaultField, lineField) {
