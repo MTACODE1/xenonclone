@@ -1737,8 +1737,11 @@ async function runSync(tenantId, progressCallback, options = {}) {
   try {
     if (!chartOfAccountsAvailable) throw new Error('chart of accounts unavailable this sync — cannot classify accounts');
     const VAGUE_ACCOUNT_NAME = /\b(general|miscellaneous|misc|sundry|other|various)\b/i;
+    // £1 by default (ignores pence only). It was £100, which hid real items such as two £31.50 DVLA payments
+    // posted to General Expenses; a practice or client setting can still raise it.
+    const practiceMisallocatedThreshold = parseFloat(getSetting('misallocated_items_threshold'));
     const defaultMisallocatedThreshold = resolveMisallocatedItemsDefaultThreshold(
-      org, parseFloat(getSetting('misallocated_items_threshold')) || 100
+      org, Number.isFinite(practiceMisallocatedThreshold) ? practiceMisallocatedThreshold : 1
     );
     const configuredMisallocatedCodes = accountCheckConfigurations
       .filter(account => account.monitor_misallocated)

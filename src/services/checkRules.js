@@ -572,11 +572,33 @@ function contactNameSimilarity(nameA, nameB) {
   return 1 - levenshtein.get(a, b) / Math.max(a.length, b.length);
 }
 
+// Names are compared after dropping legal endings ("Ltd", "Limited", "Inc", "Pty"...), plurals and spacing, so
+// "Ember Digital Media Limited" and "Ember Digital Media Ltd" match, as do "ASDA Store" and "Asda stores".
+const LEGAL_ENDINGS = new Set(['ltd', 'limited', 'llp', 'plc', 'inc', 'incorporated', 'llc', 'pty', 'co', 'company', 'corp', 'corporation', 'uk', 'the']);
+function contactNameTokens(name) {
+  const tokens = String(name || '').toLowerCase().replace(/&/g, ' and ').split(/[^a-z0-9]+/).filter(Boolean)
+    .map(t => (t.length > 3 && t.endsWith('s') ? t.slice(0, -1) : t))
+    .filter(t => !LEGAL_ENDINGS.has(t));
+  return tokens;
+}
+
+// Two names are the same business when their words are identical, or one is the other with extra words after
+// it ("Deliveroo" / "Deliveroo London", "APCOA" / "APCOA Customer Services"). The shared start must be a real word
+// (4+ letters) so short names such as "BT" do not match everything.
+function contactNamesOverlap(tokensA, tokensB) {
+  if (!tokensA.length || !tokensB.length) return false;
+  const [shorter, longer] = tokensA.length <= tokensB.length ? [tokensA, tokensB] : [tokensB, tokensA];
+  if (!shorter.every((token, index) => token === longer[index])) return false;
+  return shorter.join('').length >= 4;
+}
+
 function findDuplicateContacts(contacts, threshold = CHECK_DEFAULTS.contactSimilarityThreshold) {
   const duplicates = [];
+  const tokens = contacts.map(contact => contactNameTokens(contact.name));
   for (let i = 0; i < contacts.length; i++) {
     for (let j = i + 1; j < contacts.length; j++) {
-      if (contactNameSimilarity(contacts[i].name, contacts[j].name) < threshold) continue;
+      const similar = contactNameSimilarity(contacts[i].name, contacts[j].name) >= threshold;
+      if (!similar && !contactNamesOverlap(tokens[i], tokens[j])) continue;
       duplicates.push({
         id1: contacts[i].contactID,
         name1: contacts[i].name,

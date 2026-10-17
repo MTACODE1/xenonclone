@@ -1020,3 +1020,17 @@ test('Duplicate Bills also flags the same supplier and invoice number with a dif
   const same = findDuplicatesWithSameNumber([bill('a', 'X1', 100, '2026-05-01'), bill('b', 'X9', 100, '2026-05-02')], 3, { requireUnpaidPair: true });
   assert.equal(same.length, 1, 'the usual same-amount rule still works');
 });
+
+test('Duplicate Contacts matches legal endings, plurals, spacing and a name that is another with extra words', () => {
+  const { findDuplicateContacts } = require('../src/services/checkRules');
+  const c = (id, name) => ({ contactID: id, name });
+  const pairs = list => findDuplicateContacts(list).map(d => [d.name1, d.name2].sort().join(' | '));
+  assert.deepEqual(pairs([c(1, 'Ember Digital Media Limited'), c(2, 'Ember Digital Media Ltd')]), ['Ember Digital Media Limited | Ember Digital Media Ltd']);
+  assert.equal(pairs([c(1, 'ASDA Store'), c(2, 'Asda stores')]).length, 1);
+  assert.equal(pairs([c(1, 'Deliveroo'), c(2, 'Deliveroo London')]).length, 1);
+  assert.equal(pairs([c(1, 'APCOA'), c(2, 'APCOA Customer Services')]).length, 1);
+  assert.equal(pairs([c(1, 'Canva'), c(2, 'Canva PTY')]).length, 1);
+  assert.equal(pairs([c(1, 'Air Landline'), c(2, 'airlandline')]).length, 1);
+  assert.equal(pairs([c(1, 'Tesco'), c(2, 'Shell')]).length, 0, 'unrelated names stay apart');
+  assert.equal(pairs([c(1, 'BT'), c(2, 'BT Business')]).length, 0, 'a very short name does not match everything');
+});
