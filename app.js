@@ -38,6 +38,19 @@ app.use(BASE_PATH + '/uploads', express.static(path.join(__dirname, 'data/upload
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Until the saved results have been restored from MySQL (about a minute and a half, and growing with the data), every
+// page except the login form answers "starting up". The server has to be listening before that finishes: the load
+// balancer marks a new container unhealthy after about 100 seconds without an answer, and a new version that
+// restored first lost that race and was killed over and over, so a deploy never went live.
+let restoreFinished = false;
+app.use((req, res, next) => {
+  if (restoreFinished || (req.method === 'GET' && req.path === BASE_PATH + '/login')) return next();
+  res.set('Retry-After', '30');
+  if (req.accepts(['html', 'json']) === 'json') return res.status(503).json({ error: 'Akrio Verify is starting up. Try again in a minute.' });
+  return res.status(503).send('<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="15"><title>Starting up</title><p style="font-family:sans-serif;margin:40px">Akrio Verify is starting up and loading its saved results. This page will refresh by itself in a few seconds.</p>');
+});
+
+
 const isSecureRedirect = process.env.XERO_REDIRECT_URI?.startsWith('https://');
 // Behind Railway (and most PaaS), TLS terminates at the platform's edge and the
 // container is always spoken to over plain HTTP — only serve our own local
@@ -165,13 +178,7 @@ const PORT = process.env.PORT || 3000;
 
 // bootstrapAdmin needs the staff table (now in MySQL) before anything can log in, so the server
 // only starts accepting connections once it's confirmed done.
-bootstrapAdmin().then(() => restoreSettingsFromMysql()
-  .then(count => console.log(`[settings] restored ${count} saved setting(s) from MySQL`))
-  .catch(err => console.error('[settings] restore from MySQL failed:', err.message))
-).then(() => restoreSnapshots()
-  .then(r => { console.log(`[snapshot] restored ${r.restored} saved row(s) from MySQL`); startSnapshotSync(); })
-  .catch(err => console.error('[snapshot] restore failed, saving disabled this run:', err.message))
-).then(() => {
+function startListening() {
   if (useLocalTlsServer) {
     const sslOptions = {
       key: fs.readFileSync(path.join(__dirname, 'certs/localhost-key.pem')),
@@ -185,6 +192,19 @@ bootstrapAdmin().then(() => restoreSettingsFromMysql()
       console.log(`Xero Dashboard running at http://localhost:${PORT} (NODE_ENV=${process.env.NODE_ENV || 'development'})`);
     });
   }
+}
+
+// bootstrapAdmin needs the staff table (now in MySQL) before anything can log in, so the server
+// only starts accepting connections once it's confirmed done.
+bootstrapAdmin().then(() => restoreSettingsFromMysql()
+  .then(count => console.log(`[settings] restored ${count} saved setting(s) from MySQL`))
+  .catch(err => console.error('[settings] restore from MySQL failed:', err.message))
+).then(() => {
+  startListening();
+  return restoreSnapshots()
+    .then(r => { console.log(`[snapshot] restored ${r.restored} saved row(s) from MySQL`); startSnapshotSync(); })
+    .catch(err => console.error('[snapshot] restore failed, saving disabled this run:', err.message))
+    .then(() => { restoreFinished = true; console.log('[snapshot] start-up restore finished, serving all pages'); });
 }).catch(error => {
   console.error('[bootstrap] Failed to start:', error);
   process.exit(1);
