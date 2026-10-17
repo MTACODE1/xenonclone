@@ -1034,3 +1034,20 @@ test('Duplicate Contacts matches legal endings, plurals, spacing and a name that
   assert.equal(pairs([c(1, 'Tesco'), c(2, 'Shell')]).length, 0, 'unrelated names stay apart');
   assert.equal(pairs([c(1, 'BT'), c(2, 'BT Business')]).length, 0, 'a very short name does not match everything');
 });
+
+test('Same invoice number on fully paid bills is not a duplicate (account numbers are reused every month)', () => {
+  const { findDuplicatesWithSameNumber } = require('../src/services/checkRules');
+  const supplier = { contactID: 'c1', name: 'Sky' };
+  const paid = (id, total, date) => ({ invoiceID: id, invoiceNumber: '625010011520', total, amountDue: 0, date, contact: supplier, status: 'PAID' });
+  assert.equal(findDuplicatesWithSameNumber([paid('a', 33, '2026-01-19'), paid('b', 36, '2026-03-19')], 3, { requireUnpaidPair: true }).length, 0);
+  const unpaid = { ...paid('c', 36, '2026-04-18'), amountDue: 36, status: 'AUTHORISED' };
+  assert.equal(findDuplicatesWithSameNumber([paid('a', 33, '2026-01-19'), unpaid], 3, { requireUnpaidPair: true }).length, 1);
+});
+
+test('Same invoice number on paid bills dated the same day is a duplicate even with different amounts', () => {
+  const { findDuplicatesWithSameNumber } = require('../src/services/checkRules');
+  const supplier = { contactID: 'c1', name: 'The Priory' };
+  const paid = (id, total, date) => ({ invoiceID: id, invoiceNumber: 'G 46965', total, amountDue: 0, date, contact: supplier, status: 'PAID' });
+  assert.equal(findDuplicatesWithSameNumber([paid('a', 738, '2025-09-08'), paid('b', 1137.22, '2025-09-08')], 3, { requireUnpaidPair: true }).length, 1);
+  assert.equal(findDuplicatesWithSameNumber([paid('a', 738, '2025-06-08'), paid('b', 1137.22, '2025-09-08')], 3, { requireUnpaidPair: true }).length, 0);
+});

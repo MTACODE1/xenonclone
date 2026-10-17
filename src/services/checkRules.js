@@ -461,7 +461,14 @@ function findDuplicates(items, windowDays = CHECK_DEFAULTS.duplicateWindowDays, 
         remaining.splice(index, 1);
       }
       if (group.length < 2) continue;
-      if (!matchOnReference && requireUnpaidPair && group.every(item => (item.amountDue || 0) <= 0.005)) continue;
+      if (requireUnpaidPair && group.every(item => (item.amountDue || 0) <= 0.005)) {
+        // Fully paid. For the usual rule that is never a duplicate. For a repeated invoice number it still is when
+        // two of the bills are dated within the window of each other; months apart it is a reused account number.
+        if (!matchOnReference) continue;
+        const dates = group.map(item => toDateString(item.date)).filter(Boolean).sort();
+        const closeTogether = dates.some((date, i) => i > 0 && daysBetween(date, dates[i - 1]) <= windowDays);
+        if (!closeTogether) continue;
+      }
       groups.push(group);
     }
   }
