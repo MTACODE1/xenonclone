@@ -176,6 +176,9 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
       <div class="card summary-card" style="background: var(--grey-100);">
         <div class="summary-label">Period Checked</div>
         <div class="summary-value" style="font-size: 0.875rem;"><%= periodStale ? stalePeriodLabel : selectedPeriod.label %></div>
+        <% if (!periodStale && selectedPeriod.type === 'custom') { %>
+          <div style="font-size: 0.7rem; color: #7C8FAC; margin-top: 4px;">Worked out from the last sync's stored data. Bank balance, dividend and statement checks are refreshed only by a normal sync.</div>
+        <% } %>
         <% if (periodStale) { %>
           <div style="font-size: 0.7rem; color: #B45309; margin-top: 4px;"><%= selectedPeriod.label %> not yet calculated</div>
         <% } %>

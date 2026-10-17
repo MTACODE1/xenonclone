@@ -842,7 +842,10 @@ function findDuplicatesWithSameNumber(items, windowDays, options = {}) {
   const usual = findDuplicates(items, windowDays, options);
   const covered = new Set(usual.flatMap(group => group.documentIds));
   const extra = findDuplicates(items, windowDays, { ...options, matchOnReference: true })
-    .filter(group => !group.documentIds.every(id => covered.has(id)));
+    .filter(group => !group.documentIds.every(id => covered.has(id)))
+    // A number shared by many bills is a reused account or reference number (Sky, Meta Ads, Toast...), not a bill
+    // entered twice. A real duplicate is a pair, occasionally a trio.
+    .filter(group => group.documentIds.length <= 3);
   return [...usual, ...extra].sort((a, b) => String(b.date2 || '').localeCompare(String(a.date2 || '')));
 }
 

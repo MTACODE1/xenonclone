@@ -1051,3 +1051,12 @@ test('Same invoice number on paid bills dated the same day is a duplicate even w
   assert.equal(findDuplicatesWithSameNumber([paid('a', 738, '2025-09-08'), paid('b', 1137.22, '2025-09-08')], 3, { requireUnpaidPair: true }).length, 1);
   assert.equal(findDuplicatesWithSameNumber([paid('a', 738, '2025-06-08'), paid('b', 1137.22, '2025-09-08')], 3, { requireUnpaidPair: true }).length, 0);
 });
+
+test('A number shared by many bills is a reused account number, not a duplicate', () => {
+  const { findDuplicatesWithSameNumber } = require('../src/services/checkRules');
+  const supplier = { contactID: 'c1', name: 'Meta' };
+  const day = n => `2026-03-0${n}`;
+  const bills = [1, 2, 3, 4, 5].map(n => ({ invoiceID: 'm' + n, invoiceNumber: '811427073840242', total: 40 + n, amountDue: 0, date: day(n), contact: supplier, status: 'PAID' }));
+  assert.equal(findDuplicatesWithSameNumber(bills, 3, { requireUnpaidPair: true }).length, 0);
+  assert.equal(findDuplicatesWithSameNumber(bills.slice(0, 3), 3, { requireUnpaidPair: true }).length, 1, 'three bills can still be a duplicate');
+});
