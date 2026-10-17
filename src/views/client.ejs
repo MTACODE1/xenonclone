@@ -61,10 +61,10 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
   <div class="alert alert-warning stale-period-banner">
     <span class="stale-period-icon">!</span>
     <div class="stale-period-text">
-      <strong>The figures below are not for <%= selectedPeriod.label %>.</strong>
-      They were calculated for <%= stalePeriodLabel %> and are greyed out until you recalculate.
+      <strong>Working out <%= selectedPeriod.label %>…</strong>
+      The figures below are still for <%= stalePeriodLabel %>. This usually takes a few seconds; if it does not start, press the button.
     </div>
-    <button type="button" class="btn btn-primary btn-sm" onclick="syncThisClient()">Sync <%= selectedPeriod.label %></button>
+    <button type="button" class="btn btn-primary btn-sm" onclick="syncThisClient()">Calculate <%= selectedPeriod.label %></button>
   </div>
 <% } %>
 
@@ -965,6 +965,16 @@ function toggleSidebarOk(show) {
 // so embedding it inline would send literal "&#39;"/"&lt;" sequences to the server instead of the
 // real characters for any tenant ID containing them.
 const tenantId = encodeURIComponent(document.querySelector('.page-header').dataset.tenantId);
+// Choosing a date range and pressing Apply is the request to calculate it, so start it straight away
+// (once per page address, so a failed run is not retried in a loop on every reload).
+<% if (periodStale) { %>
+(function autoCalculatePeriod() {
+  if (!new URLSearchParams(location.search).has('period')) return;
+  const key = 'akrio-auto-calc:' + location.pathname + location.search;
+  try { if (sessionStorage.getItem(key)) return; sessionStorage.setItem(key, '1'); } catch (e) { return; }
+  window.addEventListener('load', () => syncThisClient());
+})();
+<% } %>
 async function syncThisClient() {
   const btn = document.getElementById('syncBtn');
   btn.disabled = true; btn.textContent = 'Syncing...';

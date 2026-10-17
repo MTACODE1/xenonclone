@@ -2035,6 +2035,22 @@ async function runSync(tenantId, progressCallback, options = {}) {
       console.error('supplier_payment_accounts check failed — skipping (will show as "Not synced"):', err.message);
     }
   }
+  if (chartOfAccountsAvailable) {
+    try {
+      const items = journalChecks.motorVehicleExpenses({
+        accounts: chartOfAccounts, from: period.start, to: period.end,
+        documents: [...accpayAuthorised, ...allBankTransactions.filter(t => t.status === 'AUTHORISED' && t.type === 'SPEND')],
+        journals: allManualJournals.filter(j => j.status === 'POSTED'),
+      });
+      insertIssue({
+        org_id: orgId, check_type: 'motor_vehicle_expenses', importance: 'medium',
+        count: items.length, potential_value_gbp: sumAbsoluteExposure(items),
+        detail_json: JSON.stringify(items), period_checked: 'since_lock_date',
+      });
+    } catch (err) {
+      console.error('motor_vehicle_expenses check failed — skipping (will show as "Not synced"):', err.message);
+    }
+  }
   if (chartOfAccountsAvailable && orgInfo.organisationEntityType === 'COMPANY') {
     try {
       const fy = resolvePeriod({ type: 'current_fy' }, {
@@ -2133,6 +2149,12 @@ async function runSync(tenantId, progressCallback, options = {}) {
     const items = [
       ...(verdict.level !== 'ok' ? [toItem(verdict, verdict.rule)] : []),
       ...journalChecks.joiningEstimates({ scheme, taxableNet }).map(v => toItem(v, v.rule)),
+      // A client on the Flat Rate Scheme with CIS activity in the books (CIS and the Flat Rate Scheme cannot be combined).
+      ...journalChecks.cisWithFlatRate({
+        scheme, accounts: chartOfAccounts, from: fromDate.toISOString().slice(0, 10), to,
+        documents: [...accpayAuthorised, ...accrecAuthorised, ...allBankTransactions.filter(t => t.status === 'AUTHORISED')],
+        journals: allManualJournals.filter(j => j.status === 'POSTED'),
+      }),
     ];
     insertIssue({
       org_id: orgId, check_type: 'vat_scheme_threshold', importance: 'critical',

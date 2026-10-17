@@ -4,6 +4,7 @@ const {
   CHECK_TYPES, VAT_LIMITS, detectUnusualJournals, suspenseOpenBalances, taxReviewByCode,
   classifyVatScheme, rollingVatTurnover, evaluateVatScheme,
 } = require('../src/services/journalChecks');
+const journalChecks = require('../src/services/journalChecks');
 
 const accounts = [
   { code: '200', name: 'Sales', type: 'REVENUE', _class: 'REVENUE' },
@@ -262,4 +263,32 @@ test("the director loan account is recognised whatever the apostrophe style", ()
     const rep = { rows: [{ rowType: 'Section', title: 'Current Liabilities', rows: [{ rowType: 'Row', cells: [{ value: name }, { value: '-500' }] }] }] };
     assert.equal(directorsLoanAlerts(rep).length, 1, name);
   }
+});
+
+// ---- CIS on the Flat Rate Scheme / motor vehicle expenses (feedback from the team) ----
+const cisAccounts = [{ code: '820', name: 'CIS Deductions', type: 'CURRLIAB' }, { code: '400', name: 'Advertising', type: 'EXPENSE' }];
+const billOn = (code, date = '2026-06-01') => ({ invoiceID: 'b1', date, lineItems: [{ accountCode: code, lineAmount: 10, taxAmount: 0 }] });
+
+test('CIS postings on a Flat Rate Scheme client are flagged, anyone else is not', () => {
+  const args = { accounts: cisAccounts, documents: [billOn('820')], journals: [], from: '2025-10-01', to: '2026-09-30' };
+  assert.equal(journalChecks.cisWithFlatRate({ scheme: 'flat_rate', ...args }).length, 1);
+  assert.equal(journalChecks.cisWithFlatRate({ scheme: 'standard', ...args }).length, 0);
+  assert.equal(journalChecks.cisWithFlatRate({ scheme: 'flat_rate', ...args, documents: [billOn('400')] }).length, 0, 'no CIS posting, no flag');
+  assert.equal(journalChecks.cisWithFlatRate({ scheme: 'flat_rate', ...args, documents: [billOn('820', '2024-01-01')] }).length, 0, 'older than 12 months');
+});
+
+const motorAccounts = [
+  { code: '412', name: 'Motor Vehicle Expenses', type: 'EXPENSE' },
+  { code: '710', name: 'Motor Vehicles', type: 'FIXED' },
+  { code: '400', name: 'Advertising', type: 'EXPENSE' },
+];
+test('motor vehicle expenses are listed only when the client has no vehicle asset', () => {
+  const args = { accounts: motorAccounts, from: '2026-01-01', to: '2026-12-31', journals: [] };
+  const fuel = billOn('412');
+  const items = journalChecks.motorVehicleExpenses({ ...args, documents: [fuel, billOn('400')] });
+  assert.equal(items.length, 1);
+  assert.equal(items[0].accountCode, '412');
+  assert.deepEqual(journalChecks.motorVehicleExpenses({ ...args, documents: [fuel, billOn('710', '2023-03-01')] }), [], 'a vehicle bought in any year means vehicles exist');
+  assert.deepEqual(journalChecks.motorVehicleExpenses({ ...args, documents: [billOn('412', '2025-05-01')] }), [], 'outside the period');
+  assert.deepEqual(journalChecks.motorVehicleExpenses({ ...args, accounts: [{ code: '400', name: 'Advertising', type: 'EXPENSE' }], documents: [fuel] }), []);
 });

@@ -16,6 +16,7 @@ const CHECK_TYPES = Object.freeze({
   directorsLoan: 'directors_loan_overdrawn',
   dividendStatus: 'dividend_status',
   historicalChanges: 'historical_changes',
+  motorVehicleExpenses: 'motor_vehicle_expenses',
 });
 
 const DISPOSAL_NAME = /disposal|gain on|loss on|profit on|sale of|sold/i;
@@ -464,8 +465,73 @@ function joiningEstimates({ scheme, taxableNet, limits = VAT_LIMITS }) {
   return out;
 }
 
+// ---- CIS on the Flat Rate Scheme ----
+// A business that works under the Construction Industry Scheme is not allowed to use the VAT Flat Rate
+// Scheme. Xero does not say whether a client is CIS registered, so the evidence is the books: an account
+// with "CIS" in its name that has had postings in the rolling window. It is a prompt to confirm, not a ruling.
+const CIS_NAME = /\bCIS\b/i;
+const lineDate = d => String(d.date || d.journalDate || '').slice(0, 10);
+function cisWithFlatRate({ scheme, accounts, documents, journals, from, to }) {
+  if (scheme !== 'flat_rate') return [];
+  const cisCodes = new Set((accounts || []).filter(a => a.code && CIS_NAME.test(a.name || '')).map(a => String(a.code).toUpperCase()));
+  if (!cisCodes.size) return [];
+  let postings = 0;
+  const inWindow = date => date && (!from || date >= from) && (!to || date <= to);
+  for (const doc of documents || []) {
+    if (!inWindow(lineDate(doc))) continue;
+    for (const line of doc.lineItems || []) if (cisCodes.has(String(line.accountCode || '').toUpperCase())) postings++;
+  }
+  for (const journal of journals || []) {
+    if (!inWindow(lineDate(journal))) continue;
+    for (const line of journal.journalLines || []) if (cisCodes.has(String(line.accountCode || '').toUpperCase())) postings++;
+  }
+  if (!postings) return [];
+  return [{
+    documentId: 'vat-scheme-cis-flat-rate', number: null, date: to || null, source: 'vat_scheme', accountCode: scheme,
+    description: `This client is on the VAT Flat Rate Scheme but has ${postings} posting(s) to CIS accounts in the last 12 months. A business registered for the Construction Industry Scheme cannot use the Flat Rate Scheme - confirm whether the client is CIS registered.`,
+    amount: postings, level: 'review', rule: 'cis_flat_rate', limit: null,
+  }];
+}
+
+// ---- Motor vehicle expenses ----
+// Motor expenses should only be claimed by a business that has vehicles. If the chart has a motor/vehicle
+// expense account with postings in the period, and no vehicle asset has ever been posted to, list them.
+const VEHICLE_EXPENSE_NAME = /vehicle/i;
+const VEHICLE_ASSET_NAME = /vehicle|\bvans?\b|\bcars?\b|truck|lorry|motor/i;
+const EXPENSE_ACCOUNT_TYPES = new Set(['EXPENSE', 'OVERHEADS', 'DIRECTCOSTS']);
+function motorVehicleExpenses({ accounts, documents, journals, from, to }) {
+  const byCode = new Map((accounts || []).filter(a => a.code).map(a => [String(a.code).toUpperCase(), a]));
+  const expenseCodes = new Set([...byCode].filter(([, a]) => VEHICLE_EXPENSE_NAME.test(a.name || '') && EXPENSE_ACCOUNT_TYPES.has(String(a.type || '').toUpperCase())).map(([c]) => c));
+  if (!expenseCodes.size) return [];
+  const assetCodes = new Set([...byCode].filter(([, a]) => String(a.type || '').toUpperCase() === 'FIXED' && VEHICLE_ASSET_NAME.test(a.name || '')).map(([c]) => c));
+  const codeOf = line => String(line.accountCode || '').toUpperCase();
+  const touchesAsset = (documents || []).some(d => (d.lineItems || []).some(l => assetCodes.has(codeOf(l))))
+    || (journals || []).some(j => (j.journalLines || []).some(l => assetCodes.has(codeOf(l))));
+  if (touchesAsset) return [];
+  const inWindow = date => date && (!from || date >= from) && (!to || date <= to);
+  const items = [];
+  for (const doc of documents || []) {
+    const date = lineDate(doc);
+    if (!inWindow(date)) continue;
+    (doc.lineItems || []).forEach((line, index) => {
+      if (!expenseCodes.has(codeOf(line))) return;
+      const net = doc.lineAmountTypes === 'Inclusive'
+        ? (Number(line.lineAmount) || 0) - (Number(line.taxAmount) || 0) : (Number(line.lineAmount) || 0);
+      const id = doc.invoiceID || doc.bankTransactionID || doc.id;
+      items.push({
+        documentId: `${id}:${index}`, id, number: doc.invoiceNumber || doc.reference || null, date,
+        source: doc.invoiceID ? 'bill' : 'bank_spend', contactName: doc.contact?.name || null,
+        accountCode: line.accountCode, accountName: byCode.get(codeOf(line))?.name || null,
+        description: line.description || null, amount: Math.abs(net),
+      });
+    });
+  }
+  return items.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+}
+
 module.exports = {
   CHECK_TYPES, VAT_LIMITS, indexAccounts, detectUnusualJournals, suspenseOpenBalances, balanceSheetRows,
   directorsLoanAlerts, netProfitFromReport, dividendStatus, historicalChanges,
   taxReviewByCode, supplierPaymentSources, joiningEstimates, classifyVatScheme, rollingVatTurnover, evaluateVatScheme,
+  cisWithFlatRate, motorVehicleExpenses,
 };

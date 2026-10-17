@@ -214,6 +214,7 @@ const REVIEW_CHECK_DEFINITIONS = Object.freeze([
   { type: 'directors_loan_overdrawn', importance: 'critical', label: "Director's Loan Overdrawn" },
   { type: 'dividend_status', importance: 'medium', label: 'Dividends Status' },
   { type: 'historical_changes', importance: 'medium', label: 'Historical Changes' },
+  { type: 'motor_vehicle_expenses', importance: 'medium', label: 'Motor Vehicle Expenses' },
 ]);
 const ALL_CHECK_DEFINITIONS = Object.freeze([...CHECK_DEFINITIONS, ...REVIEW_CHECK_DEFINITIONS]);
 
@@ -235,6 +236,7 @@ const NON_SCORED_CHECKS = Object.freeze([
   'directors_loan_overdrawn',
   'dividend_status',
   'historical_changes',
+  'motor_vehicle_expenses',
 ]);
 
 // Processor fees are deliberately not exempt: MBX evidence showed that Xenon includes them.

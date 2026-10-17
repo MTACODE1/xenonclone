@@ -21,9 +21,9 @@ function fmtDisplayDate(val) {
 </nav>
 
 <div class="page-header">
-  <a href="<%= basePath %>/" class="btn btn-outlined btn-sm back-button">
+  <a href="<%= basePath %>/client/<%= orgIdentifier %>" class="btn btn-outlined btn-sm back-button">
     <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
-    Back to Clients
+    Back to issues
   </a>
   <h4><%= def ? def.label : checkType %></h4>
   <% if (issue) { %>

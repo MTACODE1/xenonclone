@@ -16,7 +16,7 @@ const {
   addContactExclusion,
   createStatementImport, deleteStatementImport, getStatementImportByHash, getStatementImportsForOrg,
   getXeroBankItemsForOrg, getFiledAccountsForOrg, getFiledAccountsExtractionsForOrg,
-  upsertFiledAccounts, getReportFindings, getSetting,
+  upsertFiledAccounts, getReportFindings, getSetting, getEntityCacheWatermark,
   getCompaniesHouseProfileForOrg, updateOrganisationCompanyNumber, upsertCompaniesHouseProfile,
   toggleStaffOrgAccess, getAllInsightData, saveInsightData, getInsightData,
   getInsightAccountMappings, setInsightAccountMapping, getInsightCategorySettings, setInsightCategorySetting,
@@ -34,6 +34,7 @@ const {
   periodInput, resolvePeriod, shouldUseCacheOnlyForReanalysis,
 } = require('../services/periodResolver');
 const { startJob } = require('../services/syncJobs');
+const { hydrateOrgIfEmpty } = require('../db/xeroCacheStore');
 const checkDescriptions = require('../data/checkDescriptions');
 const {
   matchStatementLines, normalizeStatementLines, recomputeEvidenceIssues, sha256
@@ -805,24 +806,39 @@ router.post('/:tenantId/insight/settings', express.urlencoded({ extended: true }
   res.redirect(`/client/${encodeURIComponent(req.params.tenantId)}/insight/settings?saved=1`);
 });
 
+// A different date range can be worked out from the stored copy of the client's Xero data when that copy
+// is under two days old and exists for this client. The same range as the active one still does a live sync.
+const STORED_DATA_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+async function canRecalculateFromStoredData(org, resolvedPeriod) {
+  if (!shouldUseCacheOnlyForReanalysis(org.period_key, resolvedPeriod.key)) return false;
+  const syncedAt = org.last_synced_at ? new Date(org.last_synced_at).getTime() : 0;
+  if (!syncedAt || Date.now() - syncedAt > STORED_DATA_MAX_AGE_MS) return false;
+  await hydrateOrgIfEmpty(org.id);
+  return Boolean(getEntityCacheWatermark(org.id, 'invoice'));
+}
+
 router.post('/:tenantId/sync', verifyCsrf, async (req, res) => {
   const { tenantId } = req.params;
   const org = await getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).json({ error: 'Organisation not found' });
-  let period;
+  let period, resolvedPeriod;
   try {
     period = periodInput(req.query, org.period_type || getSetting('default_sync_period') || 'since_lock_date');
-    selectedPeriodFor(org, req.query);
+    resolvedPeriod = selectedPeriodFor(org, req.query);
   } catch (error) {
     return res.status(400).json({ error: error.message });
   }
+  // Looking at a different date range than the one on screen: work it out from the data already stored
+  // for this client instead of asking Xero for everything again (seconds, like Xenon, not minutes).
+  // Only when the stored copy is recent; otherwise do the normal live sync so the numbers are not old.
+  const cacheOnly = await canRecalculateFromStoredData(org, resolvedPeriod);
   const runSync = org.freeagent_company_id
-    ? progress => syncFreeAgentOrganisation(tenantId, progress, { period })
-    : progress => syncOrganisation(tenantId, progress, { period });
+    ? progress => syncFreeAgentOrganisation(tenantId, progress, { period, cacheOnly })
+    : progress => syncOrganisation(tenantId, progress, { period, cacheOnly });
   const started = await startJob(
     `${tenantId}:all:${period.type}:${period.from || ''}:${period.to || ''}`,
     runSync,
-    { tenantId, orgId: org.id, mode: 'full', priority: true, payload: { period } }
+    { tenantId, orgId: org.id, mode: 'full', priority: true, payload: { period, cacheOnly } }
   );
   return res.status(started.existing ? 200 : 202).json({
     success: true, jobId: started.job.id, existing: started.existing,
