@@ -266,7 +266,9 @@ async function refreshCachedEntities(orgId, tenantId, runId, entityType, fetcher
   await hydrateOrgIfEmpty(orgId);
   if (options.cacheOnly) {
     const cached = getCachedEntities(orgId, entityType);
-    if (!cached.length) throw new Error(`No cached ${entityType} data is available`);
+    // An empty record type is normal (a client with no credit notes, no manual journals...). Only a client with
+    // nothing stored at all cannot be worked out from the stored copy.
+    if (!cached.length && !getEntityCacheWatermark(orgId, 'organisation')) throw new Error(`No cached ${entityType} data is available`);
     return cached;
   }
   const since = incrementalSince(orgId, entityType, options);
