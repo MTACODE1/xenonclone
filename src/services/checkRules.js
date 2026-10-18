@@ -849,7 +849,16 @@ function findDuplicatesWithSameNumber(items, windowDays, options = {}) {
   return [...usual, ...extra].sort((a, b) => String(b.date2 || '').localeCompare(String(a.date2 || '')));
 }
 
+// A cache-only recalculation reads the client's stored copy of Xero data. An empty record type is normal (a client
+// with no credit notes or no manual journals has none to store); only a client with nothing stored at all cannot be
+// recalculated, so that is the only case that fails.
+function storedEntitiesForRecalculation(cachedRows, entityType, clientHasAnyStoredData) {
+  if (!cachedRows.length && !clientHasAnyStoredData) throw new Error(`No cached ${entityType} data is available`);
+  return cachedRows;
+}
+
 module.exports = {
+  storedEntitiesForRecalculation,
   findDuplicatesWithSameNumber,
   BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise,
   CHECK_DEFAULTS,

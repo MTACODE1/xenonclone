@@ -1060,3 +1060,12 @@ test('A number shared by many bills is a reused account number, not a duplicate'
   assert.equal(findDuplicatesWithSameNumber(bills, 3, { requireUnpaidPair: true }).length, 0);
   assert.equal(findDuplicatesWithSameNumber(bills.slice(0, 3), 3, { requireUnpaidPair: true }).length, 1, 'three bills can still be a duplicate');
 });
+
+test('Recalculating from stored data: an empty record type is fine, a client with nothing stored is not', () => {
+  const { storedEntitiesForRecalculation } = require('../src/services/checkRules');
+  // Matthew Swan has no credit notes at all, but the rest of his data is stored: must not fail.
+  assert.deepEqual(storedEntitiesForRecalculation([], 'credit_note', true), []);
+  assert.deepEqual(storedEntitiesForRecalculation([{ id: 1 }], 'invoice', true), [{ id: 1 }]);
+  // A client with nothing stored cannot be recalculated.
+  assert.throws(() => storedEntitiesForRecalculation([], 'invoice', false), /No cached invoice data/);
+});

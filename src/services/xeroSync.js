@@ -32,7 +32,7 @@ const {
   grossLineAmount, netLineAmount, toDateString,
   buildAccountCodeCanonicaliser, canonicaliseAccountCodes,
   withDisplayOnlyBankFindings,
-  findDuplicatesWithSameNumber, dropTaxMissingNoise, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
+  storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
 const { saveBankLines } = require('../db/bankLines');
@@ -266,10 +266,7 @@ async function refreshCachedEntities(orgId, tenantId, runId, entityType, fetcher
   await hydrateOrgIfEmpty(orgId);
   if (options.cacheOnly) {
     const cached = getCachedEntities(orgId, entityType);
-    // An empty record type is normal (a client with no credit notes, no manual journals...). Only a client with
-    // nothing stored at all cannot be worked out from the stored copy.
-    if (!cached.length && !getEntityCacheWatermark(orgId, 'organisation')) throw new Error(`No cached ${entityType} data is available`);
-    return cached;
+    return storedEntitiesForRecalculation(cached, entityType, Boolean(getEntityCacheWatermark(orgId, 'organisation')));
   }
   const since = incrementalSince(orgId, entityType, options);
   const fetched = await fetcher(since);
