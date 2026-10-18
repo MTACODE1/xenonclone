@@ -289,7 +289,7 @@ function toggleBbEditForm(id) {
       const hiddenColumns = new Set([
         'finding_key', 'review_state', 'ignored_until', 'notes', 'displayOnly', 'xero_links',
         'contactId', 'contactID', 'invoiceId', 'invoiceID', 'bankTransactionId', 'bankTransactionID',
-        'paymentId', 'paymentID', 'creditNoteId', 'creditNoteID', 'id1', 'id2', 'id',
+        'paymentId', 'paymentID', 'creditNoteId', 'creditNoteID', 'id1', 'id2', 'id', 'documentIds',
         // 'id' is the same kind of raw Xero GUID as the others above (see xeroLinks in
         // src/routes/client.js, where it's used as a fallback for the invoice/bill/credit-note
         // link) — old_unpaid_invoices/old_sales_credits/old_unpaid_bills/old_purchase_credits (and
@@ -374,7 +374,10 @@ function toggleBbEditForm(id) {
                   <% if (typeof val === 'number' && !Number.isInteger(val)) { %>
                     £<%= Number(val).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}) %>
                   <% } else if (Array.isArray(val)) { %>
-                    <%= val.join(', ') %>
+                    <%# A group of bills/invoices is listed as "reference · amount · status · date", never as [object Object] %>
+                    <%= val.length && val[0] !== null && typeof val[0] === 'object'
+                      ? val.map(d => [d.reference, d.amount != null ? '£' + Number(d.amount).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : null, d.status, d.date].filter(Boolean).join(' · ')).join('   |   ')
+                      : val.join(', ') %>
                   <% } else { %>
                     <%= val != null ? fmtDisplayDate(val) : '—' %>
                   <% } %>
