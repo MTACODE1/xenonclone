@@ -1721,3 +1721,12 @@ html.sidebar-collapsed { --sidebar-width: 60px; }
 .action-card:not([open]) .action-sub { display: none; }
 .action-card[open] > summary.action-head { padding-top: 14px; padding-bottom: 10px; }
 .action-card > summary.action-head:hover { background: var(--grey-100); }
+
+/* Links styled as buttons keep readable text on hover. The global "a:hover" rule turned the text of blue buttons the
+   same dark blue as their hover background, so labels such as "View issues" and "Review" disappeared. */
+a.btn-primary, a.btn-primary:hover, a.btn-primary:focus, a.btn-primary:active,
+a.btn-secondary, a.btn-secondary:hover, a.btn-secondary:focus, a.btn-secondary:active,
+a.provider-btn:hover { color: #fff; }
+a.btn-primary:hover:not(:disabled) { background: #2f55c9; box-shadow: 0 2px 8px rgba(47, 85, 201, 0.4); }
+a.btn-outlined:hover { color: var(--primary-dark); }
+a.btn:focus-visible { outline: 2px solid var(--primary-dark); outline-offset: 2px; }
