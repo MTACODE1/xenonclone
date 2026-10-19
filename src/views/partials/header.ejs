@@ -101,7 +101,7 @@
       <button class="menu-toggle" onclick="openSidebar()" aria-label="Open menu">
         <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
       </button>
-      <% const pageTitles = { clients: 'Client List', panorama: 'Data Quality Panorama', transactions: 'Transaction Counts', settings: 'Settings', validation: 'Validation & Cancellation Gate', client: 'Client Health Check', staff: 'Staff' }; %>
+      <% const pageTitles = { clients: 'Client Health Check', panorama: 'Data Quality Panorama', transactions: 'Transaction Counts', settings: 'Settings', validation: 'Validation & Cancellation Gate', client: 'Client Health Check', staff: 'Staff' }; %>
       <h1 class="topbar-title"><%= (typeof currentPage !== 'undefined' && pageTitles[currentPage]) ? pageTitles[currentPage] : 'Dashboard' %></h1>
       <div class="topbar-actions">
         <span class="status-badge online">

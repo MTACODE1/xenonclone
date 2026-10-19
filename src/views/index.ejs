@@ -14,31 +14,39 @@
   const allTags = [...new Set(orgs.map(o => o.tag).filter(Boolean))];
 %>
 
-<div class="page-header page-header-flex client-list-header">
-  <div>
-    <h4>Client List</h4>
-    <p>Manage your connected Xero clients and monitor bookkeeping health</p>
+<%
+  const connectedOrgs = orgs.filter(o => o.connection_status === 'connected');
+  const needsAttention = connectedOrgs.filter(o => o.score != null && o.score < 60).length;
+  const healthyCount = connectedOrgs.filter(o => o.score != null && o.score >= 80).length;
+  const notSyncedCount = orgs.filter(o => o.score == null).length;
+  const scoreTone = avgScore == null ? 'neutral' : avgScore >= 80 ? 'good' : avgScore >= 60 ? 'warn' : 'bad';
+%>
+<section class="clients-hero">
+  <div class="clients-hero-text">
+    <span class="clients-hero-eyebrow">Bookkeeping health</span>
+    <h2>Your clients</h2>
+    <p>Every connected client at a glance. Spot the ones that need attention, then jump straight in.</p>
   </div>
-  <div class="header-stat-chip">
-    <div class="header-stat-icon" style="background: var(--primary-light); color: var(--primary);">
-      <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+  <div class="clients-hero-stats">
+    <div class="hero-stat">
+      <div class="hero-stat-value"><%= totalConnected %></div>
+      <div class="hero-stat-label">Connected</div>
     </div>
-    <div>
-      <div class="header-stat-value"><%= totalConnected %></div>
-      <div class="header-stat-label">Connected Clients</div>
+    <div class="hero-stat hero-stat-<%= scoreTone %>">
+      <div class="hero-stat-value"><%= avgScore != null ? avgScore + '%' : 'N/A' %></div>
+      <div class="hero-stat-label">Average health</div>
+    </div>
+    <div class="hero-stat <%= needsAttention ? 'hero-stat-bad' : '' %>">
+      <div class="hero-stat-value"><%= needsAttention %></div>
+      <div class="hero-stat-label">Need attention</div>
+    </div>
+    <div class="hero-stat">
+      <div class="hero-stat-value"><%= notSyncedCount %></div>
+      <div class="hero-stat-label">Not synced</div>
     </div>
   </div>
-  <div class="header-stat-chip">
-    <div class="header-stat-icon" style="background: <%= avgScore >= 80 ? 'var(--success-light)' : avgScore >= 60 ? 'var(--warning-light)' : 'var(--error-light)' %>; color: <%= avgScore >= 80 ? 'var(--success)' : avgScore >= 60 ? 'var(--warning)' : 'var(--error)' %>;">
-      <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-    </div>
-    <div>
-      <div class="header-stat-value"><%= avgScore != null ? avgScore + '%' : 'N/A' %></div>
-      <div class="header-stat-label">Average Health Score</div>
-    </div>
-  </div>
-  <button type="button" class="btn btn-primary" onclick="document.getElementById('addOrgModal').style.display='flex'">+ Add Organisation</button>
-</div>
+  <button type="button" class="btn btn-primary hero-add" onclick="document.getElementById('addOrgModal').style.display='flex'">+ Add organisation</button>
+</section>
 
 <div class="card">
   <div class="table-filters">
@@ -62,6 +70,17 @@
       <option value="connected">Connected</option>
       <option value="disconnected">Disconnected</option>
     </select>
+    <select id="sortBy" class="form-select" title="Sort the list">
+      <option value="name">Sort: A to Z</option>
+      <option value="score-asc">Sort: lowest health first</option>
+      <option value="score-desc">Sort: highest health first</option>
+    </select>
+  </div>
+  <div class="quick-views" id="quickViews">
+    <button type="button" class="quick-view active" data-view="">All <span><%= orgs.length %></span></button>
+    <button type="button" class="quick-view" data-view="attention">Needs attention <span><%= needsAttention %></span></button>
+    <button type="button" class="quick-view" data-view="healthy">Healthy 80%+ <span><%= healthyCount %></span></button>
+    <button type="button" class="quick-view" data-view="unsynced">Not synced <span><%= notSyncedCount %></span></button>
   </div>
 
   <div class="table-wrap">
@@ -89,7 +108,7 @@
         <% orgs.forEach(org => { %>
           <% const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id; %>
           <% const isFreeAgent = !!org.freeagent_company_id; %>
-          <tr class="client-row" data-name="<%= org.name.toLowerCase() %>" data-tag="<%= org.tag || '' %>" data-status="<%= org.connection_status %>">
+          <tr class="client-row" data-name="<%= org.name.toLowerCase() %>" data-tag="<%= org.tag || '' %>" data-status="<%= org.connection_status %>" data-score="<%= org.score != null ? org.score : '' %>">
             <td class="text-muted"><%= org.client_ref || '—' %></td>
             <td class="font-medium">
               <a href="<%= basePath %>/client/<%= orgIdentifier %>"><%= org.name %></a>
@@ -117,28 +136,37 @@
                   <span class="avatar-badge avatar-badge-more">+<%= org.accessBadges.length - 3 %></span>
                 <% } %>
                 <% if (isAdmin) { %>
-                  <button type="button" class="avatar-badge avatar-badge-add" onclick="document.getElementById('accessPopover-<%= org.id %>').classList.toggle('open')">+</button>
-                  <div id="accessPopover-<%= org.id %>" class="popover">
+                  <button type="button" class="avatar-badge avatar-badge-add" title="Manage team access" aria-label="Manage team access for <%= org.name %>" onclick="openAccessPicker(this, 'accessPopover-<%= org.id %>')">+</button>
+                  <div id="accessPopover-<%= org.id %>" class="popover access-picker">
                     <% const assignedIds = new Set((org.accessBadges || []).map(s => s.id)); %>
-                    <% (org.accessBadges || []).forEach(staff => { %>
-                      <form method="post" action="<%= basePath %>/client/<%= orgIdentifier %>/access" class="popover-row">
-                        <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
-                        <input type="hidden" name="staff_id" value="<%= staff.id %>">
-                        <input type="hidden" name="grant" value="0">
-                        <span><%= staff.name %></span>
-                        <button type="submit" class="popover-remove-btn" title="Remove access">&times;</button>
-                      </form>
-                    <% }) %>
-                    <% allStaff.filter(s => !assignedIds.has(s.id)).forEach(staff => { %>
-                      <form method="post" action="<%= basePath %>/client/<%= orgIdentifier %>/access" class="popover-row">
-                        <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
-                        <input type="hidden" name="staff_id" value="<%= staff.id %>">
-                        <input type="hidden" name="grant" value="1">
-                        <span class="text-muted"><%= staff.name %></span>
-                        <button type="submit" class="popover-add-btn" title="Grant access">Add</button>
-                      </form>
-                    <% }) %>
-                    <% if (!allStaff.length) { %><p class="text-muted" style="font-size:0.75rem; padding:8px;"><a href="<%= basePath %>/staff">Add staff</a> first</p><% } %>
+                    <form method="post" action="<%= basePath %>/client/<%= orgIdentifier %>/access/bulk" class="access-picker-form">
+                      <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+                      <input type="hidden" name="grant_ids" value="">
+                      <input type="hidden" name="revoke_ids" value="">
+                      <div class="access-picker-title">Team access <span class="access-picker-client"><%= org.name %></span></div>
+                      <input type="search" class="form-input access-picker-search" placeholder="Search team members…" autocomplete="off" aria-label="Search team members">
+                      <div class="access-picker-tools">
+                        <button type="button" class="link-btn" data-act="all">Select all shown</button>
+                        <button type="button" class="link-btn" data-act="none">Clear shown</button>
+                        <span class="access-picker-count"></span>
+                      </div>
+                      <div class="access-picker-list">
+                        <% allStaff.forEach(staff => { %>
+                          <label class="access-picker-row" data-name="<%= String(staff.name || '').toLowerCase() %>">
+                            <input type="checkbox" value="<%= staff.id %>" data-initial="<%= assignedIds.has(staff.id) ? 1 : 0 %>" <%= assignedIds.has(staff.id) ? 'checked' : '' %>>
+                            <span class="avatar-badge"><%= staff.initials %></span>
+                            <span class="access-picker-name"><%= staff.name %></span>
+                            <% if (staff.role) { %><span class="access-picker-role"><%= staff.role %></span><% } %>
+                          </label>
+                        <% }) %>
+                        <p class="access-picker-empty text-muted" style="display:none;">No one matches that search</p>
+                        <% if (!allStaff.length) { %><p class="text-muted" style="font-size:0.75rem; padding:8px;"><a href="<%= basePath %>/staff">Add staff</a> first</p><% } %>
+                      </div>
+                      <div class="access-picker-foot">
+                        <button type="button" class="btn btn-outlined btn-sm" data-act="cancel">Cancel</button>
+                        <button type="submit" class="btn btn-primary btn-sm" disabled>Save changes</button>
+                      </div>
+                    </form>
                   </div>
                 <% } %>
               </div>
@@ -199,6 +227,15 @@ function selectedTags() {
   return new Set(Array.from(tagCheckboxes).filter(cb => cb.checked).map(cb => cb.value));
 }
 
+let quickView = '';
+function matchesQuickView(row) {
+  const score = row.dataset.score === '' ? null : Number(row.dataset.score);
+  if (quickView === 'attention') return score !== null && score < 60 && row.dataset.status === 'connected';
+  if (quickView === 'healthy') return score !== null && score >= 80 && row.dataset.status === 'connected';
+  if (quickView === 'unsynced') return score === null;
+  return true;
+}
+
 function filterTable() {
   const search = searchEl.value.toLowerCase();
   const status = statusEl.value.toLowerCase();
@@ -210,14 +247,105 @@ function filterTable() {
     const rowStatus = (row.dataset.status || '').toLowerCase();
     const visible = (!search || name.includes(search)) &&
                     (tags.size === 0 || tags.has(rowTag)) &&
-                    (!status || rowStatus === status);
+                    (!status || rowStatus === status) &&
+                    matchesQuickView(row);
     row.style.display = visible ? '' : 'none';
   });
 }
 
+function sortTable() {
+  const how = document.getElementById('sortBy').value;
+  const body = document.querySelector('#clientTable tbody');
+  const rows = Array.from(body.querySelectorAll('.client-row'));
+  const scoreOf = row => (row.dataset.score === '' ? null : Number(row.dataset.score));
+  rows.sort((a, b) => {
+    if (how === 'name') return (a.dataset.name || '').localeCompare(b.dataset.name || '');
+    const sa = scoreOf(a), sb = scoreOf(b);
+    if (sa === null && sb === null) return (a.dataset.name || '').localeCompare(b.dataset.name || '');
+    if (sa === null) return 1;      // clients with no score always sit at the bottom
+    if (sb === null) return -1;
+    return how === 'score-asc' ? sa - sb : sb - sa;
+  });
+  rows.forEach(row => body.appendChild(row));
+}
+
+document.getElementById('sortBy').addEventListener('change', sortTable);
+document.getElementById('quickViews').addEventListener('click', event => {
+  const button = event.target.closest('.quick-view');
+  if (!button) return;
+  document.querySelectorAll('.quick-view').forEach(b => b.classList.toggle('active', b === button));
+  quickView = button.dataset.view;
+  filterTable();
+});
+
 searchEl.addEventListener('input', filterTable);
 statusEl.addEventListener('change', filterTable);
 tagCheckboxes.forEach(cb => cb.addEventListener('change', filterTable));
+
+// ---- Team access picker: search, tick several people, save once ----
+function openAccessPicker(button, popoverId) {
+  const pop = document.getElementById(popoverId);
+  const wasOpen = pop.classList.contains('open');
+  document.querySelectorAll('.popover.open').forEach(p => p.classList.remove('open'));
+  if (wasOpen) return;
+  pop.classList.add('open');
+  // Fixed position so the table's own scrolling cannot clip the list; flips upwards near the bottom of the screen.
+  const rect = button.getBoundingClientRect();
+  const width = 320;
+  pop.style.position = 'fixed';
+  pop.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)) + 'px';
+  const room = window.innerHeight - rect.bottom;
+  if (room < 420 && rect.top > room) { pop.style.top = 'auto'; pop.style.bottom = (window.innerHeight - rect.top + 6) + 'px'; }
+  else { pop.style.bottom = 'auto'; pop.style.top = (rect.bottom + 6) + 'px'; }
+  const search = pop.querySelector('.access-picker-search');
+  if (search) { search.value = ''; search.dispatchEvent(new Event('input')); search.focus(); }
+}
+
+document.querySelectorAll('.access-picker-form').forEach(form => {
+  const rows = Array.from(form.querySelectorAll('.access-picker-row'));
+  const boxes = rows.map(row => row.querySelector('input[type=checkbox]'));
+  const search = form.querySelector('.access-picker-search');
+  const count = form.querySelector('.access-picker-count');
+  const save = form.querySelector('button[type=submit]');
+  const empty = form.querySelector('.access-picker-empty');
+  const shown = () => rows.filter(row => row.style.display !== 'none');
+  function refresh() {
+    let granted = 0, revoked = 0, ticked = 0;
+    boxes.forEach(box => {
+      if (box.checked) ticked++;
+      if (box.checked && box.dataset.initial === '0') granted++;
+      if (!box.checked && box.dataset.initial === '1') revoked++;
+    });
+    count.textContent = ticked + ' selected' + (granted || revoked ? ' (' + (granted ? '+' + granted : '') + (granted && revoked ? ' ' : '') + (revoked ? '-' + revoked : '') + ')' : '');
+    save.disabled = !(granted || revoked);
+    save.textContent = granted || revoked ? 'Save changes' : 'No changes';
+  }
+  search.addEventListener('input', () => {
+    const term = search.value.trim().toLowerCase();
+    rows.forEach(row => { row.style.display = !term || (row.dataset.name || '').includes(term) ? '' : 'none'; });
+    if (empty) empty.style.display = shown().length ? 'none' : '';
+  });
+  search.addEventListener('keydown', event => { if (event.key === 'Enter') event.preventDefault(); });
+  boxes.forEach(box => box.addEventListener('change', refresh));
+  form.addEventListener('click', event => {
+    const act = event.target.closest('[data-act]');
+    if (!act) return;
+    if (act.dataset.act === 'all' || act.dataset.act === 'none') {
+      shown().forEach(row => { row.querySelector('input[type=checkbox]').checked = act.dataset.act === 'all'; });
+      refresh();
+    } else if (act.dataset.act === 'cancel') {
+      boxes.forEach(box => { box.checked = box.dataset.initial === '1'; });
+      refresh();
+      form.closest('.popover').classList.remove('open');
+    }
+  });
+  form.addEventListener('submit', () => {
+    form.elements.grant_ids.value = boxes.filter(b => b.checked && b.dataset.initial === '0').map(b => b.value).join(',');
+    form.elements.revoke_ids.value = boxes.filter(b => !b.checked && b.dataset.initial === '1').map(b => b.value).join(',');
+  });
+  refresh();
+});
+window.addEventListener('scroll', () => document.querySelectorAll('.access-picker.open').forEach(p => p.classList.remove('open')), true);
 
 // Close any open popover when clicking outside it.
 document.addEventListener('click', event => {

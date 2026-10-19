@@ -16,7 +16,7 @@ const {
   addContactExclusion,
   createStatementImport, deleteStatementImport, getStatementImportByHash, getStatementImportsForOrg,
   getXeroBankItemsForOrg, getFiledAccountsForOrg, getFiledAccountsExtractionsForOrg,
-  upsertFiledAccounts, getReportFindings, getSetting, getEntityCacheWatermark,
+  upsertFiledAccounts, getReportFindings, getSetting, getEntityCacheWatermark, getAllStaff,
   getCompaniesHouseProfileForOrg, updateOrganisationCompanyNumber, upsertCompaniesHouseProfile,
   toggleStaffOrgAccess, getAllInsightData, saveInsightData, getInsightData,
   getInsightAccountMappings, setInsightAccountMapping, getInsightCategorySettings, setInsightCategorySetting,
@@ -34,6 +34,7 @@ const {
   periodInput, resolvePeriod, shouldUseCacheOnlyForReanalysis,
 } = require('../services/periodResolver');
 const { startJob } = require('../services/syncJobs');
+const { accessChanges } = require('../services/staffAccess');
 const { hydrateOrgIfEmpty } = require('../db/xeroCacheStore');
 const checkDescriptions = require('../data/checkDescriptions');
 const {
@@ -921,6 +922,22 @@ router.post('/:tenantId/access', express.urlencoded({ extended: true }), verifyC
   if (!Number.isFinite(staffId)) return res.status(400).send('Missing staff_id');
   try {
     await toggleStaffOrgAccess(staffId, org.id, req.body.grant === '1');
+    res.redirect('/');
+  } catch (error) {
+    next(error);
+  }
+});
+
+// The same "Team Member Access" popover, saving a whole ticked list in one go (several people at once).
+router.post('/:tenantId/access/bulk', express.urlencoded({ extended: true }), verifyCsrf, async (req, res, next) => {
+  if (!isStaffManager(req.session.staffRole)) return res.status(403).send('Admin access required');
+  const org = await getOrganisationByTenantId(req.params.tenantId);
+  if (!org) return res.status(404).send('Organisation not found');
+  try {
+    const activeIds = (await getAllStaff()).filter(s => s.is_active).map(s => s.id);
+    const { grant, revoke } = accessChanges(req.body.grant_ids, req.body.revoke_ids, activeIds);
+    for (const staffId of grant) await toggleStaffOrgAccess(staffId, org.id, true);
+    for (const staffId of revoke) await toggleStaffOrgAccess(staffId, org.id, false);
     res.redirect('/');
   } catch (error) {
     next(error);
