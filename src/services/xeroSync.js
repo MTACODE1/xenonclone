@@ -32,7 +32,7 @@ const {
   grossLineAmount, netLineAmount, toDateString,
   buildAccountCodeCanonicaliser, canonicaliseAccountCodes,
   withDisplayOnlyBankFindings,
-  storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
+  storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, keepFlatRateLargeItems, missingContactDefaults, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
 const { saveBankLines } = require('../db/bankLines');
@@ -316,7 +316,23 @@ async function runSync(tenantId, progressCallback, options = {}) {
       existingOrg.id, tenantId, options.runId, 'organisation',
       () => apiCall(tenantId, async (xero, tid) => {
       const resp = await xero.accountingApi.getOrganisations(tid);
-        return resp.body.organisations || [];
+        const organisations = resp.body.organisations || [];
+        // The CIS tick-boxes in Xero's Financial Settings are not on the Organisation object; they have their own
+        // endpoint. Kept on the cached organisation so a cache-only recalculation sees them too. A failure here
+        // (e.g. a non-UK organisation) must never fail the sync, so it just leaves the value unknown.
+        if (organisations[0]?.organisationID) {
+          try {
+            const cisResp = await xero.accountingApi.getOrganisationCISSettings(tid, organisations[0].organisationID);
+            const setting = (cisResp.body.cISSettings || cisResp.body.cisSettings || [])[0] || {};
+            organisations[0].cisSettings = {
+              contractor: !!(setting.cISContractorEnabled ?? setting.cisContractorEnabled),
+              subContractor: !!(setting.cISSubContractorEnabled ?? setting.cisSubContractorEnabled),
+            };
+          } catch (cisErr) {
+            organisations[0].cisSettings = null;
+          }
+        }
+        return organisations;
       }),
       { ...options, forceFullRefresh: true }
     );
@@ -1346,10 +1362,10 @@ async function runSync(tenantId, progressCallback, options = {}) {
     if (!vatRegistered) {
       // Not VAT-registered — no tax scheme applies, so a missing tax code isn't an issue.
       issue = { org_id: orgId, check_type: 'purchase_tax_missing', importance: 'medium', count: 0, potential_value_gbp: 0, detail_json: '[]', period_checked: 'not_vat_registered' };
-    } else if (journalChecks.classifyVatScheme(orgInfo.salesTaxBasis, orgInfo.salesTaxPeriod) === 'flat_rate') {
-      // On the Flat Rate Scheme input VAT on purchases is not reclaimed, so no tax code is expected on expenses.
-      issue = { org_id: orgId, check_type: 'purchase_tax_missing', importance: 'medium', count: 0, potential_value_gbp: 0, detail_json: '[]', period_checked: 'flat_rate_scheme' };
     } else {
+      // On the Flat Rate Scheme input VAT on ordinary purchases is not reclaimed, so no tax code is expected —
+      // except on a single item over £2,000, which can be reclaimed. Those clients keep only such items below.
+      const flatRateScheme = journalChecks.classifyVatScheme(orgInfo.salesTaxBasis, orgInfo.salesTaxPeriod) === 'flat_rate';
       const taxMissingLines = [];
       const billsToCheck = inPeriod(accpayAuthorised);
       for (const bill of billsToCheck) {
@@ -1405,6 +1421,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
         minAmount: Number.isFinite(parsedMin) ? parsedMin : 1,
         nameByCode: new Map((chartOfAccounts || []).map(a => [a.code, a.name])), skipName: BANK_FEE_ACCOUNT_NAME,
       }));
+      if (flatRateScheme) taxMissingLines.splice(0, taxMissingLines.length, ...keepFlatRateLargeItems(taxMissingLines));
       issue = {
         org_id: orgId, check_type: 'purchase_tax_missing', importance: 'medium',
         // Count each offending LINE, not each distinct invoice/transaction — a bill with 5 lines
@@ -1593,21 +1610,20 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // purchasesDefaultAccountCode/accountsPayableTaxType for suppliers), so each role is checked
   // against its own pair of fields rather than one that doesn't exist on the API object.
   try {
+    // Default account, tax rate and due date (payment terms) per role — see missingContactDefaults.
+    const missingByContact = new Map();
     const missing = contacts.filter(c => {
       if (c.contactStatus !== 'ACTIVE') return false;
-      const missingSalesDefaults = c.isCustomer && (!c.salesDefaultAccountCode || !c.accountsReceivableTaxType);
-      const missingPurchaseDefaults = c.isSupplier && (!c.purchasesDefaultAccountCode || !c.accountsPayableTaxType);
-      // A contact with neither flag (never on an invoice or bill) still needs defaults if it has none at all.
-      const hasAnyDefault = c.salesDefaultAccountCode || c.purchasesDefaultAccountCode
-        || c.accountsReceivableTaxType || c.accountsPayableTaxType;
-      const missingForUnflagged = !c.isCustomer && !c.isSupplier && !hasAnyDefault;
-      return missingSalesDefaults || missingPurchaseDefaults || missingForUnflagged;
+      const list = missingContactDefaults(c);
+      if (list.length) missingByContact.set(c.contactID, list.join(', '));
+      return list.length > 0;
     });
     const issue = {
       org_id: orgId, check_type: 'contact_defaults', importance: 'low',
       count: missing.length, potential_value_gbp: 0,
       detail_json: JSON.stringify(missing.map(c => ({
         id: c.contactID, name: c.name, isCustomer: c.isCustomer, isSupplier: c.isSupplier,
+        missing: missingByContact.get(c.contactID),
         salesDefaultAccountCode: c.salesDefaultAccountCode, purchasesDefaultAccountCode: c.purchasesDefaultAccountCode,
         accountsReceivableTaxType: c.accountsReceivableTaxType, accountsPayableTaxType: c.accountsPayableTaxType
       }))),
@@ -2006,6 +2022,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
 
   // --- Review checks added 8 Oct 2026 (non-scored): unusual journals, suspense balances, tax review by
   // code and the VAT scheme monitor. All but the suspense balance reuse data already downloaded. ---
+  let bsReport = null;   // the Balance Sheet, when this sync downloaded it (not on a cache-only recalculation)
   if (chartOfAccountsAvailable) {
     try {
       const unusual = journalChecks.detectUnusualJournals({ journals: recentManualJournals, accounts: chartOfAccounts });
@@ -2024,7 +2041,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       try {
         const bsResp = await apiCall(tenantId, async (xero, tid) =>
           xero.accountingApi.getReportBalanceSheet(tid, period.end, undefined, undefined, undefined, undefined, true, false));
-        const bsReport = bsResp.body.reports?.[0];
+        bsReport = bsResp.body.reports?.[0];
         const suspense = journalChecks.suspenseOpenBalances(bsReport, { asOf: period.end });
         insertIssue({
           org_id: orgId, check_type: 'suspense_open_balance', importance: 'critical',
@@ -2047,7 +2064,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
   if (chartOfAccountsAvailable) {
     try {
       const items = journalChecks.motorVehicleExpenses({
-        accounts: chartOfAccounts, from: period.start, to: period.end,
+        accounts: chartOfAccounts, from: period.start, to: period.end, balanceSheet: bsReport,
         documents: [...accpayAuthorised, ...allBankTransactions.filter(t => t.status === 'AUTHORISED' && t.type === 'SPEND')],
         journals: allManualJournals.filter(j => j.status === 'POSTED'),
       });
@@ -2160,7 +2177,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       ...journalChecks.joiningEstimates({ scheme, taxableNet }).map(v => toItem(v, v.rule)),
       // A client on the Flat Rate Scheme with CIS activity in the books (CIS and the Flat Rate Scheme cannot be combined).
       ...journalChecks.cisWithFlatRate({
-        scheme, accounts: chartOfAccounts, from: fromDate.toISOString().slice(0, 10), to,
+        scheme, accounts: chartOfAccounts, from: fromDate.toISOString().slice(0, 10), to, cis: orgInfo.cisSettings || null,
         documents: [...accpayAuthorised, ...accrecAuthorised, ...allBankTransactions.filter(t => t.status === 'AUTHORISED')],
         journals: allManualJournals.filter(j => j.status === 'POSTED'),
       }),

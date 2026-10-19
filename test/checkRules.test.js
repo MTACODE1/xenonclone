@@ -1003,9 +1003,24 @@ test('Tax Missing ignores pence rounding lines, bank fees and interest income', 
     ['429', '404', '461'], 'interest income is dropped from the sales check');
 });
 
-test('Purchase Tax Missing on a Flat Rate Scheme client shows as not applicable', () => {
-  const { NOT_APPLICABLE_PERIODS } = require('../src/services/periodStatus');
-  assert.ok(NOT_APPLICABLE_PERIODS.has('flat_rate_scheme'));
+test('Contact Defaults lists the missing account, tax rate and due date for each role', () => {
+  const { missingContactDefaults } = require('../src/services/checkRules');
+  const full = { isCustomer: true, salesDefaultAccountCode: '200', accountsReceivableTaxType: 'OUTPUT2', paymentTerms: { sales: { day: 14, type: 'DAYSAFTERBILLDATE' } } };
+  assert.deepEqual(missingContactDefaults(full), []);
+  assert.deepEqual(missingContactDefaults({ ...full, paymentTerms: {} }), ['sales due date']);
+  assert.deepEqual(missingContactDefaults({ isSupplier: true, purchasesDefaultAccountCode: '429' }),
+    ['purchase tax rate', 'bill due date']);
+  assert.deepEqual(missingContactDefaults({ isCustomer: true, isSupplier: true }).length, 6, 'both roles are judged separately');
+  assert.deepEqual(missingContactDefaults({}), ['account, tax rate and due date'], 'a contact never used has nothing set');
+  assert.deepEqual(missingContactDefaults({ paymentTerms: { bills: { day: 30 } } }), [], 'a contact with any default is not listed');
+});
+
+test('Purchase Tax Missing on a Flat Rate Scheme client keeps only single items over £2,000', () => {
+  const { keepFlatRateLargeItems } = require('../src/services/checkRules');
+  const lines = [{ amount: 150 }, { amount: 2000 }, { amount: 2000.01 }, { amount: -3500 }, { amount: 12000 }];
+  assert.deepEqual(keepFlatRateLargeItems(lines).map(l => l.amount), [2000.01, -3500, 12000],
+    'exactly £2,000 is not "more than £2,000"; the sign does not matter');
+  assert.deepEqual(keepFlatRateLargeItems([{ amount: 1999 }]), []);
 });
 
 test('Duplicate Bills also flags the same supplier and invoice number with a different amount', () => {
@@ -1031,6 +1046,7 @@ test('Duplicate Contacts matches legal endings, plurals, spacing and a name that
   assert.equal(pairs([c(1, 'APCOA'), c(2, 'APCOA Customer Services')]).length, 1);
   assert.equal(pairs([c(1, 'Canva'), c(2, 'Canva PTY')]).length, 1);
   assert.equal(pairs([c(1, 'Air Landline'), c(2, 'airlandline')]).length, 1);
+  assert.equal(pairs([c(1, 'K S Food And Wine'), c(2, 'KS FOOD & WINE')]).length, 1, 'spacing and "and" / "&" do not hide a duplicate name');
   assert.equal(pairs([c(1, 'Tesco'), c(2, 'Shell')]).length, 0, 'unrelated names stay apart');
   assert.equal(pairs([c(1, 'BT'), c(2, 'BT Business')]).length, 0, 'a very short name does not match everything');
 });

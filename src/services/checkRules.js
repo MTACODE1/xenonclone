@@ -638,6 +638,17 @@ function findDuplicateContacts(contacts, threshold = CHECK_DEFAULTS.contactSimil
   };
   for (const group of byPrefix.values()) for (let x = 0; x < group.length; x++) for (let y = x + 1; y < group.length; y++) consider(group[x], group[y], false);
   for (const group of byFirstWord.values()) for (let x = 0; x < group.length; x++) for (let y = x + 1; y < group.length; y++) consider(group[x], group[y], true);
+  // The same name written with different spacing or "and" / "&" ("K S Food And Wine" / "KS FOOD & WINE") is still a
+  // duplicate name, however the words were split.
+  const byJoinedName = new Map();
+  tokens.forEach((list, index) => add(byJoinedName, list.filter(t => t !== 'and').join(''), index));
+  for (const group of byJoinedName.values()) {
+    for (let x = 0; x < group.length; x++) for (let y = x + 1; y < group.length; y++) {
+      const [a, b] = group[x] < group[y] ? [group[x], group[y]] : [group[y], group[x]];
+      const key = a * contacts.length + b;
+      if (!seen.has(key)) { seen.add(key); found.push([a, b]); }
+    }
+  }
   return found.sort((p, q) => p[0] - q[0] || p[1] - q[1]).map(([i, j]) => ({
     id1: contacts[i].contactID, name1: contacts[i].name, id2: contacts[j].contactID, name2: contacts[j].name,
   }));
@@ -837,6 +848,38 @@ function dropTaxMissingNoise(lines, { minAmount = 1, nameByCode = new Map(), ski
     && !(skipName && skipName.test(String(nameByCode.get(line.accountCode) || ''))));
 }
 
+// Which defaults an active contact is missing: a default account, tax rate and due date (payment terms) for each
+// role it has. A customer is judged on its sales defaults and a supplier on its bill defaults. A contact with
+// neither flag (never used on an invoice or bill) is only listed when it has no default of any kind.
+function missingContactDefaults(contact) {
+  const terms = contact.paymentTerms || {};
+  const hasTerms = t => t && t.day != null;
+  const missing = [];
+  if (contact.isCustomer) {
+    if (!contact.salesDefaultAccountCode) missing.push('sales account');
+    if (!contact.accountsReceivableTaxType) missing.push('sales tax rate');
+    if (!hasTerms(terms.sales)) missing.push('sales due date');
+  }
+  if (contact.isSupplier) {
+    if (!contact.purchasesDefaultAccountCode) missing.push('purchase account');
+    if (!contact.accountsPayableTaxType) missing.push('purchase tax rate');
+    if (!hasTerms(terms.bills)) missing.push('bill due date');
+  }
+  if (!contact.isCustomer && !contact.isSupplier) {
+    const hasAny = contact.salesDefaultAccountCode || contact.purchasesDefaultAccountCode
+      || contact.accountsReceivableTaxType || contact.accountsPayableTaxType || hasTerms(terms.sales) || hasTerms(terms.bills);
+    if (!hasAny) missing.push('account, tax rate and due date');
+  }
+  return missing;
+}
+
+// A Flat Rate Scheme client cannot reclaim VAT on ordinary purchases, but can on a single item over £2,000
+// (capital goods), so Purchase Tax Missing only keeps lines that are individually more than the limit.
+const FLAT_RATE_SINGLE_ITEM_LIMIT = 2000;
+function keepFlatRateLargeItems(lines, limit = FLAT_RATE_SINGLE_ITEM_LIMIT) {
+  return lines.filter(line => Math.abs(Number(line.amount) || 0) > limit);
+}
+
 // Duplicate groups from the usual rules plus any supplier/invoice-number repeats they did not already cover.
 function findDuplicatesWithSameNumber(items, windowDays, options = {}) {
   const usual = findDuplicates(items, windowDays, options);
@@ -860,7 +903,7 @@ function storedEntitiesForRecalculation(cachedRows, entityType, clientHasAnyStor
 module.exports = {
   storedEntitiesForRecalculation,
   findDuplicatesWithSameNumber,
-  BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise,
+  BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise, keepFlatRateLargeItems, FLAT_RATE_SINGLE_ITEM_LIMIT, missingContactDefaults,
   CHECK_DEFAULTS,
   CHECK_DEFINITIONS,
   REVIEW_CHECK_DEFINITIONS,

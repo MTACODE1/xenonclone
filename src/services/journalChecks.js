@@ -470,8 +470,20 @@ function joiningEstimates({ scheme, taxableNet, limits = VAT_LIMITS }) {
 // with "CIS" in its name that has had postings in the rolling window. It is a prompt to confirm, not a ruling.
 const CIS_NAME = /\bCIS\b/i;
 const lineDate = d => String(d.date || d.journalDate || '').slice(0, 10);
-function cisWithFlatRate({ scheme, accounts, documents, journals, from, to }) {
+function cisWithFlatRate({ scheme, accounts, documents, journals, from, to, cis }) {
   if (scheme !== 'flat_rate') return [];
+  // Xero's own Financial Settings > Construction Industry Scheme tick-boxes are the authority when we have them:
+  // registered as a contractor or subcontractor is flagged, and "not registered" is never flagged. Only when Xero
+  // did not tell us (cis missing) do we fall back to guessing from postings to CIS-named accounts below.
+  if (cis && typeof cis === 'object') {
+    const roles = [cis.contractor && 'contractor', cis.subContractor && 'subcontractor'].filter(Boolean);
+    if (!roles.length) return [];
+    return [{
+      documentId: 'vat-scheme-cis-flat-rate', number: null, date: to || null, source: 'vat_scheme', accountCode: scheme,
+      description: `This client is on the VAT Flat Rate Scheme but is registered for the Construction Industry Scheme as a ${roles.join(' and ')} in Xero's financial settings. A business registered for CIS cannot use the Flat Rate Scheme - confirm which is correct.`,
+      amount: roles.length, level: 'review', rule: 'cis_flat_rate', limit: null,
+    }];
+  }
   const cisCodes = new Set((accounts || []).filter(a => a.code && CIS_NAME.test(a.name || '')).map(a => String(a.code).toUpperCase()));
   if (!cisCodes.size) return [];
   let postings = 0;
@@ -498,7 +510,7 @@ function cisWithFlatRate({ scheme, accounts, documents, journals, from, to }) {
 const VEHICLE_EXPENSE_NAME = /vehicle/i;
 const VEHICLE_ASSET_NAME = /vehicle|\bvans?\b|\bcars?\b|truck|lorry|motor/i;
 const EXPENSE_ACCOUNT_TYPES = new Set(['EXPENSE', 'OVERHEADS', 'DIRECTCOSTS']);
-function motorVehicleExpenses({ accounts, documents, journals, from, to }) {
+function motorVehicleExpenses({ accounts, documents, journals, from, to, balanceSheet }) {
   const byCode = new Map((accounts || []).filter(a => a.code).map(a => [String(a.code).toUpperCase(), a]));
   const expenseCodes = new Set([...byCode].filter(([, a]) => VEHICLE_EXPENSE_NAME.test(a.name || '') && EXPENSE_ACCOUNT_TYPES.has(String(a.type || '').toUpperCase())).map(([c]) => c));
   if (!expenseCodes.size) return [];
@@ -507,6 +519,10 @@ function motorVehicleExpenses({ accounts, documents, journals, from, to }) {
   const touchesAsset = (documents || []).some(d => (d.lineItems || []).some(l => assetCodes.has(codeOf(l))))
     || (journals || []).some(j => (j.journalLines || []).some(l => assetCodes.has(codeOf(l))));
   if (touchesAsset) return [];
+  // A vehicle can be on the books without any bill, spend or manual journal in the window (opening balances,
+  // an older purchase), so when the Balance Sheet is available a vehicle cost account with a balance counts too.
+  if (balanceSheet && balanceSheetRows(balanceSheet).some(row => row.isAsset && VEHICLE_ASSET_NAME.test(row.label)
+    && !/depreciation|accumulated/i.test(row.label) && Math.abs(row.value) > 0.005)) return [];
   const inWindow = date => date && (!from || date >= from) && (!to || date <= to);
   const items = [];
   for (const doc of documents || []) {

@@ -277,6 +277,19 @@ test('CIS postings on a Flat Rate Scheme client are flagged, anyone else is not'
   assert.equal(journalChecks.cisWithFlatRate({ scheme: 'flat_rate', ...args, documents: [billOn('820', '2024-01-01')] }).length, 0, 'older than 12 months');
 });
 
+test("Xero's own CIS registration decides the Flat Rate flag when it is known", () => {
+  const args = { scheme: 'flat_rate', accounts: cisAccounts, documents: [billOn('820')], journals: [], from: '2025-10-01', to: '2026-09-30' };
+  const registered = journalChecks.cisWithFlatRate({ ...args, cis: { contractor: false, subContractor: true } });
+  assert.equal(registered.length, 1);
+  assert.match(registered[0].description, /registered for the Construction Industry Scheme as a subcontractor/);
+  assert.equal(journalChecks.cisWithFlatRate({ ...args, cis: { contractor: true, subContractor: true } })[0].amount, 2);
+  assert.equal(journalChecks.cisWithFlatRate({ ...args, cis: { contractor: false, subContractor: false } }).length, 0,
+    'not registered in Xero is never flagged, even with postings to CIS-named accounts');
+  assert.equal(journalChecks.cisWithFlatRate({ ...args, scheme: 'standard', cis: { contractor: true, subContractor: false } }).length, 0);
+  assert.equal(journalChecks.cisWithFlatRate({ ...args, cis: null }).length, 1, 'unknown falls back to the posting guess');
+  assert.equal(journalChecks.cisWithFlatRate({ ...args, cis: null, documents: [billOn('400')] }).length, 0);
+});
+
 const motorAccounts = [
   { code: '412', name: 'Motor Vehicle Expenses', type: 'EXPENSE' },
   { code: '710', name: 'Motor Vehicles', type: 'FIXED' },
@@ -291,6 +304,15 @@ test('motor vehicle expenses are listed only when the client has no vehicle asse
   assert.deepEqual(journalChecks.motorVehicleExpenses({ ...args, documents: [fuel, billOn('710', '2023-03-01')] }), [], 'a vehicle bought in any year means vehicles exist');
   assert.deepEqual(journalChecks.motorVehicleExpenses({ ...args, documents: [billOn('412', '2025-05-01')] }), [], 'outside the period');
   assert.deepEqual(journalChecks.motorVehicleExpenses({ ...args, accounts: [{ code: '400', name: 'Advertising', type: 'EXPENSE' }], documents: [fuel] }), []);
+});
+
+test('a vehicle on the Balance Sheet counts as recorded even with no posting in the window', () => {
+  const args = { accounts: motorAccounts, from: '2026-01-01', to: '2026-12-31', journals: [], documents: [billOn('412')] };
+  const sheet = rows => ({ rows: [{ rowType: 'Section', title: 'Fixed Assets', rows: [{ rowType: 'Section', title: 'Tangible Assets', rows: rows.map(([label, value]) => ({ rowType: 'Row', cells: [{ value: label }, { value: String(value) }] })) }] }] });
+  assert.deepEqual(journalChecks.motorVehicleExpenses({ ...args, balanceSheet: sheet([['Motor Vehicles', 15574]]) }), [], 'cost balance means a vehicle exists');
+  assert.equal(journalChecks.motorVehicleExpenses({ ...args, balanceSheet: sheet([['Motor Vehicles', 0], ['Office Equipment', 900]]) }).length, 1, 'a zero vehicle balance does not');
+  assert.equal(journalChecks.motorVehicleExpenses({ ...args, balanceSheet: sheet([['Less Accumulated Depreciation on Motor Vehicles', -500]]) }).length, 1, 'depreciation alone is not a vehicle');
+  assert.equal(journalChecks.motorVehicleExpenses({ ...args, balanceSheet: null }).length, 1, 'no Balance Sheet: unchanged behaviour');
 });
 
 test('Net Assets at a balance date inside the month is the month-end figure less the profit made after it', () => {
