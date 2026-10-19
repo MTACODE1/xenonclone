@@ -1709,3 +1709,15 @@ html.sidebar-collapsed { --sidebar-width: 60px; }
 .table-filters select.form-input, .table-filters select.form-select { height: 32px; padding-top: 0; padding-bottom: 0; line-height: 30px; }
 .check-header ~ .card .data-table td:last-child { min-width: 168px; }
 .check-header ~ .card .data-table td:last-child form, .check-header ~ .card .data-table td:last-child .review-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+
+/* "What to do first" is a closed one-line bar until opened, so the full list of checks comes first */
+.action-card > summary.action-head { list-style: none; cursor: pointer; align-items: center; padding: 10px 18px; }
+.action-card > summary.action-head::-webkit-details-marker { display: none; }
+.action-head-text { flex: 1 1 260px; min-width: 0; }
+.action-toggle { flex-shrink: 0; pointer-events: none; }
+.action-card .when-open { display: none; }
+.action-card[open] .when-open { display: inline; }
+.action-card[open] .when-closed { display: none; }
+.action-card:not([open]) .action-sub { display: none; }
+.action-card[open] > summary.action-head { padding-top: 14px; padding-bottom: 10px; }
+.action-card > summary.action-head:hover { background: var(--grey-100); }

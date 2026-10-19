@@ -214,9 +214,9 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
       </div>
     </section>
 
-    <div class="card action-card period-data">
-      <div class="action-head">
-        <div>
+    <details class="card action-card period-data">
+      <summary class="action-head">
+        <div class="action-head-text">
           <h5>What to do first</h5>
           <p class="action-sub"><%= actionChecks.length ? 'Checks with issues, most serious first (then largest value).' : 'Nothing needs action for this period.' %></p>
         </div>
@@ -225,7 +225,8 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
             <span class="chip chip-<%= key %>"><%= n %> <%= importanceLabel[key] %></span>
           <% } }) %>
         </div>
-      </div>
+        <span class="btn btn-outlined btn-sm action-toggle"><span class="when-closed">Show list ▾</span><span class="when-open">Hide list ▴</span></span>
+      </summary>
       <% if (actionChecks.length) { %>
         <ol class="action-list">
           <% actionChecks.slice(0, 6).forEach((check, index) => { const d = checkDescriptions[check.type] || {}; %>
@@ -253,7 +254,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
           <% setupChecks.forEach(check => { %><a class="chip chip-default" href="<%= setupAnchor(check) %>"><%= check.label %></a><% }) %>
         </div>
       <% } %>
-    </div>
+    </details>
 
     <% if (scoreBreakdown) {
       const scoredRows = scoreBreakdown.observations
