@@ -20,46 +20,56 @@ function fmtDisplayDate(val) {
   <span class="breadcrumb-current"><%= def ? def.label : checkType %></span>
 </nav>
 
-<div class="page-header">
+<div class="page-header check-header">
   <a href="<%= basePath %>/client/<%= orgIdentifier %>" class="btn btn-outlined btn-sm back-button">
     <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
     Back to issues
   </a>
-  <h4><%= def ? def.label : checkType %></h4>
-  <% if (issue) { %>
-    <p>
-      <span class="font-semibold text-warning"><%= issue.count %></span> issue<%= issue.count !== 1 ? 's' : '' %> found
-      <% if (issue.potential_value_gbp > 0) { %>
-        &bull; Potential value: <span class="font-semibold text-error">£<%= Number(issue.potential_value_gbp).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}) %></span>
-        <% if (checkType === 'multi_account_suppliers' || checkType === 'multi_tax_suppliers') { %>
-          <span class="text-muted" style="font-size:0.8rem;">(only the amount outside each supplier's main <%= checkType === 'multi_account_suppliers' ? 'account code' : 'tax code' %>, not the supplier's full total)</span>
+  <div class="check-header-main">
+    <h4><%= def ? def.label : checkType %>
+      <% if (def && def.importance) { %><span class="chip chip-<%= def.importance %>"><%= def.importance.charAt(0).toUpperCase() + def.importance.slice(1) %></span><% } %>
+    </h4>
+    <% if (issue) { %>
+      <div class="check-stats">
+        <div class="check-stat"><strong class="text-warning"><%= issue.count %></strong><span>issue<%= issue.count !== 1 ? 's' : '' %> found</span></div>
+        <% if (issue.potential_value_gbp > 0) { %>
+          <div class="check-stat"><strong class="text-error">£<%= Number(issue.potential_value_gbp).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}) %></strong><span>potential value</span></div>
         <% } %>
+        <% if (issue.period_checked) { %>
+          <div class="check-stat"><strong><%= issue.period_checked.replace(/_/g, ' ') %></strong><span>period checked</span></div>
+        <% } %>
+      </div>
+      <% if (issue.potential_value_gbp > 0 && (checkType === 'multi_account_suppliers' || checkType === 'multi_tax_suppliers')) { %>
+        <p class="check-note">Value counts only the amount outside each supplier's main <%= checkType === 'multi_account_suppliers' ? 'account code' : 'tax code' %>, not the supplier's full total.</p>
       <% } %>
-      <% if (issue.period_checked) { %>
-        &bull; Period: <%= issue.period_checked.replace(/_/g, ' ') %>
-      <% } %>
-    </p>
-  <% } %>
+    <% } %>
+  </div>
 </div>
 
 <%
   const detailDesc = (typeof checkDescriptions !== 'undefined' ? checkDescriptions : {})[checkType] || {};
 %>
 <% if (detailDesc.issue) { %>
-<div class="card" style="padding: 16px 20px; margin-bottom: 20px;">
-  <div class="desc-row">
-    <span class="chip" style="flex-shrink: 0; margin-top: 2px; background: var(--mta-dark-blue); color: white;">Issue</span>
-    <p><%= detailDesc.issue %></p>
+<details class="card about-check">
+  <summary>
+    <span class="about-title">About this check</span>
+    <span class="about-teaser"><%= String(detailDesc.issue).length > 150 ? String(detailDesc.issue).slice(0, 149).trimEnd() + '…' : detailDesc.issue %></span>
+  </summary>
+  <div class="about-body">
+    <div class="desc-row">
+      <span class="chip" style="flex-shrink: 0; margin-top: 2px; background: var(--mta-dark-blue); color: white;">Issue</span>
+      <p><%= detailDesc.issue %></p>
+    </div>
+    <div class="desc-row">
+      <span class="chip" style="flex-shrink: 0; margin-top: 2px; background: var(--success); color: white;">So What?</span>
+      <p><%= detailDesc.soWhat %></p>
+    </div>
+    <div class="desc-row">
+      <span class="chip" style="flex-shrink: 0; margin-top: 2px; background: var(--mta-dark-blue); color: white;">Solution</span>
+      <p><%= detailDesc.solution %></p>
+    </div>
   </div>
-  <div class="desc-row">
-    <span class="chip" style="flex-shrink: 0; margin-top: 2px; background: var(--success); color: white;">So What?</span>
-    <p><%= detailDesc.soWhat %></p>
-  </div>
-  <div class="desc-row">
-    <span class="chip" style="flex-shrink: 0; margin-top: 2px; background: var(--mta-dark-blue); color: white;">Solution</span>
-    <p><%= detailDesc.solution %></p>
-  </div>
-</div>
+</details>
 <% } %>
 
 <% if (checkType === 'bank_balance') { %>

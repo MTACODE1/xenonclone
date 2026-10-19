@@ -36,7 +36,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
   <span class="breadcrumb-current"><%= org.name %></span>
 </nav>
 
-<div class="page-header" data-tenant-id="<%= orgIdentifier %>">
+<div class="page-header client-header" data-tenant-id="<%= orgIdentifier %>">
   <a href="<%= basePath %>/" class="btn btn-outlined btn-sm back-button">
     <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
     Back to Clients
@@ -171,45 +171,88 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
 
   <div class="client-main">
 
-    <h5 style="margin: 0 0 8px;">Basis of check</h5>
-    <div class="summary-grid">
-      <div class="card summary-card" style="background: var(--grey-100);">
-        <div class="summary-label">Period Checked</div>
-        <div class="summary-value" style="font-size: 0.875rem;"><%= periodStale ? stalePeriodLabel : selectedPeriod.label %></div>
+    <%
+      const importanceRank = { critical: 0, high: 1, medium: 2, low: 3 };
+      const actionChecks = checkDefs.filter(c => c.displayStatus === 'issues')
+        .sort((x, y) => (importanceRank[x.importance] - importanceRank[y.importance]) || ((y.potential_value_gbp || 0) - (x.potential_value_gbp || 0)));
+      const setupChecks = checkDefs.filter(c => c.displayStatus === 'not_configured');
+      const scoreTone = score >= 80 ? 'good' : score >= 60 ? 'warn' : 'bad';
+      const scoreNote = score >= 80 ? 'In good shape' : score >= 60 ? 'Some attention needed' : 'Needs attention';
+      const shortText = (text, max) => { const t = String(text || '').replace(/\s+/g, ' ').trim(); return t.length > max ? t.slice(0, max - 1).trimEnd() + '…' : t; };
+      const setupAnchor = check => check.type === 'opening_balance_differences' ? '#filed-accounts' : check.type === 'unprocessed_bank' ? '#statement-evidence' : '#bank-reconciliation';
+    %>
+    <section class="overview" aria-label="Overview">
+      <div class="overview-tile overview-<%= scoreTone %> period-data">
+        <span class="overview-label">Health indicator</span>
+        <span class="overview-value"><%= score %>%</span>
+        <span class="overview-note"><%= scoreNote %></span>
+      </div>
+      <div class="overview-tile period-data">
+        <span class="overview-label">Potential issues</span>
+        <span class="overview-value"><%= totalIssues.toLocaleString('en-GB') %></span>
+        <span class="overview-note"><%= actionChecks.length %> check<%= actionChecks.length === 1 ? '' : 's' %> affected</span>
+      </div>
+      <div class="overview-tile period-data">
+        <span class="overview-label">Potential financial errors</span>
+        <span class="overview-value">£<%= Math.round(totalErrors).toLocaleString('en-GB') %></span>
+        <span class="overview-note">Estimated exposure</span>
+      </div>
+      <div class="overview-tile">
+        <span class="overview-label">Items checked</span>
+        <span class="overview-value"><%= txCounts ? Number(txCounts.total_transactions || 0).toLocaleString('en-GB') : '—' %></span>
+        <span class="overview-note"><%= txCounts ? checkDefs.length + ' checks run' : 'Sync this client first' %></span>
+      </div>
+      <div class="overview-tile overview-tile-wide">
+        <span class="overview-label">Period checked</span>
+        <span class="overview-period"><%= periodStale ? stalePeriodLabel : selectedPeriod.label %></span>
         <% if (!periodStale && selectedPeriod.type === 'custom') { %>
-          <div style="font-size: 0.7rem; color: #7C8FAC; margin-top: 4px;">Worked out from the last sync's stored data. Bank balance, dividend and statement checks are refreshed only by a normal sync.</div>
+          <span class="overview-note">Worked out from the last sync's stored data. Bank balance, dividend and statement checks are refreshed only by a normal sync.</span>
         <% } %>
         <% if (periodStale) { %>
-          <div style="font-size: 0.7rem; color: #B45309; margin-top: 4px;"><%= selectedPeriod.label %> not yet calculated</div>
+          <span class="overview-note overview-note-warn"><%= selectedPeriod.label %> not yet calculated</span>
         <% } %>
       </div>
-      <div class="card summary-card" style="background: var(--grey-100);">
-        <div class="summary-label">Items Checked</div>
-        <div class="summary-value" style="font-size: 0.875rem;">
-          <%= txCounts ? Number(txCounts.total_transactions || 0).toLocaleString('en-GB') : '—' %>
-        </div>
-        <% if (!txCounts) { %><div style="font-size: 0.7rem; color: #7C8FAC; margin-top: 4px;">Sync this client first</div><% } %>
-      </div>
-      <div class="card summary-card" style="background: var(--grey-100);">
-        <div class="summary-label">Number of Checks</div>
-        <div class="summary-value" style="font-size: 0.875rem;"><%= checkDefs.length %></div>
-      </div>
-    </div>
+    </section>
 
-    <h5 style="margin: 24px 0 8px;">Summary of results</h5>
-    <div class="summary-grid">
-      <div class="card summary-card period-data" style="background: var(--primary-light);">
-        <div class="summary-label" style="color: var(--primary-dark);">Potential Issues</div>
-        <div class="summary-value text-primary-color"><%= totalIssues.toLocaleString('en-GB') %></div>
+    <div class="card action-card period-data">
+      <div class="action-head">
+        <div>
+          <h5>What to do first</h5>
+          <p class="action-sub"><%= actionChecks.length ? 'Checks with issues, most serious first (then largest value).' : 'Nothing needs action for this period.' %></p>
+        </div>
+        <div class="action-counts">
+          <% ['critical', 'high', 'medium', 'low'].forEach(key => { const n = actionChecks.filter(c => c.importance === key).length; if (n) { %>
+            <span class="chip chip-<%= key %>"><%= n %> <%= importanceLabel[key] %></span>
+          <% } }) %>
+        </div>
       </div>
-      <div class="card summary-card period-data" style="background: var(--primary-light);">
-        <div class="summary-label" style="color: var(--primary-dark);">Potential Financial Errors</div>
-        <div class="summary-value text-primary-color">£<%= Math.round(totalErrors).toLocaleString('en-GB') %></div>
-      </div>
-      <div class="card summary-card period-data" style="background: var(--primary-light);">
-        <div class="summary-label" style="color: var(--primary-dark);">Health Indicator</div>
-        <div class="summary-value" style="color: <%= scoreColor %>;"><%= score %>%</div>
-      </div>
+      <% if (actionChecks.length) { %>
+        <ol class="action-list">
+          <% actionChecks.slice(0, 6).forEach((check, index) => { const d = checkDescriptions[check.type] || {}; %>
+            <li class="action-item sev-<%= check.importance %>">
+              <span class="action-rank"><%= index + 1 %></span>
+              <div class="action-body">
+                <div class="action-title"><%= check.label %> <span class="chip chip-<%= check.importance %>"><%= importanceLabel[check.importance] %></span></div>
+                <div class="action-why"><%= shortText(d.issue, 130) %></div>
+              </div>
+              <div class="action-figures">
+                <strong><%= check.count.toLocaleString('en-GB') %></strong> issue<%= check.count === 1 ? '' : 's' %>
+                <% if (check.potential_value_gbp > 0) { %><span>£<%= Math.round(check.potential_value_gbp).toLocaleString('en-GB') %></span><% } %>
+              </div>
+              <a class="btn btn-primary btn-sm" href="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= check.type %>?<%= periodQuery %>">Review</a>
+            </li>
+          <% }) %>
+        </ol>
+        <% if (actionChecks.length > 6) { %><div class="action-more"><%= actionChecks.length - 6 %> more check<%= actionChecks.length - 6 === 1 ? '' : 's' %> with issues are listed below.</div><% } %>
+      <% } else { %>
+        <div class="action-empty">No active issues. Everything that could be checked for this period is clear.</div>
+      <% } %>
+      <% if (setupChecks.length) { %>
+        <div class="action-setup">
+          <strong>Needs set-up</strong>
+          <% setupChecks.forEach(check => { %><a class="chip chip-default" href="<%= setupAnchor(check) %>"><%= check.label %></a><% }) %>
+        </div>
+      <% } %>
     </div>
 
     <% if (scoreBreakdown) {
@@ -308,44 +351,39 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
           <div class="check-row-inner" onclick="toggleAccordion('<%= check.type %>')">
             <div class="check-indicator <%= isNotConfigured || isUnavailable || isNotApplicable ? '' : hasIssues ? 'issue' : 'ok' %>" style="<%= isNotConfigured || isUnavailable || isNotApplicable ? 'background: #DFE5EF;' : '' %>"></div>
             <div class="check-row-content">
-              <div style="flex: 1; min-width: 0; margin-right: 16px;">
-                <div style="font-weight: 500; color: #2A3547; font-size: 0.875rem; line-height: 1.2;"><%= check.label %></div>
-                <span class="chip chip-<%= check.importance %>" style="margin-top: 4px;"><%= importanceLabel[check.importance] %></span>
-              </div>
+              <div class="check-name"><%= check.label %></div>
 
-              <div style="text-align: right; margin-right: 20px; flex-shrink: 0; min-width: 120px;">
+              <div class="check-result">
                 <% if (isUnavailable) { %>
-                  <span style="color: #7C8FAC; font-size: 0.875rem;">Unavailable</span>
-                  <div style="font-size: 0.7rem; color: #7C8FAC;"><%= unavailableReason %></div>
+                  <span class="pill pill-muted">Unavailable</span>
+                  <span class="check-sub"><%= unavailableReason %></span>
                 <% } else if (isNotApplicable) { %>
-                  <span style="color: #7C8FAC; font-size: 0.875rem;">Not applicable</span>
-                  <div style="font-size: 0.7rem; color: #7C8FAC;"><%= notApplicableByPeriod || notApplicableReason %></div>
+                  <span class="pill pill-muted">Not applicable</span>
+                  <span class="check-sub"><%= notApplicableByPeriod || notApplicableReason %></span>
                 <% } else if (isNotConfigured) { %>
-                  <span style="color: #7C8FAC; font-size: 0.875rem;"><%= check.period_checked === 'needs_sync' ? 'Needs sync' : 'Not configured' %></span>
-                  <div style="font-size: 0.7rem;"><a href="<%= check.type === 'opening_balance_differences' ? '#filed-accounts' : check.type === 'unprocessed_bank' ? '#statement-evidence' : '#bank-reconciliation' %>" class="font-semibold">Configure evidence →</a></div>
+                  <span class="pill pill-muted"><%= check.period_checked === 'needs_sync' ? 'Needs sync' : 'Not configured' %></span>
+                  <a class="check-sub check-sub-link" href="<%= setupAnchor(check) %>" onclick="event.stopPropagation()">Configure evidence →</a>
                 <% } else if (isNotSynced) { %>
-                  <span style="color: #DFE5EF; font-size: 0.875rem;">Not synced</span>
+                  <span class="pill pill-faint">Not synced</span>
                 <% } else if (hasIssues) { %>
-                  <div style="font-weight: 600; font-size: 0.875rem; color: #2A3547;"><%= check.count.toLocaleString('en-GB') %> Issues</div>
-                  <% if (check.potential_value_gbp > 0) { %>
-                    <div style="font-size: 0.75rem; color: #FFAE1F;">£<%= Math.round(check.potential_value_gbp).toLocaleString('en-GB') %></div>
-                  <% } %>
+                  <span class="pill pill-issue pill-<%= check.importance %>"><%= check.count.toLocaleString('en-GB') %> issue<%= check.count === 1 ? '' : 's' %></span>
+                  <% if (check.potential_value_gbp > 0) { %><span class="check-value">£<%= Math.round(check.potential_value_gbp).toLocaleString('en-GB') %></span><% } %>
                 <% } else { %>
-                  <div style="font-weight: 600; font-size: 0.875rem; color: #13DEB9;">OK</div>
+                  <span class="pill pill-ok">OK</span>
                 <% } %>
               </div>
 
-              <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
+              <div class="check-actions">
+                <% if (hasIssues) { %>
+                  <a href="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= check.type %>?<%= periodQuery %>"
+                     onclick="event.stopPropagation()"
+                     class="btn btn-primary btn-sm check-review">View issues</a>
+                <% } %>
                 <% if (!org.freeagent_company_id) { %>
                   <button type="button" class="btn btn-ghost-primary btn-sm"
                     onclick="event.stopPropagation();reanalyseCheck('<%= check.type %>',this)">Reanalyse</button>
                 <% } %>
-                <% if (hasIssues) { %>
-                  <a href="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= check.type %>?<%= periodQuery %>"
-                     onclick="event.stopPropagation()"
-                     class="font-semibold" style="font-size: 0.75rem; white-space: nowrap;">View Issues</a>
-                <% } %>
-                <span style="color: #DFE5EF; font-size: 0.75rem;" id="arrow-<%= check.type %>">▾</span>
+                <span class="check-arrow" id="arrow-<%= check.type %>">▾</span>
               </div>
             </div>
           </div>
