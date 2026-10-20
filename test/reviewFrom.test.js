@@ -72,6 +72,7 @@ test('other period types ignore the review-from date', () => {
 test('the signed accounts date comes from Companies House or an explicit made-up-to date, for that client only', () => {
   const db = new Database(':memory:');
   db.exec("CREATE TABLE filed_accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER, filing_date TEXT, made_up_to TEXT, source TEXT NOT NULL DEFAULT 'manual')");
+  db.exec('CREATE TABLE companies_house_profile (org_id INTEGER PRIMARY KEY, accounts_last_made_up_to TEXT)');
   const add = (org, filing, madeUpTo, source = 'companies_house') => db.prepare('INSERT INTO filed_accounts (org_id, filing_date, made_up_to, source) VALUES (?, ?, ?, ?)').run(org, filing, madeUpTo, source);
   add(1, '2025-12-10', '2025-03-31');
   add(1, '2024-12-10', '2024-03-31');
@@ -85,6 +86,16 @@ test('the signed accounts date comes from Companies House or an explicit made-up
   assert.equal(getSignedAccountsDate(4, db), null);
   assert.equal(getSignedAccountsDate(5, db), '2025-03-31');
   assert.equal(getSignedAccountsDate(99, db), null);
+  // Companies House profile: the last made-up-to date is known even where the filed figures could not be read.
+  db.prepare('INSERT INTO companies_house_profile (org_id, accounts_last_made_up_to) VALUES (?, ?)').run(6, '2025-09-30');   // no filed_accounts row
+  db.prepare('INSERT INTO companies_house_profile (org_id, accounts_last_made_up_to) VALUES (?, ?)').run(1, '2026-03-31');   // newer than the stored row
+  db.prepare('INSERT INTO companies_house_profile (org_id, accounts_last_made_up_to) VALUES (?, ?)').run(2, '2025-03-31');   // older than the stored row
+  db.prepare('INSERT INTO companies_house_profile (org_id, accounts_last_made_up_to) VALUES (?, ?)').run(7, null);
+  assert.equal(getSignedAccountsDate(6, db), '2025-09-30', 'profile only');
+  assert.equal(getSignedAccountsDate(1, db), '2026-03-31', 'the later of profile and filed rows');
+  assert.equal(getSignedAccountsDate(2, db), '2026-03-31');
+  assert.equal(getSignedAccountsDate(7, db), null);
+  db.prepare('UPDATE companies_house_profile SET accounts_last_made_up_to = ? WHERE org_id = 1').run('2025-03-31');
   assert.deepEqual(getReviewFrom({ id: 1, lock_date: '2024-08-31' }, undefined, db), { date: '2025-03-31', source: 'signed_accounts' });
   assert.deepEqual(getReviewFrom({ id: 1, lock_date: '2026-03-31' }, undefined, db), { date: '2026-03-31', source: 'lock_date' });
   assert.deepEqual(getReviewFrom({ id: 1 }, '2025-09-30', db), { date: '2025-09-30', source: 'lock_date' }, 'an explicit lock date overrides the org row');

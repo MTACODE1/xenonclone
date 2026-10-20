@@ -1512,15 +1512,18 @@ function updateFiledAccountsXeroBalance(orgId, filingDate, netAssets) {
   `).run(netAssets, filingDate, orgId, filingDate);
 }
 
-// Last signed accounts year end held for this client, as YYYY-MM-DD, or null. Companies House rows always carry the
-// real made-up-to date. A manual row defaults made_up_to to its FILING date, which falls after the year end, so it only
+// Last signed accounts year end held for this client, as YYYY-MM-DD, or null: the latest of the Companies House profile's
+// last made-up-to date and the filed-accounts rows. Companies House rows always carry the real made-up-to date. A manual row defaults made_up_to to its FILING date, which falls after the year end, so it only
 // counts when the accountant gave a made-up-to date that differs from the filing date.
 function getSignedAccountsDate(orgId, db = getDb()) {
-  const row = db.prepare(`
+  const filed = db.prepare(`
     SELECT MAX(made_up_to) AS d FROM filed_accounts
     WHERE org_id = ? AND made_up_to IS NOT NULL
       AND (source = 'companies_house' OR made_up_to <> filing_date)`).get(orgId);
-  return row && row.d ? String(row.d).slice(0, 10) : null;
+  // The Companies House profile holds the last accounts made-up-to date even where the filed figures could not be read.
+  const profile = db.prepare(`SELECT accounts_last_made_up_to AS d FROM companies_house_profile WHERE org_id = ?`).get(orgId);
+  const dates = [filed && filed.d, profile && profile.d].filter(Boolean).map(d => String(d).slice(0, 10)).sort();
+  return dates.length ? dates[dates.length - 1] : null;
 }
 
 // Where this client's review period starts: the later of its Xero lock date and its last signed accounts date.

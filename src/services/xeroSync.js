@@ -32,7 +32,7 @@ const {
   grossLineAmount, netLineAmount, toDateString,
   buildAccountCodeCanonicaliser, canonicaliseAccountCodes,
   withDisplayOnlyBankFindings,
-  storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, keepFlatRateLargeItems, missingContactDefaults, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, VAGUE_ACCOUNT_NAME, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, keepAtLeast, isUnderMinimumItem, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
+  storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, keepFlatRateLargeItems, missingContactDefaults, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, keepAtLeast, isUnderMinimumItem, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
 const { saveBankLines } = require('../db/bankLines');
@@ -42,7 +42,7 @@ const {
   allocateStatementMatches, extractNetAssetsFromBalanceSheet, balanceSheetHoldsBookkeeping,
   recomputeEvidenceIssues
 } = require('./statementEvidence');
-const { isWithinPeriod, resolvePeriod } = require('./periodResolver');
+const { isWithinPeriod, isWithinPatternWindow, resolvePeriod } = require('./periodResolver');
 
 // Paginated invoice fetch — passing page triggers full record mode (with lineItems)
 const pageDelay = () => new Promise(resolve => setTimeout(resolve, 1000));
@@ -354,16 +354,6 @@ async function runSync(tenantId, progressCallback, options = {}) {
     toDateString(orgInfo.endOfYearLockDate),
   ].filter(Boolean).sort().reverse();
   const actualLockDate = candidates[0] || null;
-  // The review starts from the later of the Xero lock date and the last signed accounts date. The lock date itself
-  // is still stored as the real Xero value (lock_date below); only the period start moves.
-  const reviewFrom = getReviewFrom(org, actualLockDate);
-  const period = resolvePeriod(options.period || {}, {
-    lockDate: reviewFrom.date,
-    lockSource: reviewFrom.source,
-    financialYearEndDay: orgInfo.financialYearEndDay,
-    financialYearEndMonth: orgInfo.financialYearEndMonth,
-    asOf: options.asOf,
-  });
   await updateOrganisationAccountingSettings(orgId, {
     financialYearEndDay: orgInfo.financialYearEndDay,
     financialYearEndMonth: orgInfo.financialYearEndMonth,
@@ -462,6 +452,17 @@ async function runSync(tenantId, progressCallback, options = {}) {
     console.error('Companies House refresh skipped:', chOuterError.message);
   }
 
+  // Resolved after the Companies House refresh above so that a newly filed set of accounts counts in the same sync.
+  // The review starts from the later of the Xero lock date and the last signed accounts date. The lock date itself
+  // is still stored as the real Xero value (lock_date below); only the period start moves.
+  const reviewFrom = getReviewFrom(org, actualLockDate);
+  const period = resolvePeriod(options.period || {}, {
+    lockDate: reviewFrom.date,
+    lockSource: reviewFrom.source,
+    financialYearEndDay: orgInfo.financialYearEndDay,
+    financialYearEndMonth: orgInfo.financialYearEndMonth,
+    asOf: options.asOf,
+  });
   emit({ step: 'period', message: `Using ${period.label}`, period });
   const lockDate = period.start;
 
@@ -609,12 +610,10 @@ async function runSync(tenantId, progressCallback, options = {}) {
   );
   // MTA capitalises assets from £2,000, so £2,000 is the practice floor for every client (Abdur, 20 Oct 2026).
   // Xenon's own per-client figures (£200 for most of its clients) no longer apply; a client can only raise it.
-  const defaultCapitalReviewThreshold = resolveCapitalReviewDefaultThreshold(
-    org, parseFloat(getSetting('capital_review_threshold')) || PRACTICE_POLICY.capitalisationThresholdGbp
-  );
+  const capitalFloor = Math.max(PRACTICE_POLICY.capitalisationThresholdGbp, parseFloat(getSetting('capital_review_threshold')) || 0);
+  const defaultCapitalReviewThreshold = resolveCapitalReviewDefaultThreshold(org, capitalFloor);
   const capitalThresholdFor = code => effectiveCapitalThreshold(
-    accountConfigByCode.get(code)?.capital_review_threshold, defaultCapitalReviewThreshold,
-    parseFloat(getSetting('capital_review_threshold')) || PRACTICE_POLICY.capitalisationThresholdGbp
+    accountConfigByCode.get(code)?.capital_review_threshold, defaultCapitalReviewThreshold, capitalFloor
   );
 
   const purchaseTaxExemptOverrideCodes = new Set(
@@ -1164,10 +1163,9 @@ async function runSync(tenantId, progressCallback, options = {}) {
   lookbackFloorDate.setUTCMonth(lookbackFloorDate.getUTCMonth() - supplierPatternLookbackMonths);
   const multiTaxPatternStart = [period.start, lookbackFloorDate.toISOString().slice(0, 10)]
     .filter(Boolean).sort()[0];
-  const withinMultiAccountWindow = items => items.filter(item => {
-    const date = toDateString(item.date);
-    return date && date >= multiAccountPatternStart && date <= period.end;
-  });
+  // With no lookback this is exactly the review period, whose start day (the lock date or signed year end) is excluded.
+  const withinMultiAccountWindow = items => items.filter(item =>
+    isWithinPatternWindow(toDateString(item.date), period, multiAccountPatternStart));
   const withinPatternWindow = items => items.filter(item => {
     const date = toDateString(item.date);
     return date && date >= multiTaxPatternStart && date <= period.end;
@@ -1426,6 +1424,10 @@ async function runSync(tenantId, progressCallback, options = {}) {
       taxMissingLines.splice(0, taxMissingLines.length, ...dropTaxMissingNoise(taxMissingLines, {
         minAmount: Number.isFinite(parsedMin) ? parsedMin : 1,
         nameByCode: new Map((chartOfAccounts || []).map(a => [a.code, a.name])), skipName: PURCHASE_TAX_NOISE_ACCOUNT_NAME,
+        keepCodes: new Set([
+          ...fixedAssetAccountCodes, ...prepaymentAccountCodes,
+          ...accountCheckConfigurations.filter(a => a.purchase_tax_include_asset_prepayment).map(a => a.account_code),
+        ]),
       }));
       if (flatRateScheme) taxMissingLines.splice(0, taxMissingLines.length, ...keepFlatRateLargeItems(taxMissingLines));
       issue = {
@@ -1790,7 +1792,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     const monitoredExpenseCodes = monitoredMisallocatedExpenseCodes(configuredMisallocatedCodes, expenseAccountCodes, accountNameByCode);
     const monitoredRevenueCodes = new Set(configuredMisallocatedCodes.length
       ? configuredMisallocatedCodes
-      : useVagueGuess ? [...revenueAccountCodes].filter(code => VAGUE_ACCOUNT_NAME.test(accountNameByCode[code])) : []);
+      : useVagueGuess ? [...revenueAccountCodes].filter(code => isVagueAccountName(accountNameByCode[code])) : []);
     const getThresholdForAccount = code =>
       effectiveMisallocatedThreshold(accountConfigByCode.get(code)?.misallocated_threshold, defaultMisallocatedThreshold);
     const misallocated = [
@@ -1806,7 +1808,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       detail_json: JSON.stringify(misallocated),
       period_checked: configuredMisallocatedCodes.length
         ? 'configured_accounts_and_thresholds_since_lock_date'
-        : `vague_account_fallback_gte_${defaultMisallocatedThreshold}_since_lock_date`
+        : `vague_account_fallback_gte_${effectiveMisallocatedThreshold(null, defaultMisallocatedThreshold)}_since_lock_date`
     };
     insertIssue(issue); issueResults.push(issue);
   } catch (err) {
@@ -2069,7 +2071,10 @@ async function runSync(tenantId, progressCallback, options = {}) {
   }
   if (chartOfAccountsAvailable) {
     try {
-      const reviewItems = journalChecks.bankStatementReviewItems(chartOfAccounts);
+      const excludedFromReview = getExcludedBankAccountIds(orgId);
+      const reviewItems = journalChecks.bankStatementReviewItems(
+        chartOfAccounts.filter(account => !(account.type === 'BANK' && excludedFromReview.has(account.accountID)))
+      );
       insertIssue({
         org_id: orgId, check_type: 'bank_statements_review', importance: 'high',
         count: reviewItems.length, potential_value_gbp: 0,

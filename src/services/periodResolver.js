@@ -120,6 +120,15 @@ function isWithinPeriod(value, period) {
   return date >= period.start && date <= period.end;
 }
 
+// A supplier-pattern window that starts at `windowStart`. With no lookback the window starts at period.start and is the
+// review period itself, so it must exclude the start day exactly as isWithinPeriod does (a bill dated on the signed
+// year end belongs to the closed year). With a lookback the start is earlier and inclusive.
+function isWithinPatternWindow(value, period, windowStart) {
+  if (windowStart === period.start) return isWithinPeriod(value, period);
+  const date = isoDate(value instanceof Date ? value : String(value || '').slice(0, 10));
+  return Boolean(date) && date >= windowStart && date <= period.end;
+}
+
 function periodInput(query = {}, fallback = 'since_lock_date') {
   return {
     type: PERIOD_TYPES.includes(query.period) ? query.period : fallback,
@@ -134,6 +143,7 @@ function shouldUseCacheOnlyForReanalysis(activePeriodKey, selectedPeriodKey) {
 
 module.exports = {
   PERIOD_TYPES,
+  isWithinPatternWindow,
   isoDate,
   isWithinPeriod,
   periodInput,

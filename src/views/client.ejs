@@ -693,12 +693,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
             value="<%= org.supplier_pattern_lookback_months == null ? '' : org.supplier_pattern_lookback_months %>"
             placeholder="3" class="form-input" style="width: 80px; padding: 4px 6px;">
         </label>
-        <label style="font-size: 0.875rem; display: flex; align-items: center; gap: 8px;">
-          Multi-Account lookback months
-          <input type="number" min="1" step="1" name="multi_account_pattern_lookback_months"
-            value="<%= org.multi_account_pattern_lookback_months == null ? '' : org.multi_account_pattern_lookback_months %>"
-            placeholder="3" class="form-input" style="width: 80px; padding: 4px 6px;">
-        </label>
+        <span style="font-size: 0.8125rem; color: #7C8FAC;">Multi-Account always checks the selected period only (no lookback).</span>
         <button type="submit" class="btn btn-primary btn-sm">Save</button>
       </form>
     </div>
@@ -725,13 +720,13 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
             Capital Review default threshold (£)
             <input type="number" min="0" step="0.01" name="capital_review_default_threshold_gbp"
               value="<%= org.capital_review_default_threshold_gbp == null ? '' : org.capital_review_default_threshold_gbp %>"
-              placeholder="500" class="form-input" style="width: 100px; padding: 4px 6px;">
+              placeholder="2000 (minimum)" class="form-input" style="width: 130px; padding: 4px 6px;">
           </label>
           <label style="font-size: 0.875rem; display: flex; align-items: center; gap: 8px;">
             Misallocated Items default threshold (£)
             <input type="number" min="0" step="0.01" name="misallocated_items_default_threshold_gbp"
               value="<%= org.misallocated_items_default_threshold_gbp == null ? '' : org.misallocated_items_default_threshold_gbp %>"
-              placeholder="100" class="form-input" style="width: 100px; padding: 4px 6px;">
+              placeholder="1 (maximum)" class="form-input" style="width: 130px; padding: 4px 6px;">
           </label>
         </div>
         <div style="display: flex; align-items: center; gap: 20px; flex-wrap: wrap;">

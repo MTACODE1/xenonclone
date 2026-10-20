@@ -852,9 +852,11 @@ function calculateHealthScore(issues, options = {}) {
 // pence, and VAT does not apply to bank fees or interest income, so those are left out of the counts.
 const BANK_FEE_ACCOUNT_NAME = /\bbank\s*(fees?|charges?)\b/i;
 const INTEREST_INCOME_ACCOUNT_NAME = /\binterest\b/i;
-function dropTaxMissingNoise(lines, { minAmount = 1, nameByCode = new Map(), skipName = null } = {}) {
+// keepCodes: accounts that are never dropped by name (fixed assets and prepayments stay in the check even when their
+// name contains "Rent", for example "Prepaid Rent").
+function dropTaxMissingNoise(lines, { minAmount = 1, nameByCode = new Map(), skipName = null, keepCodes = new Set() } = {}) {
   return lines.filter(line => Math.abs(Number(line.amount) || 0) >= minAmount
-    && !(skipName && skipName.test(String(nameByCode.get(line.accountCode) || ''))));
+    && (keepCodes.has(line.accountCode) || !(skipName && skipName.test(String(nameByCode.get(line.accountCode) || '')))));
 }
 
 
@@ -868,7 +870,17 @@ const PRACTICE_POLICY = Object.freeze({
   minimumItemGbp: 1,                  // multi-account, multi-tax and unexpected tax code ignore items under £1
   multiAccountLookbackMonths: 0,      // multi-account looks at the review period only
 });
-const VAGUE_ACCOUNT_NAME = /\b(general|miscellaneous|misc|sundry|sundries|other|various|uncategori[sz]ed|unallocated|unclassified|unknown)\b/i;
+// A vague account is a catch-all: its name is made only of catch-all words ("General Expenses", "Sundry", "Other Costs",
+// "Miscellaneous"). A name that also says what the money is for ("General Insurance", "Other Direct Costs",
+// "Travel - Other") is a specific account and is not treated as vague.
+const VAGUE_WORDS = new Set(['general', 'miscellaneous', 'misc', 'sundry', 'sundries', 'other', 'various', 'uncategorised',
+  'uncategorized', 'unallocated', 'unclassified', 'unknown']);
+const GENERIC_NOUNS = new Set(['expenses', 'expense', 'costs', 'cost', 'items', 'item', 'income', 'revenue', 'charges', 'charge',
+  'account', 'accounts', 'and', 'the']);
+function isVagueAccountName(name) {
+  const words = String(name || '').toLowerCase().split(/[^a-z]+/).filter(Boolean);
+  return words.some(word => VAGUE_WORDS.has(word)) && words.every(word => VAGUE_WORDS.has(word) || GENERIC_NOUNS.has(word));
+}
 // Purchase Tax Missing ignores these by name: bank fees (no VAT), rent (generally exempt) and mileage claims.
 const PURCHASE_TAX_NOISE_ACCOUNT_NAME = /\bbank\s*(fees?|charges?)\b|\brent\b|mileage/i;
 
@@ -902,16 +914,18 @@ function effectiveCapitalThreshold(accountThreshold, clientDefault, policy = PRA
     : Number(clientDefault) > 0 ? Number(clientDefault) : 0;
   return Math.max(configured, policy);
 }
-// Misallocated threshold: a per-account figure can only make the check stricter (lower), never looser.
-function effectiveMisallocatedThreshold(accountThreshold, clientDefault) {
-  const base = Number.isFinite(Number(clientDefault)) && clientDefault != null ? Number(clientDefault) : PRACTICE_POLICY.misallocatedThresholdGbp;
-  const own = accountThreshold == null ? NaN : Number(accountThreshold);
-  return Number.isFinite(own) ? Math.min(own, base) : base;
+// Misallocated threshold: £1 is the most any client or account may use; a lower figure only makes the check stricter.
+function effectiveMisallocatedThreshold(accountThreshold, clientDefault, ceiling = PRACTICE_POLICY.misallocatedThresholdGbp) {
+  let threshold = ceiling;
+  for (const value of [accountThreshold, clientDefault]) {
+    if (value != null && value !== '' && Number.isFinite(Number(value))) threshold = Math.min(threshold, Number(value));
+  }
+  return Math.max(0, threshold);
 }
 // Expense accounts watched for Misallocated Items: the ones configured for the client plus every vaguely named one.
 function monitoredMisallocatedExpenseCodes(configuredCodes, expenseCodes, nameByCode) {
   const codes = new Set(configuredCodes || []);
-  for (const code of expenseCodes || []) if (VAGUE_ACCOUNT_NAME.test(String(nameByCode[code] || ''))) codes.add(code);
+  for (const code of expenseCodes || []) if (isVagueAccountName(nameByCode[code])) codes.add(code);
   return codes;
 }
 // Single amounts under £1 (and £0 lines) are never worth a finding; used where items are counted one at a time.
@@ -977,7 +991,7 @@ function storedEntitiesForRecalculation(cachedRows, entityType, clientHasAnyStor
 module.exports = {
   storedEntitiesForRecalculation,
   findDuplicatesWithSameNumber,
-  BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise, keepFlatRateLargeItems, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, reviewFromDate, VAGUE_ACCOUNT_NAME, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, keepAtLeast, isUnderMinimumItem, FLAT_RATE_SINGLE_ITEM_LIMIT, missingContactDefaults,
+  BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise, keepFlatRateLargeItems, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, reviewFromDate, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, keepAtLeast, isUnderMinimumItem, FLAT_RATE_SINGLE_ITEM_LIMIT, missingContactDefaults,
   CHECK_DEFAULTS,
   CHECK_DEFINITIONS,
   REVIEW_CHECK_DEFINITIONS,

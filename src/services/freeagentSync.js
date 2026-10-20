@@ -11,7 +11,7 @@ const {
 } = require('../db/queries');
 const {
   NON_SCORED_CHECKS, findDuplicates, excludeDuplicateDrafts, findDuplicateContacts,
-  isOldDocument, selectOldCredits, sumAbsoluteExposure,
+  isOldDocument, isOverdueMoreThan, selectOldCredits, sumAbsoluteExposure,
   resolveDuplicateInvoiceWindowDays, resolveDuplicateBillWindowDays,
   resolveDuplicateInvoiceRequireExactReference, resolveDuplicateInvoiceIncludeFullyPaid,
   resolveDuplicateBillRequireExactReference, resolveDuplicateBillIncludeFullyPaid,
@@ -217,7 +217,7 @@ async function runFreeAgentSync(companyId, progressCallback, options = {}) {
   }
 
   try {
-    const overdue = throughPeriodEnd(accpayAuthorised).filter(i => isOldDocument(i, asOf) && (i.amountDue || 0) > 0);
+    const overdue = throughPeriodEnd(accpayAuthorised).filter(i => isOverdueMoreThan(i, asOf) && (i.amountDue || 0) > 0);
     persistIssue({
       org_id: orgId, check_type: 'old_unpaid_bills', importance: 'high',
       count: overdue.length, potential_value_gbp: sumAbsoluteExposure(overdue, i => i.amountDue),
@@ -225,7 +225,7 @@ async function runFreeAgentSync(companyId, progressCallback, options = {}) {
         id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
         date: toDateString(i.date), dueDate: toDateString(i.dueDate), amountDue: i.amountDue,
       }))),
-      period_checked: 'document_date_over_60_days_ago',
+      period_checked: 'due_date_over_60_days_ago',
     });
   } catch (err) {
     console.error('old_unpaid_bills check failed — skipping (will show as "Not synced"):', err.message);

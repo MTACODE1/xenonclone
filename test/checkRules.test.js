@@ -1097,27 +1097,35 @@ test('capital item threshold is £2,000 for every client and a client can only r
   assert.equal(effectiveCapitalThreshold(0, 0), 2000);
 });
 
-test('misallocated threshold is £1 and a per-account figure can only make it stricter', () => {
+test('misallocated threshold is £1 for every client; a lower figure only makes it stricter', () => {
   const { effectiveMisallocatedThreshold } = require('../src/services/checkRules');
   assert.equal(effectiveMisallocatedThreshold(100, 1), 1, 'the £100 imported from Xenon no longer hides small items');
   assert.equal(effectiveMisallocatedThreshold(null, 1), 1);
   assert.equal(effectiveMisallocatedThreshold(undefined, undefined), 1);
+  assert.equal(effectiveMisallocatedThreshold(null, 100), 1, 'a stored client default of £100 cannot raise it above £1');
+  assert.equal(effectiveMisallocatedThreshold(25, 100), 1);
+  assert.equal(effectiveMisallocatedThreshold(null, 25), 1, 'a practice-wide £1 means every client');
   assert.equal(effectiveMisallocatedThreshold(0, 1), 0, 'flag everything is still allowed');
   assert.equal(effectiveMisallocatedThreshold(0.5, 1), 0.5);
-  assert.equal(effectiveMisallocatedThreshold(null, 25), 25, 'a client default can still raise it deliberately');
+  assert.equal(effectiveMisallocatedThreshold(null, 0.25), 0.25);
+  assert.equal(effectiveMisallocatedThreshold(-5, null), 0, 'a negative figure cannot go below zero');
+  assert.equal(effectiveMisallocatedThreshold('', null), 1, 'a blank form value is no value');
 });
 
 test('vague account names are watched for Misallocated Items on every client', () => {
-  const { VAGUE_ACCOUNT_NAME, monitoredMisallocatedExpenseCodes } = require('../src/services/checkRules');
-  for (const name of ['General Expenses', 'Sundry Expenses', 'Sundries', 'Miscellaneous', 'Misc', 'Other Costs', 'Various', 'Uncategorised', 'Unallocated Expenses', 'Unknown']) {
-    assert.ok(VAGUE_ACCOUNT_NAME.test(name), name);
+  const { isVagueAccountName, monitoredMisallocatedExpenseCodes } = require('../src/services/checkRules');
+  for (const name of ['General Expenses', 'Sundry Expenses', 'Sundries', 'Miscellaneous', 'Misc', 'Other Costs', 'Various', 'Uncategorised',
+    'Unallocated Expenses', 'Unknown', 'Miscellaneous Expenses', 'Other Income', 'Other Revenue', 'General', 'general expenses', 'Sundry & Other']) {
+    assert.ok(isVagueAccountName(name), name);
   }
-  for (const name of ['Printing & Stationery', 'Telephone & Internet', 'Staff Training', 'Equipment Expensed', 'Rent', 'Advertising']) {
-    assert.ok(!VAGUE_ACCOUNT_NAME.test(name), `${name} must not be treated as vague`);
+  // A name that says what the money is for is a specific account, even if it contains a catch-all word.
+  for (const name of ['General Insurance', 'Insurance - General', 'Other Direct Costs', 'Travel - Other', 'Mileage - Other', 'Printing & Stationery',
+    'Telephone & Internet', 'Staff Training', 'Equipment Expensed', 'Rent', 'Advertising', 'Sundry Debtors', 'Motor Expenses', '', null, undefined]) {
+    assert.ok(!isVagueAccountName(name), `${name} must not be treated as vague`);
   }
-  const names = { 429: 'General Expenses', 463: 'IT Software', 480: 'Sundry', 489: 'Telephone' };
-  const codes = monitoredMisallocatedExpenseCodes(['463'], new Set(['429', '463', '480', '489']), names);
-  assert.deepEqual([...codes].sort(), ['429', '463', '480'], 'configured accounts plus every vague one');
+  const names = { 429: 'General Expenses', 463: 'IT Software', 480: 'Sundry', 489: 'Telephone', 433: 'General Insurance' };
+  const codes = monitoredMisallocatedExpenseCodes(['463'], new Set(['429', '463', '480', '489', '433']), names);
+  assert.deepEqual([...codes].sort(), ['429', '463', '480'], 'configured accounts plus every vague one, not General Insurance');
 });
 
 test('Purchase Tax Missing ignores bank fees, rent and mileage accounts by name', () => {
@@ -1184,4 +1192,36 @@ test('a brand-new client (nothing saved) starts on the practice policy without a
   assert.deepEqual([...resolveCapitalReviewCandidateCodes([], { 461: 'Printing', 473: 'Repairs' }, 1)], [], 'once saved, an empty list means none');
   assert.deepEqual([...monitoredMisallocatedExpenseCodes([], new Set(['429', '463']), { 429: 'General Expenses', 463: 'IT Software' })], ['429'],
     'a vague account is watched with no configuration at all');
+});
+
+test('Purchase Tax Missing keeps fixed asset and prepayment accounts even when their name contains Rent', () => {
+  const { PURCHASE_TAX_NOISE_ACCOUNT_NAME: noise, dropTaxMissingNoise } = require('../src/services/checkRules');
+  const nameByCode = new Map([['469', 'Rent'], ['620', 'Prepaid Rent'], ['710', 'Rent Deposit'], ['404', 'Bank Fees']]);
+  const lines = [{ accountCode: '469', amount: 900 }, { accountCode: '620', amount: 900 }, { accountCode: '710', amount: 500 }, { accountCode: '404', amount: 20 }];
+  assert.deepEqual(dropTaxMissingNoise(lines, { nameByCode, skipName: noise }).map(l => l.accountCode), [], 'by name alone all four match');
+  assert.deepEqual(dropTaxMissingNoise(lines, { nameByCode, skipName: noise, keepCodes: new Set(['620', '710']) }).map(l => l.accountCode), ['620', '710'],
+    'prepayment and fixed asset accounts stay in; the rent expense and bank fees are still dropped');
+});
+
+test('a supplier-pattern window with no lookback excludes the period start day, like the period itself', () => {
+  const { resolvePeriod, isWithinPatternWindow } = require('../src/services/periodResolver');
+  const period = resolvePeriod({ type: 'since_lock_date' }, { lockDate: '2025-07-31', asOf: '2026-10-20' });
+  assert.equal(isWithinPatternWindow('2025-07-31', period, period.start), false, 'a bill dated on the signed year end belongs to the closed year');
+  assert.equal(isWithinPatternWindow('2025-08-01', period, period.start), true);
+  assert.equal(isWithinPatternWindow('2026-10-20', period, period.start), true);
+  assert.equal(isWithinPatternWindow('2026-10-21', period, period.start), false);
+  assert.equal(isWithinPatternWindow('2025-07-31', period, '2025-04-30'), true, 'with a lookback the earlier start is inclusive');
+  assert.equal(isWithinPatternWindow('2025-04-29', period, '2025-04-30'), false);
+  assert.equal(isWithinPatternWindow(null, period, period.start), false);
+  const custom = resolvePeriod({ type: 'custom', from: '2025-07-31', to: '2026-10-20' }, { asOf: '2026-10-20' });
+  assert.equal(isWithinPatternWindow('2025-07-31', custom, custom.start), true, 'a custom period includes its first day');
+});
+
+test('the capital floor is £2,000 and the practice setting can only raise it', () => {
+  const { PRACTICE_POLICY, effectiveCapitalThreshold } = require('../src/services/checkRules');
+  const floorFor = setting => Math.max(PRACTICE_POLICY.capitalisationThresholdGbp, parseFloat(setting) || 0);
+  assert.equal(floorFor('200'), 2000, 'an old £200 practice setting cannot lower the floor');
+  assert.equal(floorFor(null), 2000);
+  assert.equal(floorFor('5000'), 5000);
+  assert.equal(effectiveCapitalThreshold(null, null, floorFor('200')), 2000);
 });

@@ -6,7 +6,7 @@ const path = require('path');
 const multer = require('multer');
 const {
   getOrganisationByTenantId, getIssuesForOrg, getIssueByCheckType, updateOrganisationMeta,
-  updateOrganisationSupplierPatternLookback, updateOrganisationMultiAccountPatternLookback,
+  updateOrganisationSupplierPatternLookback,
   updateOrganisationCheckConfig,
   getTransactionCountsForOrg, getBankReconciliationForOrg, updateStatementBalance,
   getExcludedBankAccountIds, setBankAccountExcluded,
@@ -284,8 +284,6 @@ router.post('/:tenantId/supplier-pattern-lookback', express.urlencoded({ extende
   }
   const months = parseInt(req.body.supplier_pattern_lookback_months, 10);
   await updateOrganisationSupplierPatternLookback(org.id, Number.isFinite(months) ? months : null);
-  const multiAccountMonths = parseInt(req.body.multi_account_pattern_lookback_months, 10);
-  await updateOrganisationMultiAccountPatternLookback(org.id, Number.isFinite(multiAccountMonths) ? multiAccountMonths : null);
   res.redirect(`/client/${tenantId}#supplier-pattern-lookback`);
 });
 
