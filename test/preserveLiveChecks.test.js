@@ -105,3 +105,87 @@ test('a full run still refuses to activate without staged transaction counts', (
   db.prepare('DELETE FROM transaction_counts WHERE run_id = 2').run();
   assert.throws(() => activateSqliteResults(db, 1, 2, null, []), /staged transaction counts/);
 });
+
+// ---- Reanalyse on ONE live-only check while viewing another period (a cache-only single-check run) ----
+const { preservedLiveChecks } = require('../src/services/checkRules');
+const fs = require('node:fs');
+const path = require('node:path');
+
+test('which live-only checks are kept depends on the kind of run', () => {
+  const none = new Set();
+  assert.deepEqual(preservedLiveChecks({ cacheOnly: false }, none), [], 'a live run produces them itself');
+  assert.deepEqual(preservedLiveChecks({}, none), []);
+  assert.deepEqual(preservedLiveChecks({ cacheOnly: true }, none), [...LIVE_ONLY_CHECK_TYPES], 'a cache-only full run keeps all three');
+  assert.deepEqual(preservedLiveChecks({ cacheOnly: true }, new Set(['dividend_status'])), ['suspense_open_balance', 'directors_loan_overdrawn'],
+    'a check the run did produce is not kept');
+  assert.deepEqual(preservedLiveChecks({ cacheOnly: true, checkType: 'suspense_open_balance' }, none), ['suspense_open_balance'],
+    'a single live-only check keeps only itself');
+  assert.deepEqual(preservedLiveChecks({ cacheOnly: true, checkType: 'multi_account_suppliers' }, none), [],
+    'a stored-data check is simply recalculated');
+  assert.deepEqual(preservedLiveChecks({ cacheOnly: true, checkType: 'suspense_open_balance' }, new Set(['suspense_open_balance'])), []);
+});
+
+// In the next tests, run 3 is Reanalyse clicked on Suspense while viewing a custom period: cache-only, so it staged nothing.
+test('REGRESSION: a cache-only single-check run on Suspense without preserving blanks it', () => {
+  const db = fixture();
+  activateSqliteResults(db, 1, 3, 'suspense_open_balance', []);
+  assert.equal(active(db, 1).suspense_open_balance, undefined, 'this was the second path to "Not synced"');
+});
+
+test('FIX: a cache-only single-check run on Suspense leaves its last live result, findings and the other checks untouched', () => {
+  const db = fixture();
+  activateSqliteResults(db, 1, 3, 'suspense_open_balance', ['suspense_open_balance']);
+  assert.deepEqual(active(db, 1), {
+    suspense_open_balance: [2, 1], directors_loan_overdrawn: [1, 1], dividend_status: [0, 1], multi_account_suppliers: [5, 1],
+  });
+  const findings = db.prepare("SELECT COUNT(*) AS n FROM issue_findings WHERE org_id = 1 AND check_type = 'suspense_open_balance' AND is_active = 1").get().n;
+  assert.equal(findings, 2, 'the kept check keeps its item-level findings');
+  assert.deepEqual(active(db, 2), { suspense_open_balance: [3, 1] }, 'another client is untouched');
+});
+
+test('the score inputs of a single kept check still list every active check once', () => {
+  const db = fixture();
+  const issues = getIssuesForRun(1, 3, 'suspense_open_balance', ['suspense_open_balance'], db).map(i => i.check_type).sort();
+  assert.deepEqual(issues, ['directors_loan_overdrawn', 'dividend_status', 'multi_account_suppliers', 'suspense_open_balance']);
+  const observed = getScoringObservationsForRun(1, 3, 'suspense_open_balance', ['suspense_open_balance'], db);
+  assert.equal(observed.find(o => o.check_type === 'suspense_open_balance').findings.length, 2);
+  assert.equal(observed.find(o => o.check_type === 'multi_account_suppliers').findings.length, 5);
+  const replaced = getIssuesForRun(1, 3, 'suspense_open_balance', [], db).map(i => i.check_type);
+  assert.ok(!replaced.includes('suspense_open_balance'), 'without preserving, the single check is replaced by what the run staged (nothing)');
+});
+
+test('a single-check run for a stored-data check is unaffected by the preserve list', () => {
+  const db = fixture();
+  db.prepare("UPDATE issues SET run_id = 3 WHERE run_id = 2").run();
+  db.prepare("UPDATE issue_findings SET run_id = 3 WHERE run_id = 2").run();
+  activateSqliteResults(db, 1, 3, 'multi_account_suppliers', ['suspense_open_balance']);
+  assert.deepEqual(active(db, 1).multi_account_suppliers, [7, 3]);
+  assert.deepEqual(active(db, 1).suspense_open_balance, [2, 1]);
+});
+
+test('a check type the run itself staged is never also kept (no duplicate active rows)', () => {
+  const db = fixture();
+  issue2(db, 1, 'suspense_open_balance', 4, 2);                  // run 2 also produced Suspense, live
+  activateSqliteResults(db, 1, 2, null, [...LIVE_ONLY_CHECK_TYPES]);
+  const rows = db.prepare("SELECT run_id, count FROM issues WHERE org_id = 1 AND check_type = 'suspense_open_balance' AND is_active = 1").all();
+  assert.deepEqual(rows, [{ run_id: 2, count: 4 }], 'only the new result is active');
+  const issues = getIssuesForRun(1, 2, null, [...LIVE_ONLY_CHECK_TYPES], db).filter(i => i.check_type === 'suspense_open_balance');
+  assert.equal(issues.length, 1);
+});
+function issue2(db, org, type, count, run) {
+  const id = db.prepare(`INSERT INTO issues (org_id, check_type, importance, count, potential_value_gbp, detail_json, period_checked, run_id, is_active)
+    VALUES (?, ?, 'critical', ?, 0, NULL, 'custom:2025-07-31:2026-10-20', ?, 0)`).run(org, type, count, run).lastInsertRowid;
+  for (let i = 0; i < count; i++) {
+    db.prepare(`INSERT INTO issue_findings (issue_id, org_id, check_type, finding_key, detail_json, potential_value_gbp, run_id, is_active)
+      VALUES (?, ?, ?, ?, '{}', 0, ?, 0)`).run(id, org, type, `${type}-live-${run}-${i}`, run);
+  }
+}
+
+test('GUARD: the sync passes the kept check types to scoring, scoring observations and activation', () => {
+  // The sync cannot run offline, so this pins the three call sites that make the preserve mechanism take effect.
+  const source = fs.readFileSync(path.join(__dirname, '../src/services/xeroSync.js'), 'utf8');
+  assert.match(source, /const preservedCheckTypes = preservedLiveChecks\(options, producedCheckTypes\);/);
+  assert.match(source, /getIssuesForRun\(orgId, runId, options\.checkType \|\| null, preservedCheckTypes\)/);
+  assert.match(source, /getScoringObservationsForRun\(orgId, runId, options\.checkType \|\| null, preservedCheckTypes\)/);
+  assert.match(source, /activateSyncRun\(orgId, runId, options\.checkType \|\| null, preservedCheckTypes\)/);
+});

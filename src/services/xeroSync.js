@@ -32,7 +32,7 @@ const {
   grossLineAmount, netLineAmount, toDateString,
   buildAccountCodeCanonicaliser, canonicaliseAccountCodes,
   withDisplayOnlyBankFindings,
-  storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, keepFlatRateLargeItems, missingContactDefaults, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, VAGUE_ACCOUNT_NAME, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, keepAtLeast, isUnderMinimumItem, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
+  storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, keepFlatRateLargeItems, missingContactDefaults, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, VAGUE_ACCOUNT_NAME, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, keepAtLeast, isUnderMinimumItem, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
 const { saveBankLines } = require('../db/bankLines');
@@ -2370,8 +2370,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // A cache-only recalculation (a custom date range, for example) cannot run the checks that need a live Xero
   // report. Their last result stays in force instead of the check showing "Not synced".
   const producedCheckTypes = new Set(getIssuesForRun(orgId, runId, null).map(i => i.check_type));
-  const preservedCheckTypes = options.cacheOnly && !options.checkType
-    ? LIVE_ONLY_CHECK_TYPES.filter(type => !producedCheckTypes.has(type)) : [];
+  const preservedCheckTypes = preservedLiveChecks(options, producedCheckTypes);
   const reviewedIssues = getIssuesForRun(orgId, runId, options.checkType || null, preservedCheckTypes);
   const scoreBreakdown = calculateScoreBreakdown(
     getScoringObservationsForRun(orgId, runId, options.checkType || null, preservedCheckTypes), {

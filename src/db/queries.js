@@ -480,32 +480,47 @@ function getScoringObservations(orgId) {
   }));
 }
 
-// preserveTypes: check types whose CURRENT active result stays in force although this (full) run did not
-// produce one — used by a cache-only recalculation, which cannot run the checks that need a live Xero call.
+// preserveTypes: check types whose CURRENT active result stays in force although this run did not produce one — used by
+// a cache-only recalculation, which cannot run the checks that need a live Xero call. A type this run did stage is never
+// kept, so a check can never appear twice. For a single-check run, preserving that check's own type means "change nothing".
+function stagedCheckTypes(db, orgId, runId) {
+  return new Set(db.prepare(`SELECT DISTINCT check_type FROM issues WHERE org_id = ? AND run_id = ? AND is_active = 0`)
+    .all(orgId, runId).map(row => row.check_type));
+}
+function typesToKeep(db, orgId, runId, preserveTypes) {
+  if (!preserveTypes || !preserveTypes.length) return [];
+  const staged = stagedCheckTypes(db, orgId, runId);
+  return preserveTypes.filter(type => !staged.has(type));
+}
+
 function getIssuesForRun(orgId, runId, checkType = null, preserveTypes = [], db = getDb()) {
   const staged = db.prepare(`
     SELECT * FROM issues WHERE org_id = ? AND run_id = ? AND is_active = 0
   `).all(orgId, runId);
-  if (!checkType && !preserveTypes.length) return staged;
+  const keep = typesToKeep(db, orgId, runId, preserveTypes);
+  if (!checkType && !keep.length) return staged;
   if (!checkType) {
-    const marks = preserveTypes.map(() => '?').join(',');
+    const marks = keep.map(() => '?').join(',');
     return [
       ...db.prepare(`SELECT * FROM issues WHERE org_id = ? AND is_active = 1 AND check_type IN (${marks})`)
-        .all(orgId, ...preserveTypes),
+        .all(orgId, ...keep),
       ...staged,
     ];
   }
+  const keepsOwnResult = keep.includes(checkType);
   return [
-    ...db.prepare(`
-      SELECT * FROM issues WHERE org_id = ? AND is_active = 1 AND check_type <> ?
-    `).all(orgId, checkType),
+    ...(keepsOwnResult
+      ? db.prepare(`SELECT * FROM issues WHERE org_id = ? AND is_active = 1`).all(orgId)
+      : db.prepare(`SELECT * FROM issues WHERE org_id = ? AND is_active = 1 AND check_type <> ?`).all(orgId, checkType)),
     ...staged,
   ];
 }
 
 function getScoringObservationsForRun(orgId, runId, checkType = null, preserveTypes = [], db = getDb()) {
   const issues = getIssuesForRun(orgId, runId, checkType, preserveTypes, db);
-  const marks = preserveTypes.map(() => '?').join(',');
+  const keep = typesToKeep(db, orgId, runId, preserveTypes);
+  const fullRunKeeps = !checkType ? keep : [];
+  const marks = fullRunKeeps.map(() => '?').join(',');
   const findings = db.prepare(`
     SELECT f.check_type, f.detail_json, f.potential_value_gbp, f.display_only,
       COALESCE((
@@ -519,10 +534,10 @@ function getScoringObservationsForRun(orgId, runId, checkType = null, preserveTy
       ON r.org_id = f.org_id AND r.check_type = f.check_type AND r.finding_key = f.finding_key
     WHERE f.org_id = ? AND (
       (f.run_id = ? AND f.is_active = 0)
-      OR (? IS NOT NULL AND f.is_active = 1 AND f.check_type <> ?)
-      ${preserveTypes.length ? `OR (f.is_active = 1 AND f.check_type IN (${marks}))` : ''}
+      OR (? = 1 AND f.is_active = 1 AND (? = 1 OR f.check_type <> ?))
+      ${fullRunKeeps.length ? `OR (f.is_active = 1 AND f.check_type IN (${marks}))` : ''}
     )
-  `).all(orgId, runId, checkType, checkType, ...preserveTypes);
+  `).all(orgId, runId, checkType ? 1 : 0, checkType && keep.includes(checkType) ? 1 : 0, checkType, ...fullRunKeeps);
   const byCheck = new Map();
   const normalized = new Set();
   for (const finding of findings) {
@@ -568,14 +583,17 @@ function activateSqliteResults(db, orgId, runId, checkType = null, preserveTypes
   `).get(orgId, runId)) {
     throw new Error('Cannot activate a full run without staged transaction counts');
   }
-  const keep = checkType ? [] : preserveTypes;
+  const keep = typesToKeep(db, orgId, runId, preserveTypes);
   const notKept = keep.length ? ` AND check_type NOT IN (${keep.map(() => '?').join(',')})` : '';
   db.transaction(() => {
     if (checkType) {
-      db.prepare(`UPDATE issues SET is_active = 0 WHERE org_id = ? AND is_active = 1 AND check_type = ?`)
-        .run(orgId, checkType);
-      db.prepare(`UPDATE issue_findings SET is_active = 0 WHERE org_id = ? AND is_active = 1 AND check_type = ?`)
-        .run(orgId, checkType);
+      // A single-check run replaces that check, unless it is one the run could not produce: then its last result stays.
+      if (!keep.includes(checkType)) {
+        db.prepare(`UPDATE issues SET is_active = 0 WHERE org_id = ? AND is_active = 1 AND check_type = ?`)
+          .run(orgId, checkType);
+        db.prepare(`UPDATE issue_findings SET is_active = 0 WHERE org_id = ? AND is_active = 1 AND check_type = ?`)
+          .run(orgId, checkType);
+      }
     } else {
       db.prepare(`UPDATE issues SET is_active = 0 WHERE org_id = ? AND is_active = 1${notKept}`).run(orgId, ...keep);
       db.prepare(`UPDATE issue_findings SET is_active = 0 WHERE org_id = ? AND is_active = 1${notKept}`).run(orgId, ...keep);

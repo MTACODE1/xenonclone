@@ -887,6 +887,14 @@ function reviewFromDate(lockDate, signedAccountsDate, asOf = new Date().toISOStr
 // Checks that need a live Xero report and so cannot run in a cache-only recalculation. The result from the last live
 // sync stays in force for these (all three describe the position today, not the review period).
 const LIVE_ONLY_CHECK_TYPES = Object.freeze(['suspense_open_balance', 'directors_loan_overdrawn', 'dividend_status']);
+// The live-only checks whose last result must stay in force for this run: a cache-only run (a custom period, or the
+// Reanalyse button on one check while viewing another period) cannot produce them, and replacing them with nothing
+// shows "Not synced". A full run keeps all three it did not produce; a single-check run keeps only its own check.
+function preservedLiveChecks(options = {}, producedTypes = new Set()) {
+  if (!options.cacheOnly) return [];
+  const candidates = options.checkType ? LIVE_ONLY_CHECK_TYPES.filter(type => type === options.checkType) : LIVE_ONLY_CHECK_TYPES;
+  return candidates.filter(type => !producedTypes.has(type));
+}
 
 // Capital item threshold: the practice policy is a floor. A client may set a higher figure, never a lower one.
 function effectiveCapitalThreshold(accountThreshold, clientDefault, policy = PRACTICE_POLICY.capitalisationThresholdGbp) {
@@ -969,7 +977,7 @@ function storedEntitiesForRecalculation(cachedRows, entityType, clientHasAnyStor
 module.exports = {
   storedEntitiesForRecalculation,
   findDuplicatesWithSameNumber,
-  BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise, keepFlatRateLargeItems, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, reviewFromDate, VAGUE_ACCOUNT_NAME, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, keepAtLeast, isUnderMinimumItem, FLAT_RATE_SINGLE_ITEM_LIMIT, missingContactDefaults,
+  BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise, keepFlatRateLargeItems, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, reviewFromDate, VAGUE_ACCOUNT_NAME, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, keepAtLeast, isUnderMinimumItem, FLAT_RATE_SINGLE_ITEM_LIMIT, missingContactDefaults,
   CHECK_DEFAULTS,
   CHECK_DEFINITIONS,
   REVIEW_CHECK_DEFINITIONS,
