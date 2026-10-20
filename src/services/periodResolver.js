@@ -51,7 +51,8 @@ function resolvePeriod(input = {}, context = {}) {
 
   if (type === 'since_lock_date') {
     start = isoDate(context.lockDate) || '2000-01-01';
-    label = context.lockDate ? `Since lock date (${start})` : `All activity to ${end}`;
+    label = !context.lockDate ? `All activity to ${end}`
+      : context.lockSource === 'signed_accounts' ? `Since last signed accounts (${start})` : `Since lock date (${start})`;
   } else if (type === 'current_month') {
     start = `${asOf.slice(0, 7)}-01`;
     label = `Current month (${start} to ${end})`;

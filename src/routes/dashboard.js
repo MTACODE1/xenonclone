@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const {
   getAllOrganisations, getOrganisationByTenantId, getSetting, getAllTransactionCounts,
-  getPanoramaOrganisations, getOrgIdsForStaff, getStaffForOrg, getAllStaff,
+  getPanoramaOrganisations, getOrgIdsForStaff, getStaffForOrg, getAllStaff, getReviewFrom,
 } = require('../db/queries');
 const { isStaffManager } = require('../services/staffPermissions');
 const { parseBankLineFilters, sendBankLinesCsv, bankLinesPageData } = require('./bankLinesShared');
@@ -28,8 +28,10 @@ async function startOrganisationJob(tenantId, query = {}, checkType = null, { pr
   const org = await getOrganisationByTenantId(tenantId);
   let cacheOnly, asOf;
   if (checkType) {
+    const reviewFrom = org ? getReviewFrom(org) : { date: null, source: null };
     const resolvedPeriod = resolvePeriod(period, {
-      lockDate: org?.lock_date,
+      lockDate: reviewFrom.date,
+      lockSource: reviewFrom.source,
       financialYearEndDay: org?.financial_year_end_day,
       financialYearEndMonth: org?.financial_year_end_month,
     });

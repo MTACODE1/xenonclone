@@ -1085,3 +1085,103 @@ test('Recalculating from stored data: an empty record type is fine, a client wit
   // A client with nothing stored cannot be recalculated.
   assert.throws(() => storedEntitiesForRecalculation([], 'invoice', false), /No cached invoice data/);
 });
+
+// ---- Practice rules agreed with the accountants, 20 Oct 2026 ----
+test('capital item threshold is £2,000 for every client and a client can only raise it', () => {
+  const { effectiveCapitalThreshold, PRACTICE_POLICY } = require('../src/services/checkRules');
+  assert.equal(PRACTICE_POLICY.capitalisationThresholdGbp, 2000);
+  assert.equal(effectiveCapitalThreshold(200, null), 2000, 'a £200 figure imported from Xenon no longer applies');
+  assert.equal(effectiveCapitalThreshold(null, 200), 2000, 'nor does a £200 client default');
+  assert.equal(effectiveCapitalThreshold(null, null), 2000);
+  assert.equal(effectiveCapitalThreshold(5000, 2000), 5000, 'a higher figure is respected');
+  assert.equal(effectiveCapitalThreshold(0, 0), 2000);
+});
+
+test('misallocated threshold is £1 and a per-account figure can only make it stricter', () => {
+  const { effectiveMisallocatedThreshold } = require('../src/services/checkRules');
+  assert.equal(effectiveMisallocatedThreshold(100, 1), 1, 'the £100 imported from Xenon no longer hides small items');
+  assert.equal(effectiveMisallocatedThreshold(null, 1), 1);
+  assert.equal(effectiveMisallocatedThreshold(undefined, undefined), 1);
+  assert.equal(effectiveMisallocatedThreshold(0, 1), 0, 'flag everything is still allowed');
+  assert.equal(effectiveMisallocatedThreshold(0.5, 1), 0.5);
+  assert.equal(effectiveMisallocatedThreshold(null, 25), 25, 'a client default can still raise it deliberately');
+});
+
+test('vague account names are watched for Misallocated Items on every client', () => {
+  const { VAGUE_ACCOUNT_NAME, monitoredMisallocatedExpenseCodes } = require('../src/services/checkRules');
+  for (const name of ['General Expenses', 'Sundry Expenses', 'Sundries', 'Miscellaneous', 'Misc', 'Other Costs', 'Various', 'Uncategorised', 'Unallocated Expenses', 'Unknown']) {
+    assert.ok(VAGUE_ACCOUNT_NAME.test(name), name);
+  }
+  for (const name of ['Printing & Stationery', 'Telephone & Internet', 'Staff Training', 'Equipment Expensed', 'Rent', 'Advertising']) {
+    assert.ok(!VAGUE_ACCOUNT_NAME.test(name), `${name} must not be treated as vague`);
+  }
+  const names = { 429: 'General Expenses', 463: 'IT Software', 480: 'Sundry', 489: 'Telephone' };
+  const codes = monitoredMisallocatedExpenseCodes(['463'], new Set(['429', '463', '480', '489']), names);
+  assert.deepEqual([...codes].sort(), ['429', '463', '480'], 'configured accounts plus every vague one');
+});
+
+test('Purchase Tax Missing ignores bank fees, rent and mileage accounts by name', () => {
+  const { PURCHASE_TAX_NOISE_ACCOUNT_NAME: noise, dropTaxMissingNoise } = require('../src/services/checkRules');
+  for (const name of ['Bank Fees', 'Bank Charges', 'Rent', 'Rent & Rates', 'Mileage', 'Staff Mileage', 'Travel - Mileage']) assert.ok(noise.test(name), name);
+  for (const name of ['Telephone & Internet', 'Equipment Rental', 'Current Assets', 'Parent Company Charges', 'Legal & Professional']) assert.ok(!noise.test(name), `${name} must stay in the check`);
+  const nameByCode = new Map([['404', 'Bank Fees'], ['469', 'Rent'], ['493', 'Mileage'], ['489', 'Telephone & Internet']]);
+  const lines = [{ accountCode: '404', amount: 20 }, { accountCode: '469', amount: 900 }, { accountCode: '493', amount: 45 }, { accountCode: '489', amount: 60 }];
+  assert.deepEqual(dropTaxMissingNoise(lines, { nameByCode, skipName: noise }).map(l => l.accountCode), ['489']);
+});
+
+test('items under £1 are dropped from Unexpected Tax Code', () => {
+  const { keepAtLeast } = require('../src/services/checkRules');
+  assert.deepEqual(keepAtLeast([{ amount: 0.99 }, { amount: 1 }, { amount: -50 }, { amount: 0 }]).map(i => i.amount), [1, -50]);
+});
+
+test('the Bank Statements Review check is defined, described and never scored', () => {
+  const { ALL_CHECK_DEFINITIONS, NON_SCORED_CHECKS } = require('../src/services/checkRules');
+  const descriptions = require('../src/data/checkDescriptions');
+  assert.ok(ALL_CHECK_DEFINITIONS.some(c => c.type === 'bank_statements_review'));
+  assert.ok(NON_SCORED_CHECKS.includes('bank_statements_review'), 'a reminder must not move the health score');
+  assert.match(descriptions.bank_statements_review.issue, /Bank statements tab/);
+});
+
+test('Old Unpaid Bills age from the due date, so a bill not due until next year is not overdue', () => {
+  const { isOverdueMoreThan } = require('../src/services/checkRules');
+  const asOf = new Date('2026-10-20T00:00:00.000Z');
+  // Harlow's three flagged bills from Abdur's review
+  assert.equal(isOverdueMoreThan({ date: '2026-07-10', dueDate: '2027-06-24' }, asOf), false, 'PolicyBee: part-paid, due Jun 2027');
+  assert.equal(isOverdueMoreThan({ date: '2026-04-21', dueDate: '2026-06-21' }, asOf), true, 'Bionic: 121 days past due');
+  assert.equal(isOverdueMoreThan({ date: '2026-03-16', dueDate: '2026-06-16' }, asOf), true, 'Harlow Council: 126 days past due');
+  assert.equal(isOverdueMoreThan({ date: '2026-08-01', dueDate: '2026-08-31' }, asOf), false, '50 days past due is not yet old');
+  assert.equal(isOverdueMoreThan({ date: '2026-08-01', dueDate: '2026-08-21' }, asOf), false, 'exactly 60 days is not more than 60');
+  assert.equal(isOverdueMoreThan({ date: '2026-08-01' }, asOf), true, 'no due date: falls back to the bill date');
+});
+
+test('single items under £1 are ignored, £1 and over are kept (Multi-Account, Multi-Tax, Unexpected Tax Code)', () => {
+  const { isUnderMinimumItem } = require('../src/services/checkRules');
+  assert.equal(isUnderMinimumItem(0), true);
+  assert.equal(isUnderMinimumItem(0.99), true);
+  assert.equal(isUnderMinimumItem(-0.5), true, 'credit lines are judged by size');
+  assert.equal(isUnderMinimumItem(1), false, '£1 exactly is kept');
+  assert.equal(isUnderMinimumItem(-25), false);
+  assert.equal(isUnderMinimumItem(undefined), true);
+  assert.equal(isUnderMinimumItem(null), true);
+  assert.equal(isUnderMinimumItem('abc'), true);
+});
+
+test('a brand-new client (nothing saved) starts on the practice policy without anyone configuring it', () => {
+  const {
+    PRACTICE_POLICY, effectiveCapitalThreshold, effectiveMisallocatedThreshold, resolveCapitalReviewDefaultThreshold,
+    resolveMisallocatedItemsDefaultThreshold, resolveCapitalReviewCandidateCodes, resolvePurchaseTaxMissingExcludeCodes,
+    monitoredMisallocatedExpenseCodes,
+  } = require('../src/services/checkRules');
+  const fresh = { capital_review_default_threshold_gbp: null, misallocated_items_default_threshold_gbp: null, purchase_tax_missing_exclude_codes: null, account_settings_initialised: 0 };
+  const capitalDefault = resolveCapitalReviewDefaultThreshold(fresh, PRACTICE_POLICY.capitalisationThresholdGbp);
+  assert.equal(effectiveCapitalThreshold(null, capitalDefault), 2000, 'capital items are reviewed from £2,000');
+  assert.equal(effectiveCapitalThreshold(200, capitalDefault), 2000, 'Xenon\'s £200 per-account figure no longer applies');
+  const misallocatedDefault = resolveMisallocatedItemsDefaultThreshold(fresh, 1);
+  assert.equal(effectiveMisallocatedThreshold(null, misallocatedDefault), 1, 'misallocated items are flagged from £1');
+  assert.equal(resolvePurchaseTaxMissingExcludeCodes(fresh, 'practice-list'), 'practice-list', 'nothing saved falls through to the practice list');
+  assert.deepEqual([...resolveCapitalReviewCandidateCodes([], { 461: 'Printing', 473: 'Repairs', 429: 'General Expenses' }, 0)].sort(), ['461', '473'],
+    'the documented 461/473 candidates apply until the accountant saves the account settings');
+  assert.deepEqual([...resolveCapitalReviewCandidateCodes([], { 461: 'Printing', 473: 'Repairs' }, 1)], [], 'once saved, an empty list means none');
+  assert.deepEqual([...monitoredMisallocatedExpenseCodes([], new Set(['429', '463']), { 429: 'General Expenses', 463: 'IT Software' })], ['429'],
+    'a vague account is watched with no configuration at all');
+});

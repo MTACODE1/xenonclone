@@ -16,6 +16,7 @@ const CHECK_TYPES = Object.freeze({
   dividendStatus: 'dividend_status',
   historicalChanges: 'historical_changes',
   motorVehicleExpenses: 'motor_vehicle_expenses',
+  bankStatementsReview: 'bank_statements_review',
 });
 
 const DISPOSAL_NAME = /disposal|gain on|loss on|profit on|sale of|sold/i;
@@ -468,6 +469,20 @@ function joiningEstimates({ scheme, taxableNet, limits = VAT_LIMITS }) {
 // A business that works under the Construction Industry Scheme is not allowed to use the VAT Flat Rate
 // Scheme. Xero does not say whether a client is CIS registered, so the evidence is the books: an account
 // with "CIS" in its name that has had postings in the rolling window. It is a prompt to confirm, not a ruling.
+// Xero's CIS settings call answers "cannot be found" for an organisation that has never set CIS up, which means
+// not registered. Any other failure leaves the registration unknown (null) so the posting-based guess still applies.
+function cisSettingsFromResponse(body) {
+  const setting = ((body && (body.cISSettings || body.cisSettings)) || [])[0] || {};
+  return {
+    contractor: !!(setting.cISContractorEnabled ?? setting.cisContractorEnabled),
+    subContractor: !!(setting.cISSubContractorEnabled ?? setting.cisSubContractorEnabled),
+  };
+}
+function cisSettingsFromError(err) {
+  const status = err?.response?.statusCode ?? err?.statusCode;
+  const text = JSON.stringify(err?.response?.body ?? err?.message ?? '');
+  return status === 404 || /cannot be found|not found/i.test(text) ? { contractor: false, subContractor: false } : null;
+}
 const CIS_NAME = /\bCIS\b/i;
 const lineDate = d => String(d.date || d.journalDate || '').slice(0, 10);
 function cisWithFlatRate({ scheme, accounts, documents, journals, from, to, cis }) {
@@ -502,6 +517,20 @@ function cisWithFlatRate({ scheme, accounts, documents, journals, from, to, cis 
     description: `This client is on the VAT Flat Rate Scheme but has ${postings} posting(s) to CIS accounts in the last 12 months. A business registered for the Construction Industry Scheme cannot use the Flat Rate Scheme - confirm whether the client is CIS registered.`,
     amount: postings, level: 'review', rule: 'cis_flat_rate', limit: null,
   }];
+}
+
+
+// A standing reminder, not a finding: Xero's API cannot see the unreconciled lines on the Bank statements tab, so every
+// client gets one line per bank account asking the reviewer to look there. It always shows as "Review".
+function bankStatementReviewItems(accounts) {
+  const banks = (accounts || []).filter(a => String(a.type || '').toUpperCase() === 'BANK' && String(a.status || 'ACTIVE').toUpperCase() !== 'ARCHIVED');
+  const make = (id, name, code) => ({
+    documentId: `bank-statements-${id}`, number: null, date: null, source: 'bank_statements', accountCode: code || null, accountName: name,
+    description: `Open ${name} in Xero, go to the Bank statements tab and confirm there are no unreconciled statement lines.`,
+    amount: 0, level: 'review', rule: 'bank_statements_review', limit: null,
+  });
+  if (!banks.length) return [make('all', 'the bank accounts', null)];
+  return banks.map(a => make(a.accountID || a.code || a.name, a.name || a.code || 'the bank account', a.code));
 }
 
 // ---- Motor vehicle expenses ----
@@ -570,5 +599,5 @@ module.exports = {
   CHECK_TYPES, VAT_LIMITS, indexAccounts, detectUnusualJournals, suspenseOpenBalances, balanceSheetRows,
   directorsLoanAlerts, netProfitFromReport, dividendStatus, historicalChanges,
   taxReviewByCode, supplierPaymentSources, joiningEstimates, classifyVatScheme, rollingVatTurnover, evaluateVatScheme,
-  cisWithFlatRate, motorVehicleExpenses,
+  cisWithFlatRate, cisSettingsFromResponse, cisSettingsFromError, motorVehicleExpenses, bankStatementReviewItems,
 };

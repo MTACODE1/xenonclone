@@ -12,7 +12,7 @@ const {
   createSyncRun, finishSyncRun, activateSyncRun, getIssuesForRun, getScoringObservationsForRun,
   mergeEntityCache, getCachedEntities, getEntityCacheWatermark,
   updateOrganisationCompanyNumber, upsertCompaniesHouseProfile, getCompaniesHouseProfileForOrg,
-  upsertFiledAccountsFromCompaniesHouse, recordFiledAccountsExtraction, getFiledAccountsExtractionsForOrg
+  upsertFiledAccountsFromCompaniesHouse, recordFiledAccountsExtraction, getFiledAccountsExtractionsForOrg, getReviewFrom
 } = require('../db/queries');
 const { fetchCompanyProfile, findCompanyNumberByName, fetchFiledNetAssets, normalizeCompanyNumber } = require('./companiesHouse');
 const { getDb: getDatabase } = require('../db/schema');
@@ -20,7 +20,7 @@ const {
   CHECK_DEFAULTS, CHECK_DEFINITIONS, ALL_CHECK_DEFINITIONS, NON_SCORED_CHECKS, calculateHealthScore, findDirectMatches,
   findDuplicateContacts, findDuplicates, excludeDuplicateDrafts, selectUnapprovedBills, findUnexpectedDefaultLines,
   findMisallocatedLines, resolveCapitalReviewCandidateCodes,
-  isOldDocument, isPurchaseTaxExemptAccount, resolvePeriodChecked, resolveSupplierPatternLookbackMonths,
+  isOldDocument, isOverdueMoreThan, isPurchaseTaxExemptAccount, resolvePeriodChecked, resolveSupplierPatternLookbackMonths,
   resolveMultiAccountPatternLookbackMonths,
   resolveMultiAccountSuppliersMinValue, resolveMultiTaxSuppliersMinValue,
   resolveCapitalReviewDefaultThreshold, resolveMisallocatedItemsDefaultThreshold,
@@ -32,7 +32,7 @@ const {
   grossLineAmount, netLineAmount, toDateString,
   buildAccountCodeCanonicaliser, canonicaliseAccountCodes,
   withDisplayOnlyBankFindings,
-  storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, keepFlatRateLargeItems, missingContactDefaults, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
+  storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, keepFlatRateLargeItems, missingContactDefaults, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, VAGUE_ACCOUNT_NAME, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, keepAtLeast, isUnderMinimumItem, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
 const { saveBankLines } = require('../db/bankLines');
@@ -323,13 +323,9 @@ async function runSync(tenantId, progressCallback, options = {}) {
         if (organisations[0]?.organisationID) {
           try {
             const cisResp = await xero.accountingApi.getOrganisationCISSettings(tid, organisations[0].organisationID);
-            const setting = (cisResp.body.cISSettings || cisResp.body.cisSettings || [])[0] || {};
-            organisations[0].cisSettings = {
-              contractor: !!(setting.cISContractorEnabled ?? setting.cisContractorEnabled),
-              subContractor: !!(setting.cISSubContractorEnabled ?? setting.cisSubContractorEnabled),
-            };
+            organisations[0].cisSettings = journalChecks.cisSettingsFromResponse(cisResp.body);
           } catch (cisErr) {
-            organisations[0].cisSettings = null;
+            organisations[0].cisSettings = journalChecks.cisSettingsFromError(cisErr);
           }
         }
         return organisations;
@@ -358,8 +354,12 @@ async function runSync(tenantId, progressCallback, options = {}) {
     toDateString(orgInfo.endOfYearLockDate),
   ].filter(Boolean).sort().reverse();
   const actualLockDate = candidates[0] || null;
+  // The review starts from the later of the Xero lock date and the last signed accounts date. The lock date itself
+  // is still stored as the real Xero value (lock_date below); only the period start moves.
+  const reviewFrom = getReviewFrom(org, actualLockDate);
   const period = resolvePeriod(options.period || {}, {
-    lockDate: actualLockDate,
+    lockDate: reviewFrom.date,
+    lockSource: reviewFrom.source,
     financialYearEndDay: orgInfo.financialYearEndDay,
     financialYearEndMonth: orgInfo.financialYearEndMonth,
     asOf: options.asOf,
@@ -607,12 +607,14 @@ async function runSync(tenantId, progressCallback, options = {}) {
   const capitalReviewCandidateCodes = resolveCapitalReviewCandidateCodes(
     accountCheckConfigurations, accountNameByCode, org.account_settings_initialised
   );
-  // £200 is the fallback: Xenon's own per-client capital review settings (read live on 9 Oct 2026)
-  // are £200 for 21 of the 26 comparison clients and £2,000 for the other five (Pegesus, Bevilacqua,
-  // Harlow, Positive Internet, MNM Automotive), which carry a per-client override in Akrio instead.
-  // A blanket £2,000 removed capital items Xenon still reports on the £200 clients (e.g. Highland).
+  // MTA capitalises assets from £2,000, so £2,000 is the practice floor for every client (Abdur, 20 Oct 2026).
+  // Xenon's own per-client figures (£200 for most of its clients) no longer apply; a client can only raise it.
   const defaultCapitalReviewThreshold = resolveCapitalReviewDefaultThreshold(
-    org, parseFloat(getSetting('capital_review_threshold')) || 200
+    org, parseFloat(getSetting('capital_review_threshold')) || PRACTICE_POLICY.capitalisationThresholdGbp
+  );
+  const capitalThresholdFor = code => effectiveCapitalThreshold(
+    accountConfigByCode.get(code)?.capital_review_threshold, defaultCapitalReviewThreshold,
+    parseFloat(getSetting('capital_review_threshold')) || PRACTICE_POLICY.capitalisationThresholdGbp
   );
 
   const purchaseTaxExemptOverrideCodes = new Set(
@@ -1038,10 +1040,12 @@ async function runSync(tenantId, progressCallback, options = {}) {
     console.error('old_sales_credits check failed — skipping (will show as "Not synced"):', err.message);
   }
 
-  // --- HIGH: Old Unpaid Bills (document date older than 60 days) ---
+  // --- HIGH: Old Unpaid Bills (more than 60 days past the due date, still unpaid) ---
+  // Aged from the due date, not the bill date (Abdur, 20 Oct 2026): a part-paid annual bill dated Jul 2026 and due
+  // Jun 2027 is not overdue. Customer invoices still age from the invoice date until the practice says otherwise.
   try {
     const asOf = new Date(`${period.end}T00:00:00.000Z`);
-    const overdue = throughPeriodEnd(accpayAuthorised).filter(i => isOldDocument(i, asOf) && (i.amountDue || 0) > 0);
+    const overdue = throughPeriodEnd(accpayAuthorised).filter(i => isOverdueMoreThan(i, asOf) && (i.amountDue || 0) > 0);
     const issue = {
       org_id: orgId, check_type: 'old_unpaid_bills', importance: 'high',
       count: overdue.length, potential_value_gbp: sumAbsoluteExposure(overdue, i => i.amountDue),
@@ -1049,7 +1053,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
         id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
         date: toDateString(i.date), dueDate: toDateString(i.dueDate), amountDue: i.amountDue
       }))),
-      period_checked: 'document_date_over_60_days_ago'
+      period_checked: 'due_date_over_60_days_ago'
     };
     insertIssue(issue); issueResults.push(issue);
   } catch (err) {
@@ -1141,7 +1145,8 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // one — widening multi-tax for a client (e.g. Handymanz to 18 months) must not also widen
   // multi-account, which is validated separately against its own 12-month default.
   const supplierPatternLookbackMonths = resolveSupplierPatternLookbackMonths(org);
-  const multiAccountLookbackMonths = resolveMultiAccountPatternLookbackMonths(org);
+  // Period only for every client (Abdur, 20 Oct 2026): a lookback saved on a client record no longer widens it.
+  const multiAccountLookbackMonths = PRACTICE_POLICY.multiAccountLookbackMonths;
   // Anchored to period.start, not period.end: the lookback exists to see a bit further back than
   // the period itself, to catch a supplier who switched accounts just before the period began. For
   // a long-running "since lock date" period (common — lock dates often go months without moving),
@@ -1206,6 +1211,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     // separate from the aggregate totals above, which drive the actual count/value calculation.
     const record = (contactId, name, lineAmount, accountCode, isSinceLD, txMeta) => {
       if (!contactId || !accountCode) return;
+      if (isUnderMinimumItem(lineAmount)) return;   // items under £1 are ignored
       if (!allTime[contactId]) allTime[contactId] = { name, accountAmounts: {}, transactions: [] };
       const amount = Math.abs(lineAmount || 0);
       allTime[contactId].accountAmounts[accountCode] = (allTime[contactId].accountAmounts[accountCode] || 0) + amount;
@@ -1285,7 +1291,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
         // lineAmount=24, taxAmount=24) nets to exactly £0 below despite being a real £24
         // transaction on a real tax code, and gating on the post-conversion net value would wrongly
         // treat that as a phantom line and silently drop the tax code it uses.
-        if ((line.lineAmount || 0) === 0) continue;
+        if (isUnderMinimumItem(line.lineAmount)) continue;   // £0 and items under £1 do not count
         // Net (ex-VAT), not raw/mixed: a tax-code inconsistency is about the taxable base, and
         // reconstructing net per-line (via the transaction's own lineAmountTypes) rather than
         // trusting lineAmount's mixed inclusive/exclusive convention closed Fast Track Excavations
@@ -1419,7 +1425,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       const parsedMin = parseFloat(getSetting('tax_missing_min_amount'));
       taxMissingLines.splice(0, taxMissingLines.length, ...dropTaxMissingNoise(taxMissingLines, {
         minAmount: Number.isFinite(parsedMin) ? parsedMin : 1,
-        nameByCode: new Map((chartOfAccounts || []).map(a => [a.code, a.name])), skipName: BANK_FEE_ACCOUNT_NAME,
+        nameByCode: new Map((chartOfAccounts || []).map(a => [a.code, a.name])), skipName: PURCHASE_TAX_NOISE_ACCOUNT_NAME,
       }));
       if (flatRateScheme) taxMissingLines.splice(0, taxMissingLines.length, ...keepFlatRateLargeItems(taxMissingLines));
       issue = {
@@ -1535,7 +1541,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
           // Xenon Capital Item Review compares net (ex-VAT). Bank SPEND lines are usually
           // Inclusive, so raw lineAmount would overstate and inflate the count.
           const amount = Math.abs(netLineAmount(bill, line));
-          const threshold = accountConfigByCode.get(line.accountCode)?.capital_review_threshold || defaultCapitalReviewThreshold;
+          const threshold = capitalThresholdFor(line.accountCode);
           if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)) {
             capitalItems.push({
               invoiceId: bill.invoiceID, contact: bill.contact?.name,
@@ -1548,7 +1554,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       for (const txn of inPeriod(bankSpendTxns || [])) {
         for (const line of (txn.lineItems || [])) {
           const amount = Math.abs(netLineAmount(txn, line));
-          const threshold = accountConfigByCode.get(line.accountCode)?.capital_review_threshold || defaultCapitalReviewThreshold;
+          const threshold = capitalThresholdFor(line.accountCode);
           if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)) {
             capitalItems.push({
               invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
@@ -1563,7 +1569,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       for (const txn of bankReceiveTxns) {
         for (const line of (txn.lineItems || [])) {
           const amount = Math.abs(netLineAmount(txn, line));
-          const threshold = accountConfigByCode.get(line.accountCode)?.capital_review_threshold || defaultCapitalReviewThreshold;
+          const threshold = capitalThresholdFor(line.accountCode);
           if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)) {
             capitalItems.push({
               invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
@@ -1758,7 +1764,6 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // --- MEDIUM: Misallocated Items (lines on vaguely-named accounts >= threshold since lock date) ---
   try {
     if (!chartOfAccountsAvailable) throw new Error('chart of accounts unavailable this sync — cannot classify accounts');
-    const VAGUE_ACCOUNT_NAME = /\b(general|miscellaneous|misc|sundry|other|various)\b/i;
     // £1 by default (ignores pence only). It was £100, which hid real items such as two £31.50 DVLA payments
     // posted to General Expenses; a practice or client setting can still raise it.
     const practiceMisallocatedThreshold = parseFloat(getSetting('misallocated_items_threshold'));
@@ -1780,14 +1785,14 @@ async function runSync(tenantId, progressCallback, options = {}) {
     // Once a client's accounts have been configured, an empty list means "monitor nothing" (as in
     // Xenon) — the vague-name guess is only for clients nobody has configured yet.
     const useVagueGuess = !configuredMisallocatedCodes.length && !org.account_settings_initialised;
-    const monitoredExpenseCodes = new Set(configuredMisallocatedCodes.length
-      ? configuredMisallocatedCodes
-      : useVagueGuess ? [...expenseAccountCodes].filter(code => VAGUE_ACCOUNT_NAME.test(accountNameByCode[code])) : []);
+    // Expense side: the configured accounts plus every vaguely named account, for every client, because a GL account
+    // called General Expenses or similar should not be used at all. Revenue side stays as configured.
+    const monitoredExpenseCodes = monitoredMisallocatedExpenseCodes(configuredMisallocatedCodes, expenseAccountCodes, accountNameByCode);
     const monitoredRevenueCodes = new Set(configuredMisallocatedCodes.length
       ? configuredMisallocatedCodes
       : useVagueGuess ? [...revenueAccountCodes].filter(code => VAGUE_ACCOUNT_NAME.test(accountNameByCode[code])) : []);
     const getThresholdForAccount = code =>
-      accountConfigByCode.get(code)?.misallocated_threshold ?? defaultMisallocatedThreshold;
+      effectiveMisallocatedThreshold(accountConfigByCode.get(code)?.misallocated_threshold, defaultMisallocatedThreshold);
     const misallocated = [
       ...findMisallocatedLines(inPeriod(accpayAuthorised), monitoredExpenseCodes, getThresholdForAccount, 'bill'),
       ...findMisallocatedLines(inPeriod(accrecAuthorised), monitoredRevenueCodes, getThresholdForAccount, 'invoice'),
@@ -1936,11 +1941,12 @@ async function runSync(tenantId, progressCallback, options = {}) {
         }
       }
     }
+    const unexpectedTaxItems = keepAtLeast(unexpectedTax);   // only items of £1 or more
     const issue = {
       org_id: orgId, check_type: 'unexpected_tax_code_used', importance: 'medium',
-      count: unexpectedTax.length,
-      potential_value_gbp: sumAbsoluteExposure(unexpectedTax),
-      detail_json: JSON.stringify(unexpectedTax),
+      count: unexpectedTaxItems.length,
+      potential_value_gbp: sumAbsoluteExposure(unexpectedTaxItems),
+      detail_json: JSON.stringify(unexpectedTaxItems),
       period_checked: period.key
     };
     insertIssue(issue); issueResults.push(issue);
@@ -2062,6 +2068,16 @@ async function runSync(tenantId, progressCallback, options = {}) {
     }
   }
   if (chartOfAccountsAvailable) {
+    try {
+      const reviewItems = journalChecks.bankStatementReviewItems(chartOfAccounts);
+      insertIssue({
+        org_id: orgId, check_type: 'bank_statements_review', importance: 'high',
+        count: reviewItems.length, potential_value_gbp: 0,
+        detail_json: JSON.stringify(reviewItems), period_checked: 'since_lock_date',
+      });
+    } catch (err) {
+      console.error('bank_statements_review failed — skipping (will show as "Not synced"):', err.message);
+    }
     try {
       const items = journalChecks.motorVehicleExpenses({
         accounts: chartOfAccounts, from: period.start, to: period.end, balanceSheet: bsReport,
@@ -2351,9 +2367,14 @@ async function runSync(tenantId, progressCallback, options = {}) {
   emit({ step: 'score', message: 'Calculating health score...' });
   // Read back normalized results after persistent review states have been applied by insertIssue.
   // This also guarantees display-only observations never affect totals or scoring.
-  const reviewedIssues = getIssuesForRun(orgId, runId, options.checkType || null);
+  // A cache-only recalculation (a custom date range, for example) cannot run the checks that need a live Xero
+  // report. Their last result stays in force instead of the check showing "Not synced".
+  const producedCheckTypes = new Set(getIssuesForRun(orgId, runId, null).map(i => i.check_type));
+  const preservedCheckTypes = options.cacheOnly && !options.checkType
+    ? LIVE_ONLY_CHECK_TYPES.filter(type => !producedCheckTypes.has(type)) : [];
+  const reviewedIssues = getIssuesForRun(orgId, runId, options.checkType || null, preservedCheckTypes);
   const scoreBreakdown = calculateScoreBreakdown(
-    getScoringObservationsForRun(orgId, runId, options.checkType || null), {
+    getScoringObservationsForRun(orgId, runId, options.checkType || null, preservedCheckTypes), {
       nonScoredChecks: NON_SCORED_CHECKS,
       asOf: new Date(`${period.end}T00:00:00.000Z`),
     });
@@ -2582,7 +2603,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     console.error('Transaction counts failed — activating check results anyway:', err.message);
   }
 
-  await activateSyncRun(orgId, runId, options.checkType || null);
+  await activateSyncRun(orgId, runId, options.checkType || null, preservedCheckTypes);
 
   // Refresh Insight KPI data (P&L + Balance Sheet) in the background — failure does not block sync
   try {

@@ -218,6 +218,7 @@ const REVIEW_CHECK_DEFINITIONS = Object.freeze([
   { type: 'dividend_status', importance: 'medium', label: 'Dividends Status' },
   { type: 'historical_changes', importance: 'medium', label: 'Historical Changes' },
   { type: 'motor_vehicle_expenses', importance: 'medium', label: 'Motor Vehicle Expenses' },
+  { type: 'bank_statements_review', importance: 'high', label: 'Bank Statements Review' },
 ]);
 const ALL_CHECK_DEFINITIONS = Object.freeze([...CHECK_DEFINITIONS, ...REVIEW_CHECK_DEFINITIONS]);
 
@@ -239,6 +240,7 @@ const NON_SCORED_CHECKS = Object.freeze([
   'dividend_status',
   'historical_changes',
   'motor_vehicle_expenses',
+  'bank_statements_review',
 ]);
 
 // Processor fees are deliberately not exempt: MBX evidence showed that Xenon includes them.
@@ -530,6 +532,13 @@ function excludeDuplicateDrafts(items, windowDays = CHECK_DEFAULTS.duplicateWind
 // count all say 46 (Akrio said 40); MBX Graffix 64 vs 60 and 1st Corps 2 vs 0 go the same way.
 function selectUnapprovedBills(draftBills) {
   return [...draftBills];
+}
+
+// A bill is "old" when it is more than `days` past its DUE date (the bill date when it has no due date). Ageing by the
+// bill date flagged annual bills that are not due for months (Harlow's PolicyBee, dated Jul 2026 and due Jun 2027).
+function isOverdueMoreThan(document, asOf, days = CHECK_DEFAULTS.oldDocumentDays) {
+  const age = daysBetween(asOf, document.dueDate || document.date);
+  return age != null && age > days;
 }
 
 function isOldDocument(document, asOf, days = CHECK_DEFAULTS.oldDocumentDays) {
@@ -848,6 +857,63 @@ function dropTaxMissingNoise(lines, { minAmount = 1, nameByCode = new Map(), ski
     && !(skipName && skipName.test(String(nameByCode.get(line.accountCode) || ''))));
 }
 
+
+// ---- Practice rules agreed with the accountants (review of 20 Oct 2026) ----
+// Kept in one place so the policy is visible and testable. Each is a practice-wide rule, so per-account or
+// per-client numbers imported from Xenon (for example 200 for capital items, 100 for misallocated items)
+// no longer override it.
+const PRACTICE_POLICY = Object.freeze({
+  capitalisationThresholdGbp: 2000,   // MTA capitalises assets from £2,000
+  misallocatedThresholdGbp: 1,        // anything in a vague account is worth a look, however small
+  minimumItemGbp: 1,                  // multi-account, multi-tax and unexpected tax code ignore items under £1
+  multiAccountLookbackMonths: 0,      // multi-account looks at the review period only
+});
+const VAGUE_ACCOUNT_NAME = /\b(general|miscellaneous|misc|sundry|sundries|other|various|uncategori[sz]ed|unallocated|unclassified|unknown)\b/i;
+// Purchase Tax Missing ignores these by name: bank fees (no VAT), rent (generally exempt) and mileage claims.
+const PURCHASE_TAX_NOISE_ACCOUNT_NAME = /\bbank\s*(fees?|charges?)\b|\brent\b|mileage/i;
+
+// The review period starts from the later of the Xero lock date and the last signed accounts date. The accountants
+// review a client from its last signed accounts (Flyhighdigital 31 Jul 2025, Cinch 31 Aug 2025) even where Xero's lock
+// date is older or has never been set. A lock date later than the signed accounts still wins, since that data cannot
+// be changed. `asOf` stops a bad future date from emptying the period.
+function reviewFromDate(lockDate, signedAccountsDate, asOf = new Date().toISOString().slice(0, 10)) {
+  const iso = d => (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}/.test(d) ? d.slice(0, 10) : (d instanceof Date && !Number.isNaN(d.getTime()) ? d.toISOString().slice(0, 10) : null));
+  const lock = iso(lockDate);
+  const signed = iso(signedAccountsDate);
+  if (signed && signed <= asOf && (!lock || signed > lock)) return { date: signed, source: 'signed_accounts' };
+  return { date: lock, source: lock ? 'lock_date' : null };
+}
+
+// Checks that need a live Xero report and so cannot run in a cache-only recalculation. The result from the last live
+// sync stays in force for these (all three describe the position today, not the review period).
+const LIVE_ONLY_CHECK_TYPES = Object.freeze(['suspense_open_balance', 'directors_loan_overdrawn', 'dividend_status']);
+
+// Capital item threshold: the practice policy is a floor. A client may set a higher figure, never a lower one.
+function effectiveCapitalThreshold(accountThreshold, clientDefault, policy = PRACTICE_POLICY.capitalisationThresholdGbp) {
+  const configured = Number(accountThreshold) > 0 ? Number(accountThreshold)
+    : Number(clientDefault) > 0 ? Number(clientDefault) : 0;
+  return Math.max(configured, policy);
+}
+// Misallocated threshold: a per-account figure can only make the check stricter (lower), never looser.
+function effectiveMisallocatedThreshold(accountThreshold, clientDefault) {
+  const base = Number.isFinite(Number(clientDefault)) && clientDefault != null ? Number(clientDefault) : PRACTICE_POLICY.misallocatedThresholdGbp;
+  const own = accountThreshold == null ? NaN : Number(accountThreshold);
+  return Number.isFinite(own) ? Math.min(own, base) : base;
+}
+// Expense accounts watched for Misallocated Items: the ones configured for the client plus every vaguely named one.
+function monitoredMisallocatedExpenseCodes(configuredCodes, expenseCodes, nameByCode) {
+  const codes = new Set(configuredCodes || []);
+  for (const code of expenseCodes || []) if (VAGUE_ACCOUNT_NAME.test(String(nameByCode[code] || ''))) codes.add(code);
+  return codes;
+}
+// Single amounts under £1 (and £0 lines) are never worth a finding; used where items are counted one at a time.
+function isUnderMinimumItem(amount, minimum = PRACTICE_POLICY.minimumItemGbp) {
+  return Math.abs(Number(amount) || 0) < minimum;
+}
+function keepAtLeast(items, minimum = PRACTICE_POLICY.minimumItemGbp) {
+  return items.filter(item => Math.abs(Number(item.amount) || 0) >= minimum);
+}
+
 // Which defaults an active contact is missing: a default account, tax rate and due date (payment terms) for each
 // role it has. A customer is judged on its sales defaults and a supplier on its bill defaults. A contact with
 // neither flag (never used on an invoice or bill) is only listed when it has no default of any kind.
@@ -903,7 +969,7 @@ function storedEntitiesForRecalculation(cachedRows, entityType, clientHasAnyStor
 module.exports = {
   storedEntitiesForRecalculation,
   findDuplicatesWithSameNumber,
-  BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise, keepFlatRateLargeItems, FLAT_RATE_SINGLE_ITEM_LIMIT, missingContactDefaults,
+  BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise, keepFlatRateLargeItems, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, reviewFromDate, VAGUE_ACCOUNT_NAME, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, keepAtLeast, isUnderMinimumItem, FLAT_RATE_SINGLE_ITEM_LIMIT, missingContactDefaults,
   CHECK_DEFAULTS,
   CHECK_DEFINITIONS,
   REVIEW_CHECK_DEFINITIONS,
@@ -941,7 +1007,7 @@ module.exports = {
   findUnexpectedDefaultLines,
   findMisallocatedLines,
   resolveCapitalReviewCandidateCodes,
-  isOldDocument,
+  isOldDocument, isOverdueMoreThan,
   isPurchaseTaxExemptAccount,
   addFindingKeys,
   allocateFindingValues,

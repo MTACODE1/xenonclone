@@ -23,7 +23,7 @@ const {
   getInsightWidgetVisibility, setInsightWidgetVisibility,
   getInsightSettingsKv, setInsightSettingsKv,
   getInsightCorpTaxRateBands, addInsightCorpTaxRateBand, deleteInsightCorpTaxRateBand,
-  getInsightCorpTaxAdjustments, setInsightCorpTaxAdjustment, deleteInsightCorpTaxAdjustment,
+  getInsightCorpTaxAdjustments, setInsightCorpTaxAdjustment, deleteInsightCorpTaxAdjustment, getReviewFrom,
 } = require('../db/queries');
 const { syncOrganisation, CHECK_DEFINITIONS } = require('../services/xeroSync');
 const { syncFreeAgentOrganisation } = require('../services/freeagentSync');
@@ -71,8 +71,10 @@ function selectedPeriodFor(org, query = {}) {
     });
   }
   const fallback = org.period_type || getSetting('default_sync_period') || 'since_lock_date';
+  const reviewFrom = getReviewFrom(org);
   return resolvePeriod(periodInput(query, fallback), {
-    lockDate: org.lock_date,
+    lockDate: reviewFrom.date,
+    lockSource: reviewFrom.source,
     financialYearEndDay: org.financial_year_end_day,
     financialYearEndMonth: org.financial_year_end_month,
   });

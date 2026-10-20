@@ -3,6 +3,7 @@ const { queueSave: queueXeroCacheSave } = require('./xeroCacheStore');
 const { getPool } = require('./mysqlPool');
 const {
   NON_SCORED_CHECKS, addFindingKeys, allocateFindingValues, isReviewStateActive, normalizeContactKey,
+  reviewFromDate,
 } = require('../services/checkRules');
 const { calculateScoreBreakdown } = require('../services/scoreProfile');
 
@@ -479,12 +480,21 @@ function getScoringObservations(orgId) {
   }));
 }
 
-function getIssuesForRun(orgId, runId, checkType = null) {
-  const db = getDb();
+// preserveTypes: check types whose CURRENT active result stays in force although this (full) run did not
+// produce one — used by a cache-only recalculation, which cannot run the checks that need a live Xero call.
+function getIssuesForRun(orgId, runId, checkType = null, preserveTypes = [], db = getDb()) {
   const staged = db.prepare(`
     SELECT * FROM issues WHERE org_id = ? AND run_id = ? AND is_active = 0
   `).all(orgId, runId);
-  if (!checkType) return staged;
+  if (!checkType && !preserveTypes.length) return staged;
+  if (!checkType) {
+    const marks = preserveTypes.map(() => '?').join(',');
+    return [
+      ...db.prepare(`SELECT * FROM issues WHERE org_id = ? AND is_active = 1 AND check_type IN (${marks})`)
+        .all(orgId, ...preserveTypes),
+      ...staged,
+    ];
+  }
   return [
     ...db.prepare(`
       SELECT * FROM issues WHERE org_id = ? AND is_active = 1 AND check_type <> ?
@@ -493,9 +503,9 @@ function getIssuesForRun(orgId, runId, checkType = null) {
   ];
 }
 
-function getScoringObservationsForRun(orgId, runId, checkType = null) {
-  const db = getDb();
-  const issues = getIssuesForRun(orgId, runId, checkType);
+function getScoringObservationsForRun(orgId, runId, checkType = null, preserveTypes = [], db = getDb()) {
+  const issues = getIssuesForRun(orgId, runId, checkType, preserveTypes, db);
+  const marks = preserveTypes.map(() => '?').join(',');
   const findings = db.prepare(`
     SELECT f.check_type, f.detail_json, f.potential_value_gbp, f.display_only,
       COALESCE((
@@ -510,8 +520,9 @@ function getScoringObservationsForRun(orgId, runId, checkType = null) {
     WHERE f.org_id = ? AND (
       (f.run_id = ? AND f.is_active = 0)
       OR (? IS NOT NULL AND f.is_active = 1 AND f.check_type <> ?)
+      ${preserveTypes.length ? `OR (f.is_active = 1 AND f.check_type IN (${marks}))` : ''}
     )
-  `).all(orgId, runId, checkType, checkType);
+  `).all(orgId, runId, checkType, checkType, ...preserveTypes);
   const byCheck = new Map();
   const normalized = new Set();
   for (const finding of findings) {
@@ -547,6 +558,37 @@ async function finishSyncRun(runId, status, error = null) {
   );
 }
 
+// The SQLite half of activating a run (issues, issue_findings, transaction_counts). Takes the database handle so it can be
+// exercised against an in-memory database. A full run replaces every previous result, except the check types in
+// `preserveTypes`, whose current result stays active: a cache-only recalculation cannot produce them, and replacing them
+// would blank checks such as Suspense, Director's Loan and Dividends until the next live sync.
+function activateSqliteResults(db, orgId, runId, checkType = null, preserveTypes = []) {
+  if (!checkType && !db.prepare(`
+    SELECT 1 FROM transaction_counts WHERE org_id = ? AND run_id = ? AND is_active = 0
+  `).get(orgId, runId)) {
+    throw new Error('Cannot activate a full run without staged transaction counts');
+  }
+  const keep = checkType ? [] : preserveTypes;
+  const notKept = keep.length ? ` AND check_type NOT IN (${keep.map(() => '?').join(',')})` : '';
+  db.transaction(() => {
+    if (checkType) {
+      db.prepare(`UPDATE issues SET is_active = 0 WHERE org_id = ? AND is_active = 1 AND check_type = ?`)
+        .run(orgId, checkType);
+      db.prepare(`UPDATE issue_findings SET is_active = 0 WHERE org_id = ? AND is_active = 1 AND check_type = ?`)
+        .run(orgId, checkType);
+    } else {
+      db.prepare(`UPDATE issues SET is_active = 0 WHERE org_id = ? AND is_active = 1${notKept}`).run(orgId, ...keep);
+      db.prepare(`UPDATE issue_findings SET is_active = 0 WHERE org_id = ? AND is_active = 1${notKept}`).run(orgId, ...keep);
+      db.prepare(`UPDATE transaction_counts SET is_active = 0 WHERE org_id = ? AND is_active = 1`).run(orgId);
+    }
+    db.prepare(`UPDATE issues SET is_active = 1 WHERE org_id = ? AND run_id = ?`).run(orgId, runId);
+    db.prepare(`UPDATE issue_findings SET is_active = 1 WHERE org_id = ? AND run_id = ?`).run(orgId, runId);
+    if (!checkType) {
+      db.prepare(`UPDATE transaction_counts SET is_active = 1 WHERE org_id = ? AND run_id = ?`).run(orgId, runId);
+    }
+  })();
+}
+
 // This used to be ONE SQLite transaction flipping is_active across health_scores, issues,
 // issue_findings, transaction_counts, sync_runs, and organisations all atomically. Now that
 // health_scores/sync_runs/organisations live in MySQL while issues/issue_findings/
@@ -556,7 +598,7 @@ async function finishSyncRun(runId, status, error = null) {
 // the new run's data while health_scores/sync_runs/organisations still show the previous run's —
 // a stale-looking dashboard until the next sync, not data loss or corruption. This is an accepted,
 // documented tradeoff of the staged migration, not an oversight.
-async function activateSyncRun(orgId, runId, checkType = null) {
+async function activateSyncRun(orgId, runId, checkType = null, preserveTypes = []) {
   const [stagedScoreRows] = await getPool().query(
     `SELECT 1 FROM akrio_health_scores WHERE org_id = ? AND run_id = ? AND is_active = 0`,
     [orgId, runId]
@@ -565,31 +607,7 @@ async function activateSyncRun(orgId, runId, checkType = null) {
     throw new Error('Cannot activate a run without a staged health score');
   }
 
-  const db = getDb();
-  if (!checkType && !db.prepare(`
-    SELECT 1 FROM transaction_counts WHERE org_id = ? AND run_id = ? AND is_active = 0
-  `).get(orgId, runId)) {
-    throw new Error('Cannot activate a full run without staged transaction counts');
-  }
-
-  // SQLite side first: issues/issue_findings/transaction_counts.
-  db.transaction(() => {
-    if (checkType) {
-      db.prepare(`UPDATE issues SET is_active = 0 WHERE org_id = ? AND is_active = 1 AND check_type = ?`)
-        .run(orgId, checkType);
-      db.prepare(`UPDATE issue_findings SET is_active = 0 WHERE org_id = ? AND is_active = 1 AND check_type = ?`)
-        .run(orgId, checkType);
-    } else {
-      db.prepare(`UPDATE issues SET is_active = 0 WHERE org_id = ? AND is_active = 1`).run(orgId);
-      db.prepare(`UPDATE issue_findings SET is_active = 0 WHERE org_id = ? AND is_active = 1`).run(orgId);
-      db.prepare(`UPDATE transaction_counts SET is_active = 0 WHERE org_id = ? AND is_active = 1`).run(orgId);
-    }
-    db.prepare(`UPDATE issues SET is_active = 1 WHERE org_id = ? AND run_id = ?`).run(orgId, runId);
-    db.prepare(`UPDATE issue_findings SET is_active = 1 WHERE org_id = ? AND run_id = ?`).run(orgId, runId);
-    if (!checkType) {
-      db.prepare(`UPDATE transaction_counts SET is_active = 1 WHERE org_id = ? AND run_id = ?`).run(orgId, runId);
-    }
-  })();
+  activateSqliteResults(getDb(), orgId, runId, checkType, preserveTypes);
 
   // MySQL side second: health_scores/sync_runs/organisations, in one real transaction.
   const conn = await getPool().getConnection();
@@ -1476,6 +1494,22 @@ function updateFiledAccountsXeroBalance(orgId, filingDate, netAssets) {
   `).run(netAssets, filingDate, orgId, filingDate);
 }
 
+// Last signed accounts year end held for this client, as YYYY-MM-DD, or null. Companies House rows always carry the
+// real made-up-to date. A manual row defaults made_up_to to its FILING date, which falls after the year end, so it only
+// counts when the accountant gave a made-up-to date that differs from the filing date.
+function getSignedAccountsDate(orgId, db = getDb()) {
+  const row = db.prepare(`
+    SELECT MAX(made_up_to) AS d FROM filed_accounts
+    WHERE org_id = ? AND made_up_to IS NOT NULL
+      AND (source = 'companies_house' OR made_up_to <> filing_date)`).get(orgId);
+  return row && row.d ? String(row.d).slice(0, 10) : null;
+}
+
+// Where this client's review period starts: the later of its Xero lock date and its last signed accounts date.
+function getReviewFrom(org, lockDate = org && org.lock_date, db = getDb()) {
+  return reviewFromDate(lockDate, org && org.id != null ? getSignedAccountsDate(org.id, db) : null);
+}
+
 function getFiledAccountsForOrg(orgId) {
   return getDb().prepare(`
     SELECT * FROM filed_accounts WHERE org_id = ? ORDER BY filing_date DESC
@@ -2241,7 +2275,7 @@ module.exports = {
   markOrganisationDisconnected,
   upsertHealthScore, deleteIssuesForOrg, insertIssue, replaceIssueForCheck, refreshLatestHealthScore,
   getIssuesForOrg, getScoringObservations, getIssueByCheckType,
-  getIssuesForRun, getScoringObservationsForRun,
+  getIssuesForRun, getScoringObservationsForRun, activateSqliteResults, getSignedAccountsDate, getReviewFrom,
   getIssueFindings, getIssueFindingSummary, getReportFindings, setFindingReviewStates,
   setLineReviewState, getLineReviewStates, setFindingNote, getFindingNotes, getAllFindingKeysForIssue,
   addContactExclusion, getContactExclusions, removeContactExclusion,

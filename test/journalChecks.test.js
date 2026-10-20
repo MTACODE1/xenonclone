@@ -277,6 +277,17 @@ test('CIS postings on a Flat Rate Scheme client are flagged, anyone else is not'
   assert.equal(journalChecks.cisWithFlatRate({ scheme: 'flat_rate', ...args, documents: [billOn('820', '2024-01-01')] }).length, 0, 'older than 12 months');
 });
 
+test("Xero's CIS answers are read as registered, not registered or unknown", () => {
+  // The exact answer Xero gave for ARC Renewables, and the "cannot be found" it gave for Highland Beard.
+  assert.deepEqual(journalChecks.cisSettingsFromResponse({ cISSettings: [{ cISContractorEnabled: true, cISSubContractorEnabled: false, rate: 0 }] }),
+    { contractor: true, subContractor: false });
+  assert.deepEqual(journalChecks.cisSettingsFromResponse({}), { contractor: false, subContractor: false });
+  assert.deepEqual(journalChecks.cisSettingsFromError({ response: { body: "The resource you're looking for cannot be found" } }),
+    { contractor: false, subContractor: false }, 'never set up in Xero means not registered');
+  assert.deepEqual(journalChecks.cisSettingsFromError({ response: { statusCode: 404 } }), { contractor: false, subContractor: false });
+  assert.equal(journalChecks.cisSettingsFromError({ message: 'socket hang up' }), null, 'any other failure stays unknown');
+});
+
 test("Xero's own CIS registration decides the Flat Rate flag when it is known", () => {
   const args = { scheme: 'flat_rate', accounts: cisAccounts, documents: [billOn('820')], journals: [], from: '2025-10-01', to: '2026-09-30' };
   const registered = journalChecks.cisWithFlatRate({ ...args, cis: { contractor: false, subContractor: true } });
@@ -325,4 +336,19 @@ test('Net Assets at a balance date inside the month is the month-end figure less
   assert.equal(netAssetsAtBalanceDate(100, 0), 100);
   assert.equal(netAssetsAtBalanceDate(null, 5), null);
   assert.equal(netAssetsAtBalanceDate(100, null), null);
+});
+
+test('every client gets a standing Bank Statements Review reminder, one line per bank account', () => {
+  const accounts = [
+    { code: '090', name: 'HSBC Current', type: 'BANK', status: 'ACTIVE', accountID: 'a1' },
+    { code: '091', name: 'Old Savings', type: 'BANK', status: 'ARCHIVED', accountID: 'a2' },
+    { code: '200', name: 'Sales', type: 'REVENUE', status: 'ACTIVE' },
+    { code: '093', name: 'Mettle Pots', type: 'BANK', accountID: 'a3' },
+  ];
+  const items = journalChecks.bankStatementReviewItems(accounts);
+  assert.deepEqual(items.map(i => i.accountName), ['HSBC Current', 'Mettle Pots'], 'archived accounts and non-bank accounts are left out');
+  assert.ok(items.every(i => i.level === 'review' && i.rule === 'bank_statements_review'));
+  assert.match(items[0].description, /Bank statements tab/);
+  assert.equal(journalChecks.bankStatementReviewItems([]).length, 1, 'a client with no bank account still gets the reminder');
+  assert.equal(journalChecks.bankStatementReviewItems(null).length, 1);
 });
