@@ -1,6 +1,7 @@
 const levenshtein = require('fast-levenshtein');
 const crypto = require('crypto');
 const { calculateScoreBreakdown } = require('./scoreProfile');
+const { isWithinPeriod } = require('./periodResolver');
 const {
   NOT_APPLICABLE_PERIODS, NOT_CONFIGURED_PERIODS, UNAVAILABLE_PERIODS, RESERVED_PERIOD_LABELS,
 } = require('./periodStatus');
@@ -458,7 +459,7 @@ function findDuplicates(items, windowDays = CHECK_DEFAULTS.duplicateWindowDays, 
       const anchorReference = requireExactReference ? referenceOf(anchor) : null;
       for (let index = remaining.length - 1; index >= 0; index--) {
         const age = daysBetween(anchor.date, remaining[index].date);
-        if (!matchOnReference && (age == null || age < 0 || age > windowDays)) continue;
+        if (!matchOnReference && (!Number.isFinite(age) || age < 0 || age > windowDays)) continue;
         // A blank reference on both sides is not a "match" — it would let every reference-less
         // document at the same contact/amount/date silently satisfy this filter regardless of the
         // setting's intent, which is to REQUIRE a genuinely shared reference, not the absence of one.
@@ -908,6 +909,62 @@ function preservedLiveChecks(options = {}, producedTypes = new Set()) {
   return candidates.filter(type => !producedTypes.has(type));
 }
 
+// The checks that read the Xero Balance Sheet "as at" the end of the selected period. A balance depends on the period
+// end, so a cache-only recalculation of a different period has to ask Xero for that one report (a single read-only
+// call) instead of showing a result from some other date. A cache-only run for any other single check needs no report.
+const BALANCE_SHEET_CHECK_TYPES = Object.freeze(['suspense_open_balance', 'directors_loan_overdrawn', 'motor_vehicle_expenses']);
+function balanceSheetNeeded(options = {}) {
+  if (!options.cacheOnly) return true;
+  if (!options.checkType) return true;
+  return BALANCE_SHEET_CHECK_TYPES.includes(options.checkType);
+}
+
+// Turnover from payments made out of a revenue account. A customer payment normally comes from a bank account, but a
+// payment can be posted to a revenue-class account (some practices record a clinician's or a discount account this
+// way). That debits revenue, so it reduces turnover in Xero's Profit and Loss, yet it is on no invoice, credit note or
+// bank transaction line, so the document totals miss it. Checked against Xero's ledger on nine clients: with this
+// adjustment turnover matches the ledger to the penny; without it one client was £150 high for one period.
+// Only AUTHORISED customer (ACCRECPAYMENT) and supplier (ACCPAYPAYMENT) payments are counted; other payment types
+// (credit note refunds, overpayments, prepayments) are left alone. Amounts are in the base currency.
+function turnoverAdjustmentFromPayments(payments, { revenueAccountIds = new Set(), revenueAccountCodes = new Set(), period } = {}) {
+  let adjustment = 0;
+  for (const payment of payments || []) {
+    if (payment.status !== 'AUTHORISED') continue;
+    if (!isWithinPeriod(toDateString(payment.date), period)) continue;
+    const account = payment.account || {};
+    const onRevenueAccount = revenueAccountIds.has(account.accountID)
+      || (account.code != null && revenueAccountCodes.has(String(account.code).toUpperCase()));
+    if (!onRevenueAccount) continue;
+    const base = payment.bankAmount != null ? Number(payment.bankAmount) : (Number(payment.amount) || 0) / (payment.currencyRate || 1);
+    if (!Number.isFinite(base)) continue;
+    if (payment.paymentType === 'ACCRECPAYMENT') adjustment -= base;
+    else if (payment.paymentType === 'ACCPAYPAYMENT') adjustment += base;
+  }
+  return adjustment;
+}
+
+// Dividends only apply to a company. For an LLP, partnership or sole trader the check is marked not applicable, as
+// Historical Changes already is, instead of showing "Not synced" for ever.
+function nonCompanyDividendIssue(orgId) {
+  return {
+    org_id: orgId, check_type: 'dividend_status', importance: 'medium',
+    count: 0, potential_value_gbp: 0, detail_json: '[]', period_checked: 'not_a_company',
+  };
+}
+
+// Unapproved Invoices/Bills: every draft or submitted document dated inside the review period, plus drafts that have no
+// date at all (absent, null or an empty string). A draft without a date cannot be placed before the period, and Xero still counts it as unapproved.
+// A malformed non-empty date is not guessed at and stays out.
+function selectUnapprovedInPeriod(documents, period) {
+  return documents.filter(document => {
+    const raw = document.date;
+    if (raw == null || raw === '') return true;
+    let date = null;
+    try { date = toDateString(raw); } catch (error) { return false; }
+    return isWithinPeriod(date, period);
+  });
+}
+
 // Capital item threshold: the practice policy is a floor. A client may set a higher figure, never a lower one.
 function effectiveCapitalThreshold(accountThreshold, clientDefault, policy = PRACTICE_POLICY.capitalisationThresholdGbp) {
   const configured = Number(accountThreshold) > 0 ? Number(accountThreshold)
@@ -991,7 +1048,7 @@ function storedEntitiesForRecalculation(cachedRows, entityType, clientHasAnyStor
 module.exports = {
   storedEntitiesForRecalculation,
   findDuplicatesWithSameNumber,
-  BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise, keepFlatRateLargeItems, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, reviewFromDate, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, keepAtLeast, isUnderMinimumItem, FLAT_RATE_SINGLE_ITEM_LIMIT, missingContactDefaults,
+  BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise, keepFlatRateLargeItems, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, balanceSheetNeeded, turnoverAdjustmentFromPayments, nonCompanyDividendIssue, selectUnapprovedInPeriod, BALANCE_SHEET_CHECK_TYPES, reviewFromDate, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, keepAtLeast, isUnderMinimumItem, FLAT_RATE_SINGLE_ITEM_LIMIT, missingContactDefaults,
   CHECK_DEFAULTS,
   CHECK_DEFINITIONS,
   REVIEW_CHECK_DEFINITIONS,

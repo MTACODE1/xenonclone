@@ -189,3 +189,73 @@ test('GUARD: the sync passes the kept check types to scoring, scoring observatio
   assert.match(source, /getScoringObservationsForRun\(orgId, runId, options\.checkType \|\| null, preservedCheckTypes\)/);
   assert.match(source, /activateSyncRun\(orgId, runId, options\.checkType \|\| null, preservedCheckTypes\)/);
 });
+
+// ---- Cache-only run that DOES refresh the Balance Sheet (accountant v3/v4: Director's Loan must match the period end) ----
+const { balanceSheetNeeded } = require('../src/services/checkRules');
+
+// Like xeroSync: decide what to keep from what the run itself staged.
+function activateLikeTheSync(db, orgId, runId, options) {
+  const produced = new Set(getIssuesForRun(orgId, runId, null, [], db).map(i => i.check_type));
+  const preserve = preservedLiveChecks(options, produced);
+  activateSqliteResults(db, orgId, runId, options.checkType || null, preserve);
+  return preserve;
+}
+
+test('a cache-only run whose Balance Sheet refresh worked replaces Suspense and Director\'s Loan and keeps only Dividends', () => {
+  const db = fixture();
+  issue2(db, 1, 'suspense_open_balance', 0, 2);
+  issue2(db, 1, 'directors_loan_overdrawn', 1, 2);
+  const preserved = activateLikeTheSync(db, 1, 2, { cacheOnly: true });
+  assert.deepEqual(preserved, ['dividend_status']);
+  const now = active(db, 1);
+  assert.deepEqual(now.suspense_open_balance, [0, 2], 'replaced by the new period-end result');
+  assert.deepEqual(now.directors_loan_overdrawn, [1, 2]);
+  assert.deepEqual(now.dividend_status, [0, 1], 'kept from the last live sync');
+  const rows = db.prepare("SELECT check_type, COUNT(*) AS n FROM issues WHERE org_id = 1 AND is_active = 1 GROUP BY check_type HAVING n > 1").all();
+  assert.deepEqual(rows, [], 'no check appears twice');
+});
+
+test('when the Balance Sheet refresh failed nothing is staged for those checks and their previous results stay', () => {
+  const db = fixture();
+  const preserved = activateLikeTheSync(db, 1, 2, { cacheOnly: true });
+  assert.deepEqual(preserved.sort(), [...LIVE_ONLY_CHECK_TYPES].sort());
+  const now = active(db, 1);
+  assert.deepEqual([now.suspense_open_balance, now.directors_loan_overdrawn, now.dividend_status], [[2, 1], [1, 1], [0, 1]]);
+});
+
+test('a non-company\'s "not applicable" Dividends row replaces an older result and its findings', () => {
+  const db = fixture();
+  db.prepare("UPDATE issues SET run_id = 1 WHERE org_id = 1 AND check_type = 'dividend_status'").run();
+  issue2(db, 1, 'dividend_status', 0, 2);
+  db.prepare("UPDATE issues SET period_checked = 'not_a_company' WHERE run_id = 2 AND check_type = 'dividend_status'").run();
+  activateLikeTheSync(db, 1, 2, { cacheOnly: true });
+  const rows = db.prepare("SELECT run_id, count, period_checked FROM issues WHERE org_id = 1 AND check_type = 'dividend_status' AND is_active = 1").all();
+  assert.deepEqual(rows, [{ run_id: 2, count: 0, period_checked: 'not_a_company' }]);
+});
+
+test('a cache-only run of another single check changes only that check and needs no Balance Sheet', () => {
+  assert.equal(balanceSheetNeeded({ cacheOnly: true, checkType: 'multi_account_suppliers' }), false);
+  const db = fixture();
+  db.prepare("UPDATE issues SET run_id = 3 WHERE run_id = 2").run();
+  db.prepare("UPDATE issue_findings SET run_id = 3 WHERE run_id = 2").run();
+  const preserved = activateLikeTheSync(db, 1, 3, { cacheOnly: true, checkType: 'multi_account_suppliers' });
+  assert.deepEqual(preserved, []);
+  assert.deepEqual(active(db, 1).multi_account_suppliers, [7, 3]);
+  assert.deepEqual(active(db, 1).suspense_open_balance, [2, 1]);
+});
+
+test('GUARD: the sync uses the new helpers at the right places, and the route uses the shared links module', () => {
+  const sync = fs.readFileSync(path.join(__dirname, '../src/services/xeroSync.js'), 'utf8');
+  assert.match(sync, /if \(balanceSheetNeeded\(options\)\) \{/);
+  assert.match(sync, /bsReport = await loadReviewBalanceSheet\(tenantId, period\.end, options, apiCall\);/);
+  assert.doesNotMatch(sync, /if \(!options\.cacheOnly\) \{\s*try \{\s*const bsResp/, 'the old cache-only skip is gone');
+  assert.match(sync, /insertIssue\(nonCompanyDividendIssue\(orgId\)\)/);
+  assert.match(sync, /selectUnapprovedInPeriod\(accrecDraft, period\)/);
+  assert.match(sync, /selectUnapprovedInPeriod\(accpayDraft, period\)/);
+  assert.match(sync, /inPeriod: isSinceLD, accountCode/);
+  assert.match(sync, /inPeriod: isSinceLD, taxCode/);
+  const route = fs.readFileSync(path.join(__dirname, '../src/routes/client.js'), 'utf8');
+  assert.match(route, /require\('\.\.\/services\/xeroLinks'\)/);
+  assert.doesNotMatch(route, /^function xeroLinks\(/m, 'the link builder lives in its own module now');
+  assert.match(route, /tx\.bankTransactionId \|\| tx\.invoiceId \|\| tx\.creditNoteId/);
+});

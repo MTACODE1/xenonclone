@@ -26,6 +26,8 @@ const {
   getInsightCorpTaxAdjustments, setInsightCorpTaxAdjustment, deleteInsightCorpTaxAdjustment, getReviewFrom,
 } = require('../db/queries');
 const { syncOrganisation, CHECK_DEFINITIONS } = require('../services/xeroSync');
+const { xeroLinks } = require('../services/xeroLinks');
+const { formatTurnoverGbp, groupSupplierTransactions } = require('../services/checkPresentation');
 const { syncFreeAgentOrganisation } = require('../services/freeagentSync');
 const { CASH_HEALTH_CATEGORIES } = require('../services/insightSync');
 const { resolveCheckDisplayStatus } = require('../services/checkRules');
@@ -114,6 +116,7 @@ function clientViewData(org, query = {}) {
     insightMappings: getInsightAccountMappings(org.id),
     insightWidgetVisibility: getInsightWidgetVisibility(org.id),
     checkDescriptions,
+    formatTurnoverGbp,
   };
 }
 
@@ -144,50 +147,6 @@ const acceptSourceDocument = (req, res, next) =>
   sourceDocumentUpload.single('source_document')(req, res, error =>
     error ? res.status(400).send(error.message) : next()
   );
-
-function xeroLinks(checkType, item) {
-  const links = [];
-  const add = (label, url) => { if (url && !links.some(link => link.url === url)) links.push({ label, url }); };
-  const bankSource = /^bank/.test(item.source || '');
-  const invoiceId = (!bankSource && (item.invoiceId || item.invoiceID)) ||
-    (/(invoice|bill|undocumented)/.test(checkType) ? item.id : null);
-  if (invoiceId) {
-    const payable = /(bill|purchase|supplier|sales_tax_on_bills)/.test(checkType);
-    add(payable ? 'Open bill' : 'Open invoice',
-      `https://go.xero.com/${payable ? 'AccountsPayable' : 'AccountsReceivable'}/View.aspx?InvoiceID=${encodeURIComponent(invoiceId)}`);
-  }
-  if (/duplicate_(invoices|bills)/.test(checkType)) {
-    const payable = checkType === 'duplicate_bills';
-    for (const id of [item.id1, item.id2].filter(Boolean)) {
-      add(payable ? 'Open bill' : 'Open invoice',
-        `https://go.xero.com/${payable ? 'AccountsPayable' : 'AccountsReceivable'}/View.aspx?InvoiceID=${encodeURIComponent(id)}`);
-    }
-  }
-  const bankId = item.bankTransactionId || item.bankTransactionID ||
-    (bankSource ? (item.invoiceId || item.id) : null);
-  if (bankId) add('Open bank transaction',
-    `https://go.xero.com/Bank/ViewTransaction.aspx?bankTransactionID=${encodeURIComponent(bankId)}`);
-  const paymentId = item.paymentId || item.paymentID || (item.source === 'payment' ? item.id : null);
-  if (paymentId) add('Find payment',
-    `https://go.xero.com/Search/Default.aspx?searchTerm=${encodeURIComponent(paymentId)}`);
-  const creditId = item.creditNoteId || item.creditNoteID ||
-    (/credits/.test(checkType) ? item.id : null);
-  if (creditId) {
-    const payable = /purchase/.test(checkType);
-    add('Open credit note',
-      `https://go.xero.com/${payable ? 'AccountsPayable' : 'AccountsReceivable'}/ViewCreditNote.aspx?creditNoteID=${encodeURIComponent(creditId)}`);
-  }
-  const contactIds = [item.contactId, item.contactID];
-  if (/duplicate_contacts/.test(checkType)) contactIds.push(item.id1, item.id2);
-  for (const contactId of contactIds.filter(Boolean)) {
-    add('Open contact', `https://go.xero.com/Contacts/View/${encodeURIComponent(contactId)}`);
-  }
-  if (!links.length) {
-    const term = item.number || item.invoiceNumber || item.contact || item.name || item.finding_key;
-    add('Search in Xero', `https://go.xero.com/Search/Default.aspx?searchTerm=${encodeURIComponent(term)}`);
-  }
-  return links;
-}
 
 function verifyCsrf(req, res, next) {
   const supplied = req.body?.csrf_token || req.get('x-csrf-token');
@@ -511,7 +470,7 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
       accountName: item.accountCode ? (item.accountName || accountNameByCode[item.accountCode] || null) : item.accountName,
       transactions: Array.isArray(item.transactions)
         ? item.transactions.map(tx => {
-            const lineKey = tx.bankTransactionId || tx.invoiceId || null;
+            const lineKey = tx.bankTransactionId || tx.invoiceId || tx.creditNoteId || null;
             return {
               ...tx,
               accountName: tx.accountCode ? (tx.accountName || accountNameByCode[tx.accountCode] || null) : tx.accountName,
@@ -526,7 +485,10 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
     extraData.bankReconciliation = getBankReconciliationForOrg(org.id);
     extraData.excludedBankAccountIds = getExcludedBankAccountIds(org.id);
   }
-  res.render('checkDetail', { org, issue, def, items, pagination, summary, status, contact, checkType, checkDescriptions, ...extraData });
+  res.render('checkDetail', {
+    org, issue, def, items, pagination, summary, status, contact, checkType, checkDescriptions, groupSupplierTransactions,
+    displayStatus: issue ? resolveCheckDisplayStatus(issue) : null, ...extraData,
+  });
 });
 
 function csvCell(value) {

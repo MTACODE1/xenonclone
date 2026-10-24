@@ -29,7 +29,19 @@ function fmtDisplayDate(val) {
     <h4><%= def ? def.label : checkType %>
       <% if (def && def.importance) { %><span class="chip chip-<%= def.importance %>"><%= def.importance.charAt(0).toUpperCase() + def.importance.slice(1) %></span><% } %>
     </h4>
-    <% if (issue) { %>
+    <% const notApplicableReasons = {
+         not_a_company: checkType === 'dividend_status'
+           ? 'dividends only apply to a limited company (this client is an LLP, partnership, sole trader or non-UK)'
+           : 'only applies to UK limited companies (this client is a sole trader, partnership or non-UK)',
+         no_filed_accounts_yet: 'this company has not filed any accounts at Companies House yet',
+         flat_rate_scheme: 'this client is on the VAT Flat Rate Scheme, so VAT on purchases is not reclaimed',
+         not_vat_registered: 'this client is not VAT registered',
+       }; %>
+    <% if (issue && typeof displayStatus !== 'undefined' && displayStatus === 'not_applicable') { %>
+      <div class="check-stats">
+        <div class="check-stat"><strong>Not applicable</strong><span><%= notApplicableReasons[issue.period_checked] || 'not applicable to this client' %></span></div>
+      </div>
+    <% } else if (issue) { %>
       <div class="check-stats">
         <div class="check-stat"><strong class="text-warning"><%= issue.count %></strong><span>issue<%= issue.count !== 1 ? 's' : '' %> found</span></div>
         <% if (issue.potential_value_gbp > 0) { %>
@@ -318,7 +330,7 @@ function toggleBbEditForm(id) {
       // — same hidden-ID-field rule as the main table, applied to each transaction sub-object.
       // lineKey/ok/notes are rendered specially below (the per-line review form); accountCode/
       // accountName are combined into one colored "Account" badge column instead of two plain ones.
-      const transactionHiddenColumns = new Set([...hiddenColumns, 'xero_links', 'lineKey', 'ok', 'accountCode', 'accountName', 'source']);
+      const transactionHiddenColumns = new Set([...hiddenColumns, 'xero_links', 'lineKey', 'ok', 'accountCode', 'accountName', 'source', 'inPeriod', 'type']);
       const transactionColumns = items[0]?.transactions?.length
         ? Object.keys(items[0].transactions[0]).filter(key => !transactionHiddenColumns.has(key))
         : [];
@@ -341,6 +353,7 @@ function toggleBbEditForm(id) {
         bank_receive: { label: 'Money In', color: '#1e6b45' },
         bill: { label: 'Bill', color: '#4a4a4a' },
         invoice: { label: 'Invoice', color: '#4a4a4a' },
+        credit_note: { label: 'Credit note', color: '#4a4a4a' },
       };
     %>
     <% const columns = Object.keys(items[0]).filter(key => !hiddenColumns.has(key)); %>
@@ -456,9 +469,10 @@ function toggleBbEditForm(id) {
             <% if (item.transactions && item.transactions.length) { %>
               <tr>
                 <td colspan="<%= columns.length + 3 + (mainHasSourceColumn ? 1 : 0) + (mainHasAccountColumn ? 1 : 0) + (mainHasAge ? 1 : 0) %>" style="padding:0; border-top:none;">
+                  <% const txGroups = groupSupplierTransactions(item.transactions); %>
                   <details style="margin: 0 0 8px 32px;">
                     <summary style="cursor:pointer; color:#5D87FF; font-size:0.8rem; padding:4px 0;">
-                      Show <%= item.transactions.length %> transaction<%= item.transactions.length !== 1 ? 's' : '' %>
+                      Show <%= item.transactions.length %> transaction<%= item.transactions.length !== 1 ? 's' : '' %><%= txGroups.grouped ? ' (' + txGroups.groups.map(g => g.rows.length + ' ' + (g.key === 'period' ? 'in the period' : 'earlier')).join(', ') + ')' : '' %>
                     </summary>
                     <div class="table-wrap">
                       <table class="data-table" style="font-size:0.8rem;">
@@ -475,7 +489,15 @@ function toggleBbEditForm(id) {
                         </thead>
                         <tbody>
                           <% const colorByCode = new Map(); %>
-                          <% item.transactions.forEach(tx => { %>
+                          <% txGroups.groups.forEach(group => { %>
+                          <% if (txGroups.grouped) { %>
+                            <tr class="tx-group-row">
+                              <td colspan="<%= (hasSourceColumn ? 1 : 0) + transactionColumns.length + (hasAccountColumn ? 1 : 0) + 2 %>" style="background:#F2F6FA; font-weight:600; font-size:0.75rem; color:#4a5a73;">
+                                <%= group.label %> (<%= group.rows.length %>)
+                              </td>
+                            </tr>
+                          <% } %>
+                          <% group.rows.forEach(tx => { %>
                             <tr>
                               <% if (hasSourceColumn) { %>
                                 <td>
@@ -533,6 +555,7 @@ function toggleBbEditForm(id) {
                                 <% } %>
                               </td>
                             </tr>
+                          <% }) %>
                           <% }) %>
                         </tbody>
                       </table>

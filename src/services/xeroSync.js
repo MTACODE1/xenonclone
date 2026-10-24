@@ -32,7 +32,7 @@ const {
   grossLineAmount, netLineAmount, toDateString,
   buildAccountCodeCanonicaliser, canonicaliseAccountCodes,
   withDisplayOnlyBankFindings,
-  storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, keepFlatRateLargeItems, missingContactDefaults, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, keepAtLeast, isUnderMinimumItem, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
+  storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, keepFlatRateLargeItems, missingContactDefaults, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, balanceSheetNeeded, turnoverAdjustmentFromPayments, nonCompanyDividendIssue, selectUnapprovedInPeriod, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, keepAtLeast, isUnderMinimumItem, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
 const { saveBankLines } = require('../db/bankLines');
@@ -43,6 +43,7 @@ const {
   recomputeEvidenceIssues
 } = require('./statementEvidence');
 const { isWithinPeriod, isWithinPatternWindow, resolvePeriod } = require('./periodResolver');
+const { loadReviewBalanceSheet } = require('./reportChecks');
 
 // Paginated invoice fetch — passing page triggers full record mode (with lineItems)
 const pageDelay = () => new Promise(resolve => setTimeout(resolve, 1000));
@@ -592,6 +593,9 @@ async function runSync(tenantId, progressCallback, options = {}) {
       .filter(Boolean)
       .map(code => code.toUpperCase())
   );
+  const turnoverAccountIds = new Set(
+    (chartOfAccounts || []).filter(a => a._class === 'REVENUE' && ['REVENUE', 'SALES'].includes(a.type)).map(a => a.accountID).filter(Boolean)
+  );
   const accountNameByCode = {};
   for (const a of (chartOfAccounts || [])) if (a.code) accountNameByCode[a.code] = a.name;
   if (chartOfAccountsAvailable) upsertChartOfAccountsCache(orgId, chartOfAccounts);
@@ -1083,7 +1087,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
 
   // --- MEDIUM: Unapproved Invoices (since lock date to avoid historical noise) ---
   try {
-    const draftInvoices = sinceLD(accrecDraft);
+    const draftInvoices = selectUnapprovedInPeriod(accrecDraft, period);
     const duplicateInvoiceGroups = findDuplicates(draftInvoices);
     const invoices = excludeDuplicateDrafts(draftInvoices, undefined, duplicateInvoiceGroups);
     // Excluded duplicates still appear here as displayOnly findings (zero count/value impact,
@@ -1114,7 +1118,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
 
   // --- MEDIUM: Unapproved Bills (since lock date) ---
   try {
-    const bills = selectUnapprovedBills(sinceLD(accpayDraft));
+    const bills = selectUnapprovedBills(selectUnapprovedInPeriod(accpayDraft, period));
     const issue = {
       org_id: orgId, check_type: 'unapproved_bills', importance: 'medium',
       count: bills.length, potential_value_gbp: sumAbsoluteExposure(bills, i => i.total),
@@ -1163,6 +1167,11 @@ async function runSync(tenantId, progressCallback, options = {}) {
   lookbackFloorDate.setUTCMonth(lookbackFloorDate.getUTCMonth() - supplierPatternLookbackMonths);
   const multiTaxPatternStart = [period.start, lookbackFloorDate.toISOString().slice(0, 10)]
     .filter(Boolean).sort()[0];
+  // What identifies a supplier document in the drill-down. A purchase credit note has no InvoiceID of its own, so it
+  // carries its credit note id (and type) and opens as a credit note, not as a bill.
+  const supplierDocumentMeta = document => document.creditNoteID
+    ? { source: 'credit_note', creditNoteId: document.creditNoteID, type: document.type }
+    : { source: 'bill', invoiceId: document.invoiceID };
   // With no lookback this is exactly the review period, whose start day (the lock date or signed year end) is excluded.
   const withinMultiAccountWindow = items => items.filter(item =>
     isWithinPatternWindow(toDateString(item.date), period, multiAccountPatternStart));
@@ -1213,7 +1222,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       if (!allTime[contactId]) allTime[contactId] = { name, accountAmounts: {}, transactions: [] };
       const amount = Math.abs(lineAmount || 0);
       allTime[contactId].accountAmounts[accountCode] = (allTime[contactId].accountAmounts[accountCode] || 0) + amount;
-      allTime[contactId].transactions.push({ ...txMeta, accountCode, accountName: accountNameByCode[accountCode] || null, amount });
+      allTime[contactId].transactions.push({ ...txMeta, inPeriod: isSinceLD, accountCode, accountName: accountNameByCode[accountCode] || null, amount });
       if (isSinceLD) {
         if (!sinceLDByContact[contactId]) sinceLDByContact[contactId] = {};
         sinceLDByContact[contactId][accountCode] = (sinceLDByContact[contactId][accountCode] || 0) + amount;
@@ -1223,7 +1232,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       const isSinceLD = isWithinPeriod(toDateString(bill.date), period);
       for (const line of (bill.lineItems || [])) record(
         bill.contact?.contactID, bill.contact?.name, grossLineAmount(bill, line), line.accountCode, isSinceLD,
-        { date: toDateString(bill.date), reference: bill.reference || bill.invoiceNumber || null, description: line.description || null, source: 'bill', invoiceId: bill.invoiceID }
+        { date: toDateString(bill.date), reference: bill.reference || bill.invoiceNumber || bill.creditNoteNumber || null, description: line.description || null, ...supplierDocumentMeta(bill) }
       );
     }
     for (const txn of bankSpendForMultiAccount) {
@@ -1297,7 +1306,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
         const amt = Math.abs(netLineAmount(doc, line));
         allTimeTax[contactId].taxAmounts[tax] = (allTimeTax[contactId].taxAmounts[tax] || 0) + amt;
         allTimeTax[contactId].transactions.push({
-          ...txMeta, taxCode: tax, accountCode: line.accountCode,
+          ...txMeta, inPeriod: isSinceLD, taxCode: tax, accountCode: line.accountCode,
           accountName: accountNameByCode[line.accountCode] || null,
           description: line.description || null, amount: amt,
         });
@@ -1310,7 +1319,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     for (const bill of allBillsForSupplierChecks) {
       const isSinceLD = isWithinPeriod(toDateString(bill.date), period);
       processTaxSource(bill.contact?.contactID, bill.contact?.name, bill.lineItems || [], isSinceLD, bill,
-        { date: toDateString(bill.date), reference: bill.reference || bill.invoiceNumber || null, source: 'bill', invoiceId: bill.invoiceID });
+        { date: toDateString(bill.date), reference: bill.reference || bill.invoiceNumber || bill.creditNoteNumber || null, ...supplierDocumentMeta(bill) });
     }
     for (const txn of bankSpendForSupplierChecks) {
       processTaxSource(txn.contact?.contactID, txn.contact?.name, txn.lineItems || [],
@@ -2030,7 +2039,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
 
   // --- Review checks added 8 Oct 2026 (non-scored): unusual journals, suspense balances, tax review by
   // code and the VAT scheme monitor. All but the suspense balance reuse data already downloaded. ---
-  let bsReport = null;   // the Balance Sheet, when this sync downloaded it (not on a cache-only recalculation)
+  let bsReport = null;   // the Balance Sheet as at the end of the review period, when this run needed and downloaded it
   if (chartOfAccountsAvailable) {
     try {
       const unusual = journalChecks.detectUnusualJournals({ journals: recentManualJournals, accounts: chartOfAccounts });
@@ -2045,11 +2054,11 @@ async function runSync(tenantId, progressCallback, options = {}) {
     } catch (err) {
       console.error('unusual journal checks failed — skipping (will show as "Not synced"):', err.message);
     }
-    if (!options.cacheOnly) {
+    // Suspense and the Director's Loan are balances as at the END of the review period, so a recalculation for another
+    // period (cache-only) asks Xero for that one report rather than keeping a figure from a different date.
+    if (balanceSheetNeeded(options)) {
       try {
-        const bsResp = await apiCall(tenantId, async (xero, tid) =>
-          xero.accountingApi.getReportBalanceSheet(tid, period.end, undefined, undefined, undefined, undefined, true, false));
-        bsReport = bsResp.body.reports?.[0];
+        bsReport = await loadReviewBalanceSheet(tenantId, period.end, options, apiCall);
         const suspense = journalChecks.suspenseOpenBalances(bsReport, { asOf: period.end });
         insertIssue({
           org_id: orgId, check_type: 'suspense_open_balance', importance: 'critical',
@@ -2065,7 +2074,9 @@ async function runSync(tenantId, progressCallback, options = {}) {
           detail_json: JSON.stringify(dla), period_checked: 'since_lock_date',
         });
       } catch (err) {
-        console.error('balance sheet review checks failed — skipping (will show as "Not synced"):', err?.response?.body?.Message || err.message);
+        // Nothing is staged for these checks, so a cache-only run keeps their previous results (see preservedLiveChecks).
+        console.error('balance sheet review checks failed — skipping (a previous result is kept, otherwise "Not synced"):', err?.response?.body?.Message || err.message);
+        if (options.cacheOnly) emit({ step: 'balance_sheet', message: 'Xero Balance Sheet unavailable: kept the previous Suspense and Director\'s Loan results' });
       }
     }
   }
@@ -2096,6 +2107,13 @@ async function runSync(tenantId, progressCallback, options = {}) {
       });
     } catch (err) {
       console.error('motor_vehicle_expenses check failed — skipping (will show as "Not synced"):', err.message);
+    }
+  }
+  if (orgInfo.organisationEntityType !== 'COMPANY') {
+    try {
+      insertIssue(nonCompanyDividendIssue(orgId));
+    } catch (err) {
+      console.error('dividend_status (not applicable) failed — skipping:', err.message);
     }
   }
   if (chartOfAccountsAvailable && orgInfo.organisationEntityType === 'COMPANY') {
@@ -2474,6 +2492,10 @@ async function runSync(tenantId, progressCallback, options = {}) {
     for (const bt of bankSpendTxns) {
       for (const line of (bt.lineItems || [])) turnover -= turnoverLineAmount(line, bt);
     }
+    // A payment made out of a revenue account (not a bank account) debits that revenue, as Xero's P&L shows.
+    turnover += turnoverAdjustmentFromPayments(matchingPayments, {
+      revenueAccountIds: turnoverAccountIds, revenueAccountCodes: turnoverAccountCodes, period,
+    });
     // A POSTED manual journal line to a revenue account is revenue (F8: Hair of the Dog's £12,000
     // rent journal). ManualJournalLine.LineAmount is signed debit-positive/credit-negative, so a
     // credit (negative) to a revenue account must increase turnover: contribution = -LineAmount.

@@ -915,7 +915,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
         { label: 'Journals', raw: txCounts.journals || 0, isCurrency: false },
       ];
       txItems.forEach(item => {
-        const display = item.isCurrency ? '£' + Math.round(item.raw).toLocaleString('en-GB') : item.raw.toLocaleString('en-GB');
+        const display = item.isCurrency ? formatTurnoverGbp(item.raw) : item.raw.toLocaleString('en-GB');
         const perMthDisplay = item.isCurrency ? '£' + Math.round(item.raw / mth).toLocaleString('en-GB') + '/mth' : Math.round(item.raw / mth).toLocaleString('en-GB') + '/mth';
       %>
       <div style="background: white; padding: 16px; text-align: center;">
