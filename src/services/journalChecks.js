@@ -209,16 +209,27 @@ const parseNumber = v => parseFloat(String(v ?? '').replace(/[£,\s]/g, '').repl
 
 // Balance Sheet rows with the section they sit in. Assets read positive when debit; liabilities and
 // equity read positive when credit, so a director's loan can only be judged together with its section.
+// Xero's report is flat: an empty "Assets" heading section is followed by sibling sections ("Bank", "Current Assets",
+// "Fixed Assets"), then an empty "Liabilities" heading, and so on. The heading applies to the siblings after it until
+// the next major section, so a director's loan set up as a bank account sits under "Assets > Bank" and a credit
+// balance on it is not read as overdrawn.
+const MAJOR_BALANCE_SHEET_HEADING = /^(assets|liabilities|equity)$/i;
 function balanceSheetRows(report) {
   const out = [];
   const walk = (rows, trail) => {
+    let heading = null;
     for (const row of rows || []) {
       if (row.rowType === 'Section') {
-        walk(row.rows, row.title ? [...trail, String(row.title)] : trail);
+        const title = String(row.title || '').trim();
+        const major = MAJOR_BALANCE_SHEET_HEADING.test(title);
+        if (major && !(row.rows || []).length) { heading = title; continue; }
+        if (major) heading = null;
+        const base = heading ? [...trail, heading] : trail;
+        walk(row.rows, title ? [...base, title] : base);
       } else if (row.rowType === 'Row' && row.cells && row.cells.length >= 2) {
         const label = String(row.cells[0].value || '').trim();
         if (!label) continue;
-        const section = trail.join(' > ');
+        const section = (heading ? [...trail, heading] : trail).join(' > ');
         out.push({ label, value: parseNumber(row.cells[1].value), section, isAsset: /asset/i.test(section) && !/liabilit/i.test(section) });
       }
     }

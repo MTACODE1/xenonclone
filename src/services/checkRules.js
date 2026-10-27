@@ -296,17 +296,27 @@ const PURCHASE_TAX_RATES_ACCOUNT = /^(business\s+|council\s+)?rates$/i;
 // difference silently dropped those lines (Especially For You: about 640 untaxed expense lines, 511 vs
 // Xenon's 1,150). Rewriting each line's code to the chart's own spelling once, right after loading,
 // makes every lookup below it match. Codes not in the chart are left exactly as they were.
+// A line's account is identified by its accountID first: an account renumbered in Xero after a document was cached
+// keeps its ID, while the cached line keeps the old code (a document is only downloaded again when the document
+// itself changes). Without a usable ID (missing, unknown, or an account with no code) only the letter case is fixed.
 function buildAccountCodeCanonicaliser(chartOfAccounts) {
   const byUpper = new Map();
+  const byId = new Map();
   for (const account of chartOfAccounts || []) {
-    if (account?.code != null && account.code !== '') byUpper.set(String(account.code).toUpperCase(), account.code);
+    if (account?.code != null && account.code !== '') {
+      byUpper.set(String(account.code).toUpperCase(), account.code);
+      if (account.accountID) byId.set(account.accountID, account.code);
+    }
   }
-  return code => (code == null || code === '' ? code : (byUpper.get(String(code).toUpperCase()) ?? code));
+  return (code, accountID) => {
+    if (accountID && byId.has(accountID)) return byId.get(accountID);
+    return code == null || code === '' ? code : (byUpper.get(String(code).toUpperCase()) ?? code);
+  };
 }
 
 function canonicaliseAccountCodes(canonical, { documents = [], journals = [], contacts = [] } = {}) {
-  for (const doc of documents) for (const line of doc?.lineItems || []) line.accountCode = canonical(line.accountCode);
-  for (const journal of journals) for (const line of journal?.journalLines || []) line.accountCode = canonical(line.accountCode);
+  for (const doc of documents) for (const line of doc?.lineItems || []) line.accountCode = canonical(line.accountCode, line.accountID);
+  for (const journal of journals) for (const line of journal?.journalLines || []) line.accountCode = canonical(line.accountCode, line.accountID);
   for (const contact of contacts) {
     if (contact?.salesDefaultAccountCode) contact.salesDefaultAccountCode = canonical(contact.salesDefaultAccountCode);
     if (contact?.purchasesDefaultAccountCode) contact.purchasesDefaultAccountCode = canonical(contact.purchasesDefaultAccountCode);
