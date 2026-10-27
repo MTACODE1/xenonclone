@@ -247,11 +247,23 @@ function toggleBbEditForm(id) {
       <% if (contact) { %><a class="btn btn-sm btn-outlined" href="?status=<%= status %>">Clear</a><% } %>
     </form>
   </div>
-  <% if (!items || items.length === 0) { %>
+  <%
+    // Rows from the 3 months before the review period: listed after the period's own findings, under their own
+    // heading, and never counted (they are stored display-only).
+    const previousRows = typeof previousItems === 'undefined' ? [] : previousItems;
+    const previousPage = typeof previousPagination === 'undefined' ? null : previousPagination;
+    const tableRows = [...(items || []), ...previousRows];
+  %>
+  <% if (!tableRows.length) { %>
     <div class="empty-state">
       <p>No <%= status === 'active' ? 'active' : status %> findings for this check.</p>
     </div>
   <% } else { %>
+    <% if (!items || !items.length) { %>
+      <div class="empty-state" style="padding:12px 20px;">
+        <p>No <%= status === 'active' ? 'active' : status %> findings in the review period. The previous 3 months are listed below for context.</p>
+      </div>
+    <% } %>
     <%
       // Bank-sourced findings (sales_tax_on_bills/purchase_tax_on_invoices) are already stored as
       // display-only context (see withDisplayOnlyBankFindings in checkRules.js — they never count
@@ -309,7 +321,7 @@ function toggleBbEditForm(id) {
       // src/routes/client.js) — they're not meant as a user-facing column alongside the friendly
       // name/description fields that already carry the same information.
       const hiddenColumns = new Set([
-        'finding_key', 'review_state', 'ignored_until', 'notes', 'displayOnly', 'xero_links',
+        'finding_key', 'review_state', 'ignored_until', 'notes', 'displayOnly', 'xero_links', 'lookback', 'inPeriod',
         'contactId', 'contactID', 'invoiceId', 'invoiceID', 'bankTransactionId', 'bankTransactionID',
         'paymentId', 'paymentID', 'creditNoteId', 'creditNoteID', 'id1', 'id2', 'id', 'documentIds',
         // 'id' is the same kind of raw Xero GUID as the others above (see xeroLinks in
@@ -331,11 +343,11 @@ function toggleBbEditForm(id) {
       // lineKey/ok/notes are rendered specially below (the per-line review form); accountCode/
       // accountName are combined into one colored "Account" badge column instead of two plain ones.
       const transactionHiddenColumns = new Set([...hiddenColumns, 'xero_links', 'lineKey', 'ok', 'accountCode', 'accountName', 'source', 'inPeriod', 'type']);
-      const transactionColumns = items[0]?.transactions?.length
-        ? Object.keys(items[0].transactions[0]).filter(key => !transactionHiddenColumns.has(key))
+      const transactionColumns = tableRows[0]?.transactions?.length
+        ? Object.keys(tableRows[0].transactions[0]).filter(key => !transactionHiddenColumns.has(key))
         : [];
-      const hasAccountColumn = items[0]?.transactions?.some(tx => tx.accountCode);
-      const hasSourceColumn = items[0]?.transactions?.some(tx => tx.source);
+      const hasAccountColumn = tableRows[0]?.transactions?.some(tx => tx.accountCode);
+      const hasSourceColumn = tableRows[0]?.transactions?.some(tx => tx.source);
       // A small fixed palette, assigned per account code in first-seen order within one contact's
       // transaction list — same idea as Xenon's colored account pills, so a reader can tell at a
       // glance which lines share an account without reading every code.
@@ -356,10 +368,10 @@ function toggleBbEditForm(id) {
         credit_note: { label: 'Credit note', color: '#4a4a4a' },
       };
     %>
-    <% const columns = Object.keys(items[0]).filter(key => !hiddenColumns.has(key)); %>
-    <% const mainHasAccountColumn = items.some(item => item.accountCode); %>
-    <% const mainHasSourceColumn = items.some(item => item.source); %>
-    <% const mainHasAge = items.some(item => item.ageDays != null); %>
+    <% const columns = Object.keys(tableRows[0]).filter(key => !hiddenColumns.has(key)); %>
+    <% const mainHasAccountColumn = tableRows.some(item => item.accountCode); %>
+    <% const mainHasSourceColumn = tableRows.some(item => item.source); %>
+    <% const mainHasAge = tableRows.some(item => item.ageDays != null); %>
     <% const mainColorByCode = new Map(); %>
     <div class="table-wrap">
       <table class="data-table">
@@ -377,8 +389,15 @@ function toggleBbEditForm(id) {
           </tr>
         </thead>
         <tbody>
-          <% items.forEach(item => { %>
-            <tr <%- item.displayOnly ? 'class="display-only-row" style="display:none;"' : '' %>>
+          <% tableRows.forEach((item, rowIndex) => { %>
+            <% if (item.lookback && (rowIndex === 0 || !tableRows[rowIndex - 1].lookback)) { %>
+              <tr class="previous-months-heading">
+                <td colspan="<%= columns.length + 3 + (mainHasSourceColumn ? 1 : 0) + (mainHasAccountColumn ? 1 : 0) + (mainHasAge ? 1 : 0) %>" style="background:#F2F6FA; font-weight:600; font-size:0.8rem; color:#4a5a73;">
+                  Previous 3 months, before the review period: for context, not counted (<%= previousPage ? previousPage.total : previousRows.length %>)
+                </td>
+              </tr>
+            <% } %>
+            <tr <%- item.lookback ? 'class="previous-months-row" style="opacity:0.8;"' : (item.displayOnly ? 'class="display-only-row" style="display:none;"' : '') %>>
               <td>
                 <input form="bulkReview" type="checkbox" name="finding_keys" value="<%= item.finding_key %>" aria-label="Select finding">
               </td>
@@ -425,7 +444,7 @@ function toggleBbEditForm(id) {
               </td>
               <td style="min-width:180px;">
                 <span class="chip <%= item.review_state === 'active' ? 'chip-success' : 'chip-default' %>">
-                  <%= item.review_state.replace('_', ' ') %><%= item.displayOnly ? ' · display only' : '' %>
+                  <%= item.review_state.replace('_', ' ') %><%= item.lookback ? ' · previous months, not counted' : (item.displayOnly ? ' · display only' : '') %>
                 </span>
                 <% if (item.ignored_until) { %>
                   <div class="text-muted">Until <%= new Date(item.ignored_until).toLocaleDateString('en-GB') %></div>
@@ -568,6 +587,21 @@ function toggleBbEditForm(id) {
         </tbody>
       </table>
     </div>
+    <% if (previousPage && previousPage.totalPages > 1) { %>
+      <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 20px;">
+        <span style="color:#7C8FAC; font-size:0.8rem;">
+          Previous 3 months: page <%= previousPage.page %> of <%= previousPage.totalPages %> · <%= previousPage.total %> items
+        </span>
+        <div style="display:flex; gap:8px;">
+          <% if (previousPage.page > 1) { %>
+            <a class="btn btn-outlined btn-sm" href="?status=<%= status %>&page=<%= pagination.page %>&ppage=<%= previousPage.page - 1 %><%= contact ? '&contact=' + encodeURIComponent(contact) : '' %>">Previous</a>
+          <% } %>
+          <% if (previousPage.page < previousPage.totalPages) { %>
+            <a class="btn btn-outlined btn-sm" href="?status=<%= status %>&page=<%= pagination.page %>&ppage=<%= previousPage.page + 1 %><%= contact ? '&contact=' + encodeURIComponent(contact) : '' %>">Next</a>
+          <% } %>
+        </div>
+      </div>
+    <% } %>
     <% if (typeof pagination !== 'undefined' && pagination.totalPages > 1) { %>
       <div style="display:flex; justify-content:space-between; align-items:center; padding:16px 20px;">
         <span style="color:#7C8FAC; font-size:0.8rem;">

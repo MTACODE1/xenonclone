@@ -20,6 +20,7 @@ const {
   CHECK_DEFAULTS, CHECK_DEFINITIONS, ALL_CHECK_DEFINITIONS, NON_SCORED_CHECKS, calculateHealthScore, findDirectMatches,
   findDuplicateContacts, findDuplicates, excludeDuplicateDrafts, selectUnapprovedBills, findUnexpectedDefaultLines,
   findMisallocatedLines, resolveCapitalReviewCandidateCodes,
+  previousMonthsStart, isWithinPreviousMonths, withPreviousMonths, endOfMonth, countsAsBankProcessed,
   isOldDocument, isOverdueMoreThan, isPurchaseTaxExemptAccount, resolvePeriodChecked, resolveSupplierPatternLookbackMonths,
   resolveMultiAccountPatternLookbackMonths,
   resolveMultiAccountSuppliersMinValue, resolveMultiTaxSuppliersMinValue,
@@ -600,18 +601,12 @@ async function runSync(tenantId, progressCallback, options = {}) {
   for (const a of (chartOfAccounts || [])) if (a.code) accountNameByCode[a.code] = a.name;
   if (chartOfAccountsAvailable) upsertChartOfAccountsCache(orgId, chartOfAccounts);
 
-  // Which accounts count as capital-item candidates is an accountant judgment call, not something
-  // a keyword rule can generalize across industries (an excavation company's asset account might
-  // be named "Equipment hire", which a generic rule would wrongly treat as a rental cost). Set via
-  // the per-client account picker, on top of Xenon's own documented out-of-the-box defaults —
-  // account codes 461 (Printing & Stationery) and 473 (Repairs & Maintenance) "if they exist" —
-  // so a freshly connected client isn't stuck showing "not configured" for codes Xenon would
-  // already be monitoring. See resolveCapitalReviewCandidateCodes for the opt-out tri-state.
+  // Capital-item candidates: the practice default (every expense account except wages, rent, rates, insurance,
+  // interest, depreciation and tax — Abdur, 27 Oct 2026) plus any account a reviewer ticks for this client.
+  // See resolveCapitalReviewCandidateCodes.
   const accountCheckConfigurations = getAccountCheckConfigurationForOrg(orgId);
   const accountConfigByCode = new Map(accountCheckConfigurations.map(account => [account.account_code, account]));
-  const capitalReviewCandidateCodes = resolveCapitalReviewCandidateCodes(
-    accountCheckConfigurations, accountNameByCode, org.account_settings_initialised
-  );
+  const capitalReviewCandidateCodes = resolveCapitalReviewCandidateCodes(accountCheckConfigurations, chartOfAccounts);
   // MTA capitalises assets from £2,000, so £2,000 is the practice floor for every client (Abdur, 20 Oct 2026).
   // Xenon's own per-client figures (£200 for most of its clients) no longer apply; a client can only raise it.
   const capitalFloor = Math.max(PRACTICE_POLICY.capitalisationThresholdGbp, parseFloat(getSetting('capital_review_threshold')) || 0);
@@ -812,6 +807,19 @@ async function runSync(tenantId, progressCallback, options = {}) {
 
   const inPeriod = items => items.filter(item => isWithinPeriod(toDateString(item.date), period));
   const sinceLD = inPeriod;
+  // Each review-period check below builds its list through a function of one of these two scopes. The review-period
+  // scope is exactly the data the check always used, so its count, value and score are unchanged; the previous-months
+  // scope gives the same check's items for the 3 months before the period, stored after them as display-only rows.
+  const previousStart = previousMonthsStart(period);
+  // An unreadable date is simply not in the previous months: these rows are context and must never fail a check.
+  const safeDateString = value => { try { return toDateString(value); } catch (error) { return null; } };
+  const inPreviousMonths = items => items.filter(item => isWithinPreviousMonths(safeDateString(item.date), period, previousStart));
+  const periodScope = { inPeriod, sinceLD, bankSpendTxns, bankReceiveTxns };
+  const previousScope = {
+    inPeriod: inPreviousMonths, sinceLD: inPreviousMonths,
+    bankSpendTxns: inPreviousMonths(allBankTransactions.filter(item => item.type === 'SPEND' && item.status === 'AUTHORISED')),
+    bankReceiveTxns: inPreviousMonths(allBankTransactions.filter(item => item.type === 'RECEIVE' && item.status === 'AUTHORISED')),
+  };
   const throughPeriodEnd = items => items.filter(item => {
     const date = toDateString(item.date);
     return date && date <= period.end;
@@ -921,22 +929,23 @@ async function runSync(tenantId, progressCallback, options = {}) {
     const bankAccountIds = new Set((chartOfAccounts || [])
       .filter(account => account.type === 'BANK' && !excludedBankAccountIds.has(account.accountID))
       .map(account => account.accountID));
-    const items = selectAuthorisedUnreconciled(allBankTransactions, matchingPayments, bankAccountIds)
-      .filter(item => isWithinPeriod(toDateString(item.date), period))
-      .map(item => item.source === 'bank' ? {
+    const unreconciled = selectAuthorisedUnreconciled(allBankTransactions, matchingPayments, bankAccountIds);
+    const toFinding = item => item.source === 'bank' ? {
       id: item.bankTransactionID, date: toDateString(item.date), amount: Math.abs(item.total || 0),
       contact: item.contact?.name, type: item.type, account: item.bankAccount?.name, source: item.source
     } : {
       id: item.paymentID, date: toDateString(item.date), amount: Math.abs(item.amount || 0),
       contact: item.invoice?.contact?.name || item.creditNote?.contact?.name,
       type: item.paymentType, account: item.account?.name, source: item.source
-    });
+    };
+    const items = unreconciled.filter(item => isWithinPeriod(toDateString(item.date), period)).map(toFinding);
+    const previousItems = inPreviousMonths(unreconciled).map(toFinding);
     unreconciledCount = items.length;
     const issue = {
       org_id: orgId, check_type: 'unreconciled_bank_items', importance: 'critical',
       count: unreconciledCount,
       potential_value_gbp: sumAbsoluteExposure(items),
-      detail_json: JSON.stringify(items),
+      detail_json: JSON.stringify(withPreviousMonths(items, previousItems)),
       period_checked: period.key
     };
     insertIssue(issue); issueResults.push(issue);
@@ -949,15 +958,16 @@ async function runSync(tenantId, progressCallback, options = {}) {
     // PAID invoices belong in the pool: Xenon reports a pair where one invoice is already paid as long
     // as another in the group is unpaid (BCPM, Adeola, LiveAdventure and Harlow each have exactly one
     // such group that Akrio missed). requireUnpaidPair below still drops groups where all are paid.
-    const duplicateInvoicePool = inPeriod([
+    const invoicePoolSource = [
       ...accrecAuthorised,
       ...accrecDraft.filter(i => i.status === 'SUBMITTED'),
-    ]);
+    ];
+    const duplicateInvoicePool = inPeriod(invoicePoolSource);
     // Xenon's documented default requires at least one unpaid invoice in a match (same as
     // duplicate_bills below) — previously missing here, so fully-paid duplicate pairs were
     // incorrectly counted as issues.
-    const duplicates = findDuplicates(
-      duplicateInvoicePool,
+    const findInvoiceDuplicates = pool => findDuplicates(
+      pool,
       resolveDuplicateInvoiceWindowDays(org),
       {
         requireUnpaidPair: !resolveDuplicateInvoiceIncludeFullyPaid(org),
@@ -965,10 +975,14 @@ async function runSync(tenantId, progressCallback, options = {}) {
         requireExactTotal: resolveDuplicateInvoiceRequireExactTotal(org),
       }
     );
+    const duplicates = findInvoiceDuplicates(duplicateInvoicePool);
+    // Previous 3 months: groups with at least one invoice dated in them (a group may also reach into the period).
+    const previousDuplicates = findInvoiceDuplicates([...inPreviousMonths(invoicePoolSource), ...duplicateInvoicePool])
+      .filter(group => group.documents.some(document => isWithinPreviousMonths(document.date, period, previousStart)));
     const issue = {
       org_id: orgId, check_type: 'duplicate_invoices', importance: 'high',
       count: duplicates.length, potential_value_gbp: sumAbsoluteExposure(duplicates),
-      detail_json: JSON.stringify(duplicates),
+      detail_json: JSON.stringify(withPreviousMonths(duplicates, previousDuplicates)),
       period_checked: period.key
     };
     insertIssue(issue); issueResults.push(issue);
@@ -981,12 +995,13 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // least one of the twin bills still has amountDue > 0. Row-exact on MBX (10/£944) and
   // 4X4 (6/£493) View Issues; Rose/Handymanz/Fast Track stay at 0.
   try {
-    const duplicateBillPool = inPeriod([
+    const billPoolSource = [
       ...accpayAuthorised,
       ...accpayDraft.filter(i => i.status === 'DRAFT'),
-    ]);
-    const duplicates = findDuplicatesWithSameNumber(
-      duplicateBillPool,
+    ];
+    const duplicateBillPool = inPeriod(billPoolSource);
+    const findBillDuplicates = pool => findDuplicatesWithSameNumber(
+      pool,
       resolveDuplicateBillWindowDays(org),
       {
         requireUnpaidPair: !resolveDuplicateBillIncludeFullyPaid(org),
@@ -994,10 +1009,13 @@ async function runSync(tenantId, progressCallback, options = {}) {
         requireExactTotal: resolveDuplicateBillRequireExactTotal(org),
       }
     );
+    const duplicates = findBillDuplicates(duplicateBillPool);
+    const previousDuplicates = findBillDuplicates([...inPreviousMonths(billPoolSource), ...duplicateBillPool])
+      .filter(group => group.documents.some(document => isWithinPreviousMonths(document.date, period, previousStart)));
     const issue = {
       org_id: orgId, check_type: 'duplicate_bills', importance: 'high',
       count: duplicates.length, potential_value_gbp: sumAbsoluteExposure(duplicates),
-      detail_json: JSON.stringify(duplicates),
+      detail_json: JSON.stringify(withPreviousMonths(duplicates, previousDuplicates)),
       period_checked: period.key
     };
     insertIssue(issue); issueResults.push(issue);
@@ -1046,8 +1064,9 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // --- HIGH: Old Unpaid Bills (more than 60 days past the due date, still unpaid) ---
   // Aged from the due date, not the bill date (Abdur, 20 Oct 2026): a part-paid annual bill dated Jul 2026 and due
   // Jun 2027 is not overdue. Customer invoices still age from the invoice date until the practice says otherwise.
+  // Aged as at the end of the month the period ends in, as Xero's Aged Payables report is (Abdur, 27 Oct 2026).
   try {
-    const asOf = new Date(`${period.end}T00:00:00.000Z`);
+    const asOf = new Date(`${endOfMonth(period.end)}T00:00:00.000Z`);
     const overdue = throughPeriodEnd(accpayAuthorised).filter(i => isOverdueMoreThan(i, asOf) && (i.amountDue || 0) > 0);
     const issue = {
       org_id: orgId, check_type: 'old_unpaid_bills', importance: 'high',
@@ -1102,13 +1121,16 @@ async function runSync(tenantId, progressCallback, options = {}) {
       // opening-balance adjustment) must add to the amount needing review, not cancel other
       // drafts out. Verified against a reference report where |-12,902.76| + 54 matched exactly.
       count: invoices.length, potential_value_gbp: sumAbsoluteExposure(invoices, i => i.total),
-      detail_json: JSON.stringify([
+      detail_json: JSON.stringify(withPreviousMonths([
         ...invoices.map(i => ({
           id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
           date: toDateString(i.date), total: i.total, status: i.status
         })),
         ...duplicateInvoiceFindings,
-      ]),
+      ], inPreviousMonths(accrecDraft).map(i => ({
+        id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
+        date: toDateString(i.date), total: i.total, status: i.status
+      })))),
       period_checked: 'since_lock_date'
     };
     insertIssue(issue); issueResults.push(issue);
@@ -1119,13 +1141,16 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // --- MEDIUM: Unapproved Bills (since lock date) ---
   try {
     const bills = selectUnapprovedBills(selectUnapprovedInPeriod(accpayDraft, period));
+    const toFinding = i => ({
+      id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
+      date: toDateString(i.date), total: i.total, status: i.status
+    });
     const issue = {
       org_id: orgId, check_type: 'unapproved_bills', importance: 'medium',
       count: bills.length, potential_value_gbp: sumAbsoluteExposure(bills, i => i.total),
-      detail_json: JSON.stringify(bills.map(i => ({
-        id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
-        date: toDateString(i.date), total: i.total, status: i.status
-      }))),
+      detail_json: JSON.stringify(withPreviousMonths(
+        bills.map(toFinding), selectUnapprovedBills(inPreviousMonths(accpayDraft)).map(toFinding)
+      )),
       period_checked: 'since_lock_date'
     };
     insertIssue(issue); issueResults.push(issue);
@@ -1264,6 +1289,36 @@ async function runSync(tenantId, progressCallback, options = {}) {
       const transactions = [...v.transactions].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
       multi.push({ contactId: id, name: v.name, accountCodes, dominantCode, potentialValue, transactions });
     }
+    // Previous 3 months: a flagged supplier's lines from the 3 months before the period, listed separately for context.
+    // They change neither which suppliers are flagged nor the value; detection stays the review period only.
+    const flaggedSuppliers = new Map(multi.map(m => [m.contactId, m]));
+    const previousLines = new Map();
+    const addPreviousLine = (contactId, lineAmount, accountCode, txMeta) => {
+      if (!flaggedSuppliers.has(contactId) || !accountCode || isUnderMinimumItem(lineAmount)) return;
+      if (!previousLines.has(contactId)) previousLines.set(contactId, []);
+      previousLines.get(contactId).push({
+        ...txMeta, inPeriod: false, accountCode, accountName: accountNameByCode[accountCode] || null, amount: Math.abs(lineAmount || 0),
+      });
+    };
+    const outsideMultiAccountWindow = item => !isWithinPatternWindow(toDateString(item.date), period, multiAccountPatternStart);
+    for (const bill of inPreviousMonths([
+      ...accpayAuthorised, ...purchaseCredits.filter(item => ['AUTHORISED', 'PAID'].includes(item.status)),
+    ]).filter(outsideMultiAccountWindow)) {
+      for (const line of (bill.lineItems || [])) addPreviousLine(
+        bill.contact?.contactID, grossLineAmount(bill, line), line.accountCode,
+        { date: toDateString(bill.date), reference: bill.reference || bill.invoiceNumber || bill.creditNoteNumber || null, description: line.description || null, ...supplierDocumentMeta(bill) }
+      );
+    }
+    for (const txn of previousScope.bankSpendTxns.filter(outsideMultiAccountWindow)) {
+      for (const line of (txn.lineItems || [])) addPreviousLine(
+        txn.contact?.contactID, grossLineAmount(txn, line), line.accountCode,
+        { date: toDateString(txn.date), reference: txn.reference || null, description: line.description || null, source: 'bank_spend', bankTransactionId: txn.bankTransactionID }
+      );
+    }
+    for (const [contactId, lines] of previousLines) {
+      const supplier = flaggedSuppliers.get(contactId);
+      supplier.transactions = [...supplier.transactions, ...lines.sort((a, b) => (b.date || '').localeCompare(a.date || ''))];
+    }
     const issue = {
       org_id: orgId, check_type: 'multi_account_suppliers', importance: 'medium',
       count: multi.length,
@@ -1379,66 +1434,71 @@ async function runSync(tenantId, progressCallback, options = {}) {
       // On the Flat Rate Scheme input VAT on ordinary purchases is not reclaimed, so no tax code is expected —
       // except on a single item over £2,000, which can be reclaimed. Those clients keep only such items below.
       const flatRateScheme = journalChecks.classifyVatScheme(orgInfo.salesTaxBasis, orgInfo.salesTaxPeriod) === 'flat_rate';
-      const taxMissingLines = [];
-      const billsToCheck = inPeriod(accpayAuthorised);
-      for (const bill of billsToCheck) {
-        for (const line of (bill.lineItems || [])) {
-          if (
-            (!line.taxType || line.taxType === 'NONE') &&
-            (line.lineAmount || 0) > 0 &&
-            line.accountCode && shouldCheckPurchaseTaxAccount(line.accountCode)
-          ) {
-            taxMissingLines.push({
-              invoiceId: bill.invoiceID, contact: bill.contact?.name,
-              date: toDateString(bill.date), accountCode: line.accountCode,
-              description: line.description, amount: netLineAmount(bill, line), source: 'bill'
-            });
+      // Built for one scope at a time: the review period (counted) and the previous 3 months (listed only).
+      const purchaseTaxMissingLines = ({ inPeriod, bankSpendTxns }) => {
+        const taxMissingLines = [];
+        const billsToCheck = inPeriod(accpayAuthorised);
+        for (const bill of billsToCheck) {
+          for (const line of (bill.lineItems || [])) {
+            if (
+              (!line.taxType || line.taxType === 'NONE') &&
+              (line.lineAmount || 0) > 0 &&
+              line.accountCode && shouldCheckPurchaseTaxAccount(line.accountCode)
+            ) {
+              taxMissingLines.push({
+                invoiceId: bill.invoiceID, contact: bill.contact?.name,
+                date: toDateString(bill.date), accountCode: line.accountCode,
+                description: line.description, amount: netLineAmount(bill, line), source: 'bill'
+              });
+            }
           }
         }
-      }
-      // Supplier credit notes carry the same tax-code mistakes as bills. Xenon has an explicit
-      // "purchase tax credit notes" setting (on by default) and counts them; checked against raw
-      // Xero data on 17 clients, adding them is what closes the remaining 1-3 line gaps.
-      for (const note of inPeriod(purchaseCredits.filter(c => ['AUTHORISED', 'PAID'].includes(c.status)))) {
-        for (const line of (note.lineItems || [])) {
-          if (
-            (!line.taxType || line.taxType === 'NONE') &&
-            (line.lineAmount || 0) > 0 &&
-            line.accountCode && shouldCheckPurchaseTaxAccount(line.accountCode)
-          ) {
-            taxMissingLines.push({
-              creditNoteId: note.creditNoteID, number: note.creditNoteNumber, contact: note.contact?.name,
-              date: toDateString(note.date), accountCode: line.accountCode,
-              description: line.description, amount: netLineAmount(note, line), source: 'credit_note'
-            });
+        // Supplier credit notes carry the same tax-code mistakes as bills. Xenon has an explicit
+        // "purchase tax credit notes" setting (on by default) and counts them; checked against raw
+        // Xero data on 17 clients, adding them is what closes the remaining 1-3 line gaps.
+        for (const note of inPeriod(purchaseCredits.filter(c => ['AUTHORISED', 'PAID'].includes(c.status)))) {
+          for (const line of (note.lineItems || [])) {
+            if (
+              (!line.taxType || line.taxType === 'NONE') &&
+              (line.lineAmount || 0) > 0 &&
+              line.accountCode && shouldCheckPurchaseTaxAccount(line.accountCode)
+            ) {
+              taxMissingLines.push({
+                creditNoteId: note.creditNoteID, number: note.creditNoteNumber, contact: note.contact?.name,
+                date: toDateString(note.date), accountCode: line.accountCode,
+                description: line.description, amount: netLineAmount(note, line), source: 'credit_note'
+              });
+            }
           }
         }
-      }
-      for (const txn of inPeriod(bankSpendTxns || [])) {
-        for (const line of (txn.lineItems || [])) {
-          if (
-            (!line.taxType || line.taxType === 'NONE') &&
-            (line.lineAmount || 0) > 0 &&
-            line.accountCode && shouldCheckPurchaseTaxAccount(line.accountCode)
-          ) {
-            taxMissingLines.push({
-              invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
-              date: toDateString(txn.date), accountCode: line.accountCode,
-              description: line.description, amount: netLineAmount(txn, line), source: 'bank_spend'
-            });
+        for (const txn of inPeriod(bankSpendTxns || [])) {
+          for (const line of (txn.lineItems || [])) {
+            if (
+              (!line.taxType || line.taxType === 'NONE') &&
+              (line.lineAmount || 0) > 0 &&
+              line.accountCode && shouldCheckPurchaseTaxAccount(line.accountCode)
+            ) {
+              taxMissingLines.push({
+                invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
+                date: toDateString(txn.date), accountCode: line.accountCode,
+                description: line.description, amount: netLineAmount(txn, line), source: 'bank_spend'
+              });
+            }
           }
         }
-      }
-      const parsedMin = parseFloat(getSetting('tax_missing_min_amount'));
-      taxMissingLines.splice(0, taxMissingLines.length, ...dropTaxMissingNoise(taxMissingLines, {
-        minAmount: Number.isFinite(parsedMin) ? parsedMin : 1,
-        nameByCode: new Map((chartOfAccounts || []).map(a => [a.code, a.name])), skipName: PURCHASE_TAX_NOISE_ACCOUNT_NAME,
-        keepCodes: new Set([
-          ...fixedAssetAccountCodes, ...prepaymentAccountCodes,
-          ...accountCheckConfigurations.filter(a => a.purchase_tax_include_asset_prepayment).map(a => a.account_code),
-        ]),
-      }));
-      if (flatRateScheme) taxMissingLines.splice(0, taxMissingLines.length, ...keepFlatRateLargeItems(taxMissingLines));
+        const parsedMin = parseFloat(getSetting('tax_missing_min_amount'));
+        taxMissingLines.splice(0, taxMissingLines.length, ...dropTaxMissingNoise(taxMissingLines, {
+          minAmount: Number.isFinite(parsedMin) ? parsedMin : 1,
+          nameByCode: new Map((chartOfAccounts || []).map(a => [a.code, a.name])), skipName: PURCHASE_TAX_NOISE_ACCOUNT_NAME,
+          keepCodes: new Set([
+            ...fixedAssetAccountCodes, ...prepaymentAccountCodes,
+            ...accountCheckConfigurations.filter(a => a.purchase_tax_include_asset_prepayment).map(a => a.account_code),
+          ]),
+        }));
+        if (flatRateScheme) taxMissingLines.splice(0, taxMissingLines.length, ...keepFlatRateLargeItems(taxMissingLines));
+        return taxMissingLines;
+      };
+      const taxMissingLines = purchaseTaxMissingLines(periodScope);
       issue = {
         org_id: orgId, check_type: 'purchase_tax_missing', importance: 'medium',
         // Count each offending LINE, not each distinct invoice/transaction — a bill with 5 lines
@@ -1447,7 +1507,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
         // — which was already summed per-line — matched exactly).
         count: taxMissingLines.length,
         potential_value_gbp: sumAbsoluteExposure(taxMissingLines),
-        detail_json: JSON.stringify(taxMissingLines),
+        detail_json: JSON.stringify(withPreviousMonths(taxMissingLines, purchaseTaxMissingLines(previousScope))),
         period_checked: period.key
       };
     }
@@ -1464,70 +1524,75 @@ async function runSync(tenantId, progressCallback, options = {}) {
       // Not VAT-registered — no tax scheme applies, so a missing tax code isn't an issue.
       issue = { org_id: orgId, check_type: 'sales_tax_missing', importance: 'medium', count: 0, potential_value_gbp: 0, detail_json: '[]', period_checked: 'not_vat_registered' };
     } else {
-      const recentInvoices = sinceLD(accrecAuthorised);
-      const taxMissingLines = [];
-      for (const inv of recentInvoices) {
-        for (const line of (inv.lineItems || [])) {
-          // Only flag lines on revenue/income accounts with missing tax and positive amount
-          if (
-            (!line.taxType || line.taxType === 'NONE') &&
-            (line.lineAmount || 0) > 0 &&
-            line.accountCode && revenueAccountCodes.has(line.accountCode)
-          ) {
-            taxMissingLines.push({
-              invoiceId: inv.invoiceID, number: inv.invoiceNumber, contact: inv.contact?.name,
-              date: toDateString(inv.date), accountCode: line.accountCode,
-              description: line.description, amount: netLineAmount(inv, line), source: 'invoice'
-            });
+      // Built for one scope at a time: the review period (counted) and the previous 3 months (listed only).
+      const salesTaxMissingLines = ({ sinceLD, bankReceiveTxns }) => {
+        const recentInvoices = sinceLD(accrecAuthorised);
+        const taxMissingLines = [];
+        for (const inv of recentInvoices) {
+          for (const line of (inv.lineItems || [])) {
+            // Only flag lines on revenue/income accounts with missing tax and positive amount
+            if (
+              (!line.taxType || line.taxType === 'NONE') &&
+              (line.lineAmount || 0) > 0 &&
+              line.accountCode && revenueAccountCodes.has(line.accountCode)
+            ) {
+              taxMissingLines.push({
+                invoiceId: inv.invoiceID, number: inv.invoiceNumber, contact: inv.contact?.name,
+                date: toDateString(inv.date), accountCode: line.accountCode,
+                description: line.description, amount: netLineAmount(inv, line), source: 'invoice'
+              });
+            }
           }
         }
-      }
-      // Sales credit notes (Xenon's "sales tax credit notes" setting, on by default).
-      for (const note of sinceLD(salesCredits.filter(c => ['AUTHORISED', 'PAID'].includes(c.status)))) {
-        for (const line of (note.lineItems || [])) {
-          if (
-            (!line.taxType || line.taxType === 'NONE') &&
-            (line.lineAmount || 0) > 0 &&
-            line.accountCode && revenueAccountCodes.has(line.accountCode)
-          ) {
-            taxMissingLines.push({
-              creditNoteId: note.creditNoteID, number: note.creditNoteNumber, contact: note.contact?.name,
-              date: toDateString(note.date), accountCode: line.accountCode,
-              description: line.description, amount: netLineAmount(note, line), source: 'credit_note'
-            });
+        // Sales credit notes (Xenon's "sales tax credit notes" setting, on by default).
+        for (const note of sinceLD(salesCredits.filter(c => ['AUTHORISED', 'PAID'].includes(c.status)))) {
+          for (const line of (note.lineItems || [])) {
+            if (
+              (!line.taxType || line.taxType === 'NONE') &&
+              (line.lineAmount || 0) > 0 &&
+              line.accountCode && revenueAccountCodes.has(line.accountCode)
+            ) {
+              taxMissingLines.push({
+                creditNoteId: note.creditNoteID, number: note.creditNoteNumber, contact: note.contact?.name,
+                date: toDateString(note.date), accountCode: line.accountCode,
+                description: line.description, amount: netLineAmount(note, line), source: 'credit_note'
+              });
+            }
           }
         }
-      }
-      // Bank deposits coded straight to a revenue account bypass invoicing entirely, so they need
-      // the same check purchase_tax_missing already runs against bank spend transactions — without
-      // this, a client whose income mostly arrives as direct deposits (not invoices) would show as
-      // clean here while genuinely missing sales tax on the bulk of its revenue.
-      for (const txn of bankReceiveTxns) {
-        for (const line of (txn.lineItems || [])) {
-          if (
-            (!line.taxType || line.taxType === 'NONE') &&
-            (line.lineAmount || 0) > 0 &&
-            line.accountCode && revenueAccountCodes.has(line.accountCode)
-          ) {
-            taxMissingLines.push({
-              invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
-              date: toDateString(txn.date), accountCode: line.accountCode,
-              description: line.description, amount: netLineAmount(txn, line), source: 'bank_receive'
-            });
+        // Bank deposits coded straight to a revenue account bypass invoicing entirely, so they need
+        // the same check purchase_tax_missing already runs against bank spend transactions — without
+        // this, a client whose income mostly arrives as direct deposits (not invoices) would show as
+        // clean here while genuinely missing sales tax on the bulk of its revenue.
+        for (const txn of bankReceiveTxns) {
+          for (const line of (txn.lineItems || [])) {
+            if (
+              (!line.taxType || line.taxType === 'NONE') &&
+              (line.lineAmount || 0) > 0 &&
+              line.accountCode && revenueAccountCodes.has(line.accountCode)
+            ) {
+              taxMissingLines.push({
+                invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
+                date: toDateString(txn.date), accountCode: line.accountCode,
+                description: line.description, amount: netLineAmount(txn, line), source: 'bank_receive'
+              });
+            }
           }
         }
-      }
-      const parsedSalesMin = parseFloat(getSetting('tax_missing_min_amount'));
-      taxMissingLines.splice(0, taxMissingLines.length, ...dropTaxMissingNoise(taxMissingLines, {
-        minAmount: Number.isFinite(parsedSalesMin) ? parsedSalesMin : 1,
-        nameByCode: new Map((chartOfAccounts || []).map(a => [a.code, a.name])), skipName: INTEREST_INCOME_ACCOUNT_NAME,
-      }));
+        const parsedSalesMin = parseFloat(getSetting('tax_missing_min_amount'));
+        taxMissingLines.splice(0, taxMissingLines.length, ...dropTaxMissingNoise(taxMissingLines, {
+          minAmount: Number.isFinite(parsedSalesMin) ? parsedSalesMin : 1,
+          nameByCode: new Map((chartOfAccounts || []).map(a => [a.code, a.name])), skipName: INTEREST_INCOME_ACCOUNT_NAME,
+        }));
+        return taxMissingLines;
+      };
+      const taxMissingLines = salesTaxMissingLines(periodScope);
       issue = {
         org_id: orgId, check_type: 'sales_tax_missing', importance: 'medium',
         // Count each offending line, not each distinct invoice — see purchase_tax_missing above.
         count: taxMissingLines.length,
         potential_value_gbp: sumAbsoluteExposure(taxMissingLines),
-        detail_json: JSON.stringify(taxMissingLines),
+        detail_json: JSON.stringify(withPreviousMonths(taxMissingLines, salesTaxMissingLines(previousScope))),
         period_checked: period.key
       };
     }
@@ -1541,60 +1606,65 @@ async function runSync(tenantId, progressCallback, options = {}) {
     if (!chartOfAccountsAvailable) throw new Error('chart of accounts unavailable this sync — cannot classify expense accounts');
     let issue;
     if (capitalReviewCandidateCodes.size === 0) {
-      // Not configured for this client yet — 0/OK would look identical to "checked, genuinely
-      // clean", which is false. Distinguish it so the UI can show "Not configured" instead.
+      // No account to watch (no eligible expense account and none ticked) — 0/OK would look identical to "checked,
+      // genuinely clean", which is false. Distinguish it so the UI can show "Not configured" instead.
       issue = { org_id: orgId, check_type: 'capital_item_review', importance: 'medium', count: null, potential_value_gbp: 0, detail_json: '[]', period_checked: 'not_configured' };
     } else {
-      const capitalItems = [];
-      const billsSinceLD = inPeriod(accpayAuthorised);
-      for (const bill of billsSinceLD) {
-        for (const line of (bill.lineItems || [])) {
-          // Xenon Capital Item Review compares net (ex-VAT). Bank SPEND lines are usually
-          // Inclusive, so raw lineAmount would overstate and inflate the count.
-          const amount = Math.abs(netLineAmount(bill, line));
-          const threshold = capitalThresholdFor(line.accountCode);
-          if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)) {
-            capitalItems.push({
-              invoiceId: bill.invoiceID, contact: bill.contact?.name,
-              date: toDateString(bill.date), accountCode: line.accountCode,
-              description: line.description, amount
-            });
+      // Built for one scope at a time: the review period (counted) and the previous 3 months (listed only).
+      const capitalItemsFor = ({ inPeriod, bankSpendTxns, bankReceiveTxns }) => {
+        const capitalItems = [];
+        const billsSinceLD = inPeriod(accpayAuthorised);
+        for (const bill of billsSinceLD) {
+          for (const line of (bill.lineItems || [])) {
+            // Xenon Capital Item Review compares net (ex-VAT). Bank SPEND lines are usually
+            // Inclusive, so raw lineAmount would overstate and inflate the count.
+            const amount = Math.abs(netLineAmount(bill, line));
+            const threshold = capitalThresholdFor(line.accountCode);
+            if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)) {
+              capitalItems.push({
+                invoiceId: bill.invoiceID, contact: bill.contact?.name,
+                date: toDateString(bill.date), accountCode: line.accountCode,
+                description: line.description, amount
+              });
+            }
           }
         }
-      }
-      for (const txn of inPeriod(bankSpendTxns || [])) {
-        for (const line of (txn.lineItems || [])) {
-          const amount = Math.abs(netLineAmount(txn, line));
-          const threshold = capitalThresholdFor(line.accountCode);
-          if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)) {
-            capitalItems.push({
-              invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
-              date: toDateString(txn.date), accountCode: line.accountCode,
-              description: line.description, amount, source: 'bank_spend'
-            });
+        for (const txn of inPeriod(bankSpendTxns || [])) {
+          for (const line of (txn.lineItems || [])) {
+            const amount = Math.abs(netLineAmount(txn, line));
+            const threshold = capitalThresholdFor(line.accountCode);
+            if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)) {
+              capitalItems.push({
+                invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
+                date: toDateString(txn.date), accountCode: line.accountCode,
+                description: line.description, amount, source: 'bank_spend'
+              });
+            }
           }
         }
-      }
-      // Rose Capital Item Review lists expense-coded RECEIVE lines too (e.g. ABI overpayment
-      // refunded onto 473). Net basis and the same per-account threshold still apply.
-      for (const txn of bankReceiveTxns) {
-        for (const line of (txn.lineItems || [])) {
-          const amount = Math.abs(netLineAmount(txn, line));
-          const threshold = capitalThresholdFor(line.accountCode);
-          if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)) {
-            capitalItems.push({
-              invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
-              date: toDateString(txn.date), accountCode: line.accountCode,
-              description: line.description, amount, source: 'bank_receive'
-            });
+        // Rose Capital Item Review lists expense-coded RECEIVE lines too (e.g. ABI overpayment
+        // refunded onto 473). Net basis and the same per-account threshold still apply.
+        for (const txn of bankReceiveTxns) {
+          for (const line of (txn.lineItems || [])) {
+            const amount = Math.abs(netLineAmount(txn, line));
+            const threshold = capitalThresholdFor(line.accountCode);
+            if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)) {
+              capitalItems.push({
+                invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
+                date: toDateString(txn.date), accountCode: line.accountCode,
+                description: line.description, amount, source: 'bank_receive'
+              });
+            }
           }
         }
-      }
+        return capitalItems;
+      };
+      const capitalItems = capitalItemsFor(periodScope);
       issue = {
         org_id: orgId, check_type: 'capital_item_review', importance: 'medium',
         count: capitalItems.length,
         potential_value_gbp: sumAbsoluteExposure(capitalItems),
-        detail_json: JSON.stringify(capitalItems),
+        detail_json: JSON.stringify(withPreviousMonths(capitalItems, capitalItemsFor(previousScope))),
         period_checked: period.key
       };
     }
@@ -1732,39 +1802,44 @@ async function runSync(tenantId, progressCallback, options = {}) {
     if (!chartOfAccountsAvailable) throw new Error('chart of accounts unavailable this sync — cannot classify fixed asset accounts');
     // £2,000 by default (team feedback); the 'low_cost_fixed_assets_threshold' setting can change it.
     const LOW_COST_THRESHOLD = parseFloat(getSetting('low_cost_fixed_assets_threshold')) || 2000;
-    const lowCostItems = [];
-    const billsSinceLD = inPeriod(accpayAuthorised);
-    for (const bill of billsSinceLD) {
-      for (const line of (bill.lineItems || [])) {
-        // Xenon describes and reports this threshold on net (ex-VAT) value. Xero's lineAmount is
-        // mixed: Inclusive documents carry gross here, while Exclusive documents carry net.
-        const amount = Math.abs(netLineAmount(bill, line));
-        if (amount > 0 && amount <= LOW_COST_THRESHOLD && line.accountCode && fixedAssetAccountCodes.has(line.accountCode)) {
-          lowCostItems.push({
-            invoiceId: bill.invoiceID, contact: bill.contact?.name,
-            date: toDateString(bill.date), accountCode: line.accountCode,
-            description: line.description, amount
-          });
+    // Built for one scope at a time: the review period (counted) and the previous 3 months (listed only).
+    const lowCostItemsFor = ({ inPeriod, bankSpendTxns }) => {
+      const lowCostItems = [];
+      const billsSinceLD = inPeriod(accpayAuthorised);
+      for (const bill of billsSinceLD) {
+        for (const line of (bill.lineItems || [])) {
+          // Xenon describes and reports this threshold on net (ex-VAT) value. Xero's lineAmount is
+          // mixed: Inclusive documents carry gross here, while Exclusive documents carry net.
+          const amount = Math.abs(netLineAmount(bill, line));
+          if (amount > 0 && amount <= LOW_COST_THRESHOLD && line.accountCode && fixedAssetAccountCodes.has(line.accountCode)) {
+            lowCostItems.push({
+              invoiceId: bill.invoiceID, contact: bill.contact?.name,
+              date: toDateString(bill.date), accountCode: line.accountCode,
+              description: line.description, amount
+            });
+          }
         }
       }
-    }
-    for (const txn of inPeriod(bankSpendTxns || [])) {
-      for (const line of (txn.lineItems || [])) {
-        const amount = Math.abs(netLineAmount(txn, line));
-        if (amount > 0 && amount <= LOW_COST_THRESHOLD && line.accountCode && fixedAssetAccountCodes.has(line.accountCode)) {
-          lowCostItems.push({
-            invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
-            date: toDateString(txn.date), accountCode: line.accountCode,
-            description: line.description, amount, source: 'bank_spend'
-          });
+      for (const txn of inPeriod(bankSpendTxns || [])) {
+        for (const line of (txn.lineItems || [])) {
+          const amount = Math.abs(netLineAmount(txn, line));
+          if (amount > 0 && amount <= LOW_COST_THRESHOLD && line.accountCode && fixedAssetAccountCodes.has(line.accountCode)) {
+            lowCostItems.push({
+              invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
+              date: toDateString(txn.date), accountCode: line.accountCode,
+              description: line.description, amount, source: 'bank_spend'
+            });
+          }
         }
       }
-    }
+      return lowCostItems;
+    };
+    const lowCostItems = lowCostItemsFor(periodScope);
     const issue = {
       org_id: orgId, check_type: 'low_cost_fixed_assets', importance: 'medium',
       count: lowCostItems.length,
       potential_value_gbp: sumAbsoluteExposure(lowCostItems),
-      detail_json: JSON.stringify(lowCostItems),
+      detail_json: JSON.stringify(withPreviousMonths(lowCostItems, lowCostItemsFor(previousScope))),
       period_checked: `fixed_asset_accounts_lte_${LOW_COST_THRESHOLD}_since_lock_date`
     };
     insertIssue(issue); issueResults.push(issue);
@@ -1804,17 +1879,19 @@ async function runSync(tenantId, progressCallback, options = {}) {
       : useVagueGuess ? [...revenueAccountCodes].filter(code => isVagueAccountName(accountNameByCode[code])) : []);
     const getThresholdForAccount = code =>
       effectiveMisallocatedThreshold(accountConfigByCode.get(code)?.misallocated_threshold, defaultMisallocatedThreshold);
-    const misallocated = [
+    // Built for one scope at a time: the review period (counted) and the previous 3 months (listed only).
+    const misallocatedFor = ({ inPeriod, bankSpendTxns, bankReceiveTxns }) => [
       ...findMisallocatedLines(inPeriod(accpayAuthorised), monitoredExpenseCodes, getThresholdForAccount, 'bill'),
       ...findMisallocatedLines(inPeriod(accrecAuthorised), monitoredRevenueCodes, getThresholdForAccount, 'invoice'),
       ...findMisallocatedLines(inPeriod(bankSpendTxns || []), monitoredExpenseCodes, getThresholdForAccount, 'bank_spend'),
       ...findMisallocatedLines(inPeriod(bankReceiveTxns || []), monitoredRevenueCodes, getThresholdForAccount, 'bank_receive'),
     ];
+    const misallocated = misallocatedFor(periodScope);
     const issue = {
       org_id: orgId, check_type: 'misallocated_items', importance: 'medium',
       count: misallocated.length,
       potential_value_gbp: sumAbsoluteExposure(misallocated),
-      detail_json: JSON.stringify(misallocated),
+      detail_json: JSON.stringify(withPreviousMonths(misallocated, misallocatedFor(previousScope))),
       period_checked: configuredMisallocatedCodes.length
         ? 'configured_accounts_and_thresholds_since_lock_date'
         : `vague_account_fallback_gte_${effectiveMisallocatedThreshold(null, defaultMisallocatedThreshold)}_since_lock_date`
@@ -1828,66 +1905,71 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // Only checked when the contact HAS a default set — a missing default is contact_defaults' job,
   // not this check's, so the two don't double-flag the same root cause.
   try {
-    const unexpectedAccount = [];
-    const billsSinceLD = inPeriod(accpayAuthorised);
-    for (const { document: bill, line, expected } of findUnexpectedDefaultLines(
-      billsSinceLD, contactsById, 'purchasesDefaultAccountCode', 'accountCode'
-    )) {
-      unexpectedAccount.push({
-        contactId: bill.contact?.contactID, contact: bill.contact?.name,
-        date: toDateString(bill.date), accountCode: line.accountCode,
-        expectedAccountCode: expected,
-        description: line.description, amount: Math.abs(netLineAmount(bill, line)), source: 'bill'
-      });
-    }
-    const invoicesSinceLD = sinceLD(accrecAuthorised);
-    for (const inv of invoicesSinceLD) {
-      const contact = contactsById[inv.contact?.contactID];
-      if (!contact?.salesDefaultAccountCode) continue;
-      for (const line of (inv.lineItems || [])) {
-        if (line.accountCode && line.accountCode !== contact.salesDefaultAccountCode) {
-          unexpectedAccount.push({
-            contactId: inv.contact?.contactID, contact: inv.contact?.name,
-            date: toDateString(inv.date), accountCode: line.accountCode,
-            expectedAccountCode: contact.salesDefaultAccountCode,
-            description: line.description, amount: Math.abs(netLineAmount(inv, line)), source: 'invoice'
-          });
+    // Built for one scope at a time: the review period (counted) and the previous 3 months (listed only).
+    const unexpectedAccountFor = ({ inPeriod, sinceLD, bankSpendTxns, bankReceiveTxns }) => {
+      const unexpectedAccount = [];
+      const billsSinceLD = inPeriod(accpayAuthorised);
+      for (const { document: bill, line, expected } of findUnexpectedDefaultLines(
+        billsSinceLD, contactsById, 'purchasesDefaultAccountCode', 'accountCode'
+      )) {
+        unexpectedAccount.push({
+          contactId: bill.contact?.contactID, contact: bill.contact?.name,
+          date: toDateString(bill.date), accountCode: line.accountCode,
+          expectedAccountCode: expected,
+          description: line.description, amount: Math.abs(netLineAmount(bill, line)), source: 'bill'
+        });
+      }
+      const invoicesSinceLD = sinceLD(accrecAuthorised);
+      for (const inv of invoicesSinceLD) {
+        const contact = contactsById[inv.contact?.contactID];
+        if (!contact?.salesDefaultAccountCode) continue;
+        for (const line of (inv.lineItems || [])) {
+          if (line.accountCode && line.accountCode !== contact.salesDefaultAccountCode) {
+            unexpectedAccount.push({
+              contactId: inv.contact?.contactID, contact: inv.contact?.name,
+              date: toDateString(inv.date), accountCode: line.accountCode,
+              expectedAccountCode: contact.salesDefaultAccountCode,
+              description: line.description, amount: Math.abs(netLineAmount(inv, line)), source: 'invoice'
+            });
+          }
         }
       }
-    }
-    for (const txn of inPeriod(bankSpendTxns || [])) {
-      const contact = contactsById[txn.contact?.contactID];
-      if (!contact?.purchasesDefaultAccountCode) continue;
-      for (const line of (txn.lineItems || [])) {
-        if (line.accountCode && line.accountCode !== contact.purchasesDefaultAccountCode) {
-          unexpectedAccount.push({
-            contactId: txn.contact?.contactID, contact: txn.contact?.name,
-            date: toDateString(txn.date), accountCode: line.accountCode,
-            expectedAccountCode: contact.purchasesDefaultAccountCode,
-            description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_spend'
-          });
+      for (const txn of inPeriod(bankSpendTxns || [])) {
+        const contact = contactsById[txn.contact?.contactID];
+        if (!contact?.purchasesDefaultAccountCode) continue;
+        for (const line of (txn.lineItems || [])) {
+          if (line.accountCode && line.accountCode !== contact.purchasesDefaultAccountCode) {
+            unexpectedAccount.push({
+              contactId: txn.contact?.contactID, contact: txn.contact?.name,
+              date: toDateString(txn.date), accountCode: line.accountCode,
+              expectedAccountCode: contact.purchasesDefaultAccountCode,
+              description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_spend'
+            });
+          }
         }
       }
-    }
-    for (const txn of bankReceiveTxns) {
-      const contact = contactsById[txn.contact?.contactID];
-      if (!contact?.salesDefaultAccountCode) continue;
-      for (const line of (txn.lineItems || [])) {
-        if (line.accountCode && line.accountCode !== contact.salesDefaultAccountCode) {
-          unexpectedAccount.push({
-            contactId: txn.contact?.contactID, contact: txn.contact?.name,
-            date: toDateString(txn.date), accountCode: line.accountCode,
-            expectedAccountCode: contact.salesDefaultAccountCode,
-            description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_receive'
-          });
+      for (const txn of bankReceiveTxns) {
+        const contact = contactsById[txn.contact?.contactID];
+        if (!contact?.salesDefaultAccountCode) continue;
+        for (const line of (txn.lineItems || [])) {
+          if (line.accountCode && line.accountCode !== contact.salesDefaultAccountCode) {
+            unexpectedAccount.push({
+              contactId: txn.contact?.contactID, contact: txn.contact?.name,
+              date: toDateString(txn.date), accountCode: line.accountCode,
+              expectedAccountCode: contact.salesDefaultAccountCode,
+              description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_receive'
+            });
+          }
         }
       }
-    }
+      return unexpectedAccount;
+    };
+    const unexpectedAccount = unexpectedAccountFor(periodScope);
     const issue = {
       org_id: orgId, check_type: 'unexpected_account_used', importance: 'medium',
       count: unexpectedAccount.length,
       potential_value_gbp: sumAbsoluteExposure(unexpectedAccount),
-      detail_json: JSON.stringify(unexpectedAccount),
+      detail_json: JSON.stringify(withPreviousMonths(unexpectedAccount, unexpectedAccountFor(previousScope))),
       period_checked: period.key
     };
     insertIssue(issue); issueResults.push(issue);
@@ -1897,67 +1979,71 @@ async function runSync(tenantId, progressCallback, options = {}) {
 
   // --- MEDIUM: Unexpected Tax Code Used (line's tax type differs from the contact's own default) ---
   try {
-    const unexpectedTax = [];
-    const billsSinceLD = inPeriod(accpayAuthorised);
-    for (const { document: bill, line, expected } of findUnexpectedDefaultLines(
-      billsSinceLD, contactsById, 'accountsPayableTaxType', 'taxType'
-    )) {
-      unexpectedTax.push({
-        contactId: bill.contact?.contactID, contact: bill.contact?.name,
-        date: toDateString(bill.date), taxType: line.taxType,
-        expectedTaxType: expected,
-        description: line.description, amount: Math.abs(netLineAmount(bill, line)), source: 'bill'
-      });
-    }
-    const invoicesSinceLD = sinceLD(accrecAuthorised);
-    for (const inv of invoicesSinceLD) {
-      const contact = contactsById[inv.contact?.contactID];
-      if (!contact?.accountsReceivableTaxType) continue;
-      for (const line of (inv.lineItems || [])) {
-        if (line.taxType && line.taxType !== contact.accountsReceivableTaxType) {
-          unexpectedTax.push({
-            contactId: inv.contact?.contactID, contact: inv.contact?.name,
-            date: toDateString(inv.date), taxType: line.taxType,
-            expectedTaxType: contact.accountsReceivableTaxType,
-            description: line.description, amount: Math.abs(netLineAmount(inv, line)), source: 'invoice'
-          });
+    // Built for one scope at a time: the review period (counted) and the previous 3 months (listed only).
+    const unexpectedTaxFor = ({ inPeriod, sinceLD, bankSpendTxns, bankReceiveTxns }) => {
+      const unexpectedTax = [];
+      const billsSinceLD = inPeriod(accpayAuthorised);
+      for (const { document: bill, line, expected } of findUnexpectedDefaultLines(
+        billsSinceLD, contactsById, 'accountsPayableTaxType', 'taxType'
+      )) {
+        unexpectedTax.push({
+          contactId: bill.contact?.contactID, contact: bill.contact?.name,
+          date: toDateString(bill.date), taxType: line.taxType,
+          expectedTaxType: expected,
+          description: line.description, amount: Math.abs(netLineAmount(bill, line)), source: 'bill'
+        });
+      }
+      const invoicesSinceLD = sinceLD(accrecAuthorised);
+      for (const inv of invoicesSinceLD) {
+        const contact = contactsById[inv.contact?.contactID];
+        if (!contact?.accountsReceivableTaxType) continue;
+        for (const line of (inv.lineItems || [])) {
+          if (line.taxType && line.taxType !== contact.accountsReceivableTaxType) {
+            unexpectedTax.push({
+              contactId: inv.contact?.contactID, contact: inv.contact?.name,
+              date: toDateString(inv.date), taxType: line.taxType,
+              expectedTaxType: contact.accountsReceivableTaxType,
+              description: line.description, amount: Math.abs(netLineAmount(inv, line)), source: 'invoice'
+            });
+          }
         }
       }
-    }
-    for (const txn of inPeriod(bankSpendTxns || [])) {
-      const contact = contactsById[txn.contact?.contactID];
-      if (!contact?.accountsPayableTaxType) continue;
-      for (const line of (txn.lineItems || [])) {
-        if (line.taxType && line.taxType !== contact.accountsPayableTaxType) {
-          unexpectedTax.push({
-            contactId: txn.contact?.contactID, contact: txn.contact?.name,
-            date: toDateString(txn.date), taxType: line.taxType,
-            expectedTaxType: contact.accountsPayableTaxType,
-            description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_spend'
-          });
+      for (const txn of inPeriod(bankSpendTxns || [])) {
+        const contact = contactsById[txn.contact?.contactID];
+        if (!contact?.accountsPayableTaxType) continue;
+        for (const line of (txn.lineItems || [])) {
+          if (line.taxType && line.taxType !== contact.accountsPayableTaxType) {
+            unexpectedTax.push({
+              contactId: txn.contact?.contactID, contact: txn.contact?.name,
+              date: toDateString(txn.date), taxType: line.taxType,
+              expectedTaxType: contact.accountsPayableTaxType,
+              description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_spend'
+            });
+          }
         }
       }
-    }
-    for (const txn of bankReceiveTxns) {
-      const contact = contactsById[txn.contact?.contactID];
-      if (!contact?.accountsReceivableTaxType) continue;
-      for (const line of (txn.lineItems || [])) {
-        if (line.taxType && line.taxType !== contact.accountsReceivableTaxType) {
-          unexpectedTax.push({
-            contactId: txn.contact?.contactID, contact: txn.contact?.name,
-            date: toDateString(txn.date), taxType: line.taxType,
-            expectedTaxType: contact.accountsReceivableTaxType,
-            description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_receive'
-          });
+      for (const txn of bankReceiveTxns) {
+        const contact = contactsById[txn.contact?.contactID];
+        if (!contact?.accountsReceivableTaxType) continue;
+        for (const line of (txn.lineItems || [])) {
+          if (line.taxType && line.taxType !== contact.accountsReceivableTaxType) {
+            unexpectedTax.push({
+              contactId: txn.contact?.contactID, contact: txn.contact?.name,
+              date: toDateString(txn.date), taxType: line.taxType,
+              expectedTaxType: contact.accountsReceivableTaxType,
+              description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_receive'
+            });
+          }
         }
       }
-    }
-    const unexpectedTaxItems = keepAtLeast(unexpectedTax);   // only items of £1 or more
+      return keepAtLeast(unexpectedTax);   // only items of £1 or more
+    };
+    const unexpectedTaxItems = unexpectedTaxFor(periodScope);
     const issue = {
       org_id: orgId, check_type: 'unexpected_tax_code_used', importance: 'medium',
       count: unexpectedTaxItems.length,
       potential_value_gbp: sumAbsoluteExposure(unexpectedTaxItems),
-      detail_json: JSON.stringify(unexpectedTaxItems),
+      detail_json: JSON.stringify(withPreviousMonths(unexpectedTaxItems, unexpectedTaxFor(previousScope))),
       period_checked: period.key
     };
     insertIssue(issue); issueResults.push(issue);
@@ -1972,17 +2058,19 @@ async function runSync(tenantId, progressCallback, options = {}) {
     // are a common real match here: an invoice left in draft while the customer's payment was
     // instead coded straight to income as a raw deposit.
     const unpaidInvoices = [...accrecAuthorised.filter(i => (i.amountDue || 0) > 0), ...accrecDraft];
-    const matches = findDirectMatches(bankReceiveTxns, unpaidInvoices, revenueAccountCodes)
+    // Built for one scope at a time: deposits in the review period (counted) and in the previous 3 months (listed only).
+    const matchesFor = ({ bankReceiveTxns }) => findDirectMatches(bankReceiveTxns, unpaidInvoices, revenueAccountCodes)
       .map(({ transaction, document }) => ({
         bankTransactionId: transaction.bankTransactionID, contact: transaction.contact?.name,
         date: toDateString(transaction.date), amount: transaction.total,
         invoiceId: document.invoiceID, invoiceNumber: document.invoiceNumber
       }));
+    const matches = matchesFor(periodScope);
     const issue = {
       org_id: orgId, check_type: 'invoice_or_direct', importance: 'medium',
       count: matches.length,
       potential_value_gbp: sumAbsoluteExposure(matches),
-      detail_json: JSON.stringify(matches),
+      detail_json: JSON.stringify(withPreviousMonths(matches, matchesFor(previousScope))),
       period_checked: 'since_lock_date'
     };
     insertIssue(issue); issueResults.push(issue);
@@ -1999,17 +2087,19 @@ async function runSync(tenantId, progressCallback, options = {}) {
       ...accpayAuthorised.filter(i => i.status === 'AUTHORISED' && (i.amountDue || 0) > 0),
       ...accpayDraft.filter(i => i.status === 'DRAFT'),
     ];
-    const matches = findDirectMatches(inPeriod(bankSpendTxns || []), unpaidBills, expenseAccountCodes)
+    // Built for one scope at a time: payments in the review period (counted) and in the previous 3 months (listed only).
+    const matchesFor = ({ inPeriod, bankSpendTxns }) => findDirectMatches(inPeriod(bankSpendTxns || []), unpaidBills, expenseAccountCodes)
       .map(({ transaction, document }) => ({
         bankTransactionId: transaction.bankTransactionID, contact: transaction.contact?.name,
         date: toDateString(transaction.date), amount: transaction.total,
         invoiceId: document.invoiceID, invoiceNumber: document.invoiceNumber
       }));
+    const matches = matchesFor(periodScope);
     const issue = {
       org_id: orgId, check_type: 'bill_or_direct', importance: 'medium',
       count: matches.length,
       potential_value_gbp: sumAbsoluteExposure(matches),
-      detail_json: JSON.stringify(matches),
+      detail_json: JSON.stringify(withPreviousMonths(matches, matchesFor(previousScope))),
       period_checked: 'since_lock_date'
     };
     insertIssue(issue); issueResults.push(issue);
@@ -2021,15 +2111,18 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // Paid bills are excluded — Xenon reports 0 for Handymanz while a single PAID bill without
   // an attachment would otherwise keep this permanently non-zero.
   try {
-    const billsSinceLD = inPeriod(accpayAuthorised).filter(b => b.status === 'AUTHORISED');
-    const undocumented = billsSinceLD.filter(b => !b.hasAttachments);
+    // Built for one scope at a time: the review period (counted) and the previous 3 months (listed only).
+    const undocumentedFor = ({ inPeriod }) => inPeriod(accpayAuthorised).filter(b => b.status === 'AUTHORISED')
+      .filter(b => !b.hasAttachments);
+    const toFinding = b => ({
+      invoiceId: b.invoiceID, number: b.invoiceNumber, contact: b.contact?.name,
+      date: toDateString(b.date), total: b.total
+    });
+    const undocumented = undocumentedFor(periodScope);
     const issue = {
       org_id: orgId, check_type: 'undocumented_bills', importance: 'medium',
       count: undocumented.length, potential_value_gbp: 0,
-      detail_json: JSON.stringify(undocumented.map(b => ({
-        invoiceId: b.invoiceID, number: b.invoiceNumber, contact: b.contact?.name,
-        date: toDateString(b.date), total: b.total
-      }))),
+      detail_json: JSON.stringify(withPreviousMonths(undocumented.map(toFinding), undocumentedFor(previousScope).map(toFinding))),
       period_checked: 'since_lock_date'
     };
     insertIssue(issue); issueResults.push(issue);
@@ -2043,12 +2136,16 @@ async function runSync(tenantId, progressCallback, options = {}) {
   if (chartOfAccountsAvailable) {
     try {
       const unusual = journalChecks.detectUnusualJournals({ journals: recentManualJournals, accounts: chartOfAccounts });
+      // The same checks on the journals of the previous 3 months, listed only.
+      const previousUnusual = journalChecks.detectUnusualJournals({
+        journals: inPreviousMonths(allManualJournals.filter(item => item.status === 'POSTED')), accounts: chartOfAccounts,
+      });
       for (const [checkType, items] of Object.entries(unusual)) {
         insertIssue({
           org_id: orgId, check_type: checkType,
           importance: ['journal_vat_control', 'journal_to_bank'].includes(checkType) ? 'critical' : 'medium',
           count: items.length, potential_value_gbp: sumAbsoluteExposure(items),
-          detail_json: JSON.stringify(items), period_checked: 'since_lock_date',
+          detail_json: JSON.stringify(withPreviousMonths(items, previousUnusual[checkType] || [])), period_checked: 'since_lock_date',
         });
       }
     } catch (err) {
@@ -2178,14 +2275,16 @@ async function runSync(tenantId, progressCallback, options = {}) {
     console.error('historical_changes check failed — skipping (will show as "Not synced"):', err.message);
   }
   try {
-    const items = journalChecks.taxReviewByCode({
+    // Built for one scope at a time: the review period (counted) and the previous 3 months (listed only).
+    const itemsFor = ({ inPeriod, bankSpendTxns, bankReceiveTxns }) => journalChecks.taxReviewByCode({
       documents: [...inPeriod(accrecAuthorised), ...inPeriod(accpayAuthorised), ...bankSpendTxns, ...bankReceiveTxns],
       taxRates, minValue: 0,
     });
+    const items = itemsFor(periodScope);
     insertIssue({
       org_id: orgId, check_type: 'tax_review_by_code', importance: 'medium',
       count: items.length, potential_value_gbp: 0,
-      detail_json: JSON.stringify(items), period_checked: 'since_lock_date',
+      detail_json: JSON.stringify(withPreviousMonths(items, itemsFor(previousScope))), period_checked: 'since_lock_date',
     });
   } catch (err) {
     console.error('tax_review_by_code check failed — skipping (will show as "Not synced"):', err.message);
@@ -2246,72 +2345,79 @@ async function runSync(tenantId, progressCallback, options = {}) {
     const salesOnlyTaxTypes = new Set(Object.values(taxRateByType).filter(t => t.canApplyToRevenue && !t.canApplyToExpenses).map(t => t.taxType));
     const purchaseOnlyTaxTypes = new Set(Object.values(taxRateByType).filter(t => t.canApplyToExpenses && !t.canApplyToRevenue).map(t => t.taxType));
 
-    const salesTaxOnBills = [];
-    const salesTaxOnBankSpend = [];
-    const billsSinceLD = inPeriod(accpayAuthorised);
-    for (const bill of billsSinceLD) {
-      for (const line of (bill.lineItems || [])) {
-        if (line.taxType && salesOnlyTaxTypes.has(line.taxType)) {
-          salesTaxOnBills.push({
-            invoiceId: bill.invoiceID, contact: bill.contact?.name,
-            date: toDateString(bill.date), taxType: line.taxType, accountCode: line.accountCode,
-            description: line.description, amount: line.taxAmount, source: 'bill'
-          });
+    // Built for one scope at a time: the review period (counted) and the previous 3 months (listed only).
+    const salesTaxOnBillsFor = ({ inPeriod, bankSpendTxns }) => {
+      const salesTaxOnBills = [];
+      const salesTaxOnBankSpend = [];
+      const billsSinceLD = inPeriod(accpayAuthorised);
+      for (const bill of billsSinceLD) {
+        for (const line of (bill.lineItems || [])) {
+          if (line.taxType && salesOnlyTaxTypes.has(line.taxType)) {
+            salesTaxOnBills.push({
+              invoiceId: bill.invoiceID, contact: bill.contact?.name,
+              date: toDateString(bill.date), taxType: line.taxType, accountCode: line.accountCode,
+              description: line.description, amount: line.taxAmount, source: 'bill'
+            });
+          }
         }
       }
-    }
-    for (const txn of bankSpendTxns) {
-      for (const line of (txn.lineItems || [])) {
-        if (line.taxType && salesOnlyTaxTypes.has(line.taxType) && line.accountCode && expenseAccountCodes.has(line.accountCode)) {
-          salesTaxOnBankSpend.push({
-            invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
-            date: toDateString(txn.date), taxType: line.taxType, accountCode: line.accountCode,
-            description: line.description, amount: line.taxAmount, source: 'bank_spend'
-          });
+      for (const txn of bankSpendTxns) {
+        for (const line of (txn.lineItems || [])) {
+          if (line.taxType && salesOnlyTaxTypes.has(line.taxType) && line.accountCode && expenseAccountCodes.has(line.accountCode)) {
+            salesTaxOnBankSpend.push({
+              invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
+              date: toDateString(txn.date), taxType: line.taxType, accountCode: line.accountCode,
+              description: line.description, amount: line.taxAmount, source: 'bank_spend'
+            });
+          }
         }
       }
-    }
-    const salesTaxOnBillsResult = withDisplayOnlyBankFindings(salesTaxOnBills, salesTaxOnBankSpend);
+      return withDisplayOnlyBankFindings(salesTaxOnBills, salesTaxOnBankSpend);
+    };
+    const salesTaxOnBillsResult = salesTaxOnBillsFor(periodScope);
     insertIssue({
       org_id: orgId, check_type: 'sales_tax_on_bills', importance: 'medium',
       count: salesTaxOnBillsResult.count,
       potential_value_gbp: salesTaxOnBillsResult.potentialValue,
-      detail_json: JSON.stringify(salesTaxOnBillsResult.details),
+      detail_json: JSON.stringify(withPreviousMonths(salesTaxOnBillsResult.details, salesTaxOnBillsFor(previousScope).details)),
       period_checked: 'since_lock_date'
     });
     issueResults.push({ check_type: 'sales_tax_on_bills', importance: 'medium', count: salesTaxOnBillsResult.count, potential_value_gbp: salesTaxOnBillsResult.potentialValue });
 
-    const purchaseTaxOnInvoices = [];
-    const purchaseTaxOnBankReceive = [];
-    const invoicesSinceLD = sinceLD(accrecAuthorised);
-    for (const inv of invoicesSinceLD) {
-      for (const line of (inv.lineItems || [])) {
-        if (line.taxType && purchaseOnlyTaxTypes.has(line.taxType)) {
-          purchaseTaxOnInvoices.push({
-            invoiceId: inv.invoiceID, contact: inv.contact?.name,
-            date: toDateString(inv.date), taxType: line.taxType, accountCode: line.accountCode,
-            description: line.description, amount: line.taxAmount, source: 'invoice'
-          });
+    const purchaseTaxOnInvoicesFor = ({ sinceLD, bankReceiveTxns }) => {
+      const purchaseTaxOnInvoices = [];
+      const purchaseTaxOnBankReceive = [];
+      const invoicesSinceLD = sinceLD(accrecAuthorised);
+      for (const inv of invoicesSinceLD) {
+        for (const line of (inv.lineItems || [])) {
+          if (line.taxType && purchaseOnlyTaxTypes.has(line.taxType)) {
+            purchaseTaxOnInvoices.push({
+              invoiceId: inv.invoiceID, contact: inv.contact?.name,
+              date: toDateString(inv.date), taxType: line.taxType, accountCode: line.accountCode,
+              description: line.description, amount: line.taxAmount, source: 'invoice'
+            });
+          }
         }
       }
-    }
-    for (const txn of bankReceiveTxns) {
-      for (const line of (txn.lineItems || [])) {
-        if (line.taxType && purchaseOnlyTaxTypes.has(line.taxType) && line.accountCode && revenueAccountCodes.has(line.accountCode)) {
-          purchaseTaxOnBankReceive.push({
-            invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
-            date: toDateString(txn.date), taxType: line.taxType, accountCode: line.accountCode,
-            description: line.description, amount: line.taxAmount, source: 'bank_receive'
-          });
+      for (const txn of bankReceiveTxns) {
+        for (const line of (txn.lineItems || [])) {
+          if (line.taxType && purchaseOnlyTaxTypes.has(line.taxType) && line.accountCode && revenueAccountCodes.has(line.accountCode)) {
+            purchaseTaxOnBankReceive.push({
+              invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
+              date: toDateString(txn.date), taxType: line.taxType, accountCode: line.accountCode,
+              description: line.description, amount: line.taxAmount, source: 'bank_receive'
+            });
+          }
         }
       }
-    }
-    const purchaseTaxOnInvoicesResult = withDisplayOnlyBankFindings(purchaseTaxOnInvoices, purchaseTaxOnBankReceive);
+      return withDisplayOnlyBankFindings(purchaseTaxOnInvoices, purchaseTaxOnBankReceive);
+    };
+    const purchaseTaxOnInvoicesResult = purchaseTaxOnInvoicesFor(periodScope);
     insertIssue({
       org_id: orgId, check_type: 'purchase_tax_on_invoices', importance: 'medium',
       count: purchaseTaxOnInvoicesResult.count,
       potential_value_gbp: purchaseTaxOnInvoicesResult.potentialValue,
-      detail_json: JSON.stringify(purchaseTaxOnInvoicesResult.details),
+      detail_json: JSON.stringify(withPreviousMonths(purchaseTaxOnInvoicesResult.details, purchaseTaxOnInvoicesFor(previousScope).details)),
       period_checked: 'since_lock_date'
     });
     issueResults.push({ check_type: 'purchase_tax_on_invoices', importance: 'medium', count: purchaseTaxOnInvoicesResult.count, potential_value_gbp: purchaseTaxOnInvoicesResult.potentialValue });
@@ -2571,8 +2677,9 @@ async function runSync(tenantId, progressCallback, options = {}) {
     const creditNotesPurchase = recentPurchaseCN.filter(notVoided).length;
 
     // Xero returns DELETED bank transactions from GET BankTransactions; they are not processed items.
+    // £0.00 transactions are left out, as Xero's Account Transactions report leaves them out (Abdur, 27 Oct 2026).
     const bankProcessed = allBankTransactions
-      .filter(item => item.status === 'AUTHORISED' && isWithinPeriod(toDateString(item.date), period)).length;
+      .filter(item => item.status === 'AUTHORISED' && isWithinPeriod(toDateString(item.date), period) && countsAsBankProcessed(item)).length;
 
     // Journals are only used for the panorama transaction-count card. A network blip here must
     // never discard a completed health-check run — Rose already lost an 8-hour sync that way,

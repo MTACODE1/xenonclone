@@ -730,7 +730,15 @@ function getIssueByCheckType(orgId, checkType) {
 // reached with a mismatched (issueId, orgId) pair. Requiring orgId here anyway means a future
 // caller that skips that lookup fails closed (returns nothing) instead of silently leaking another
 // organisation's finding detail if it ever passed the wrong issueId.
-function getIssueFindings(issueId, orgId, page = 1, pageSize = 50, status = 'active', contact = '') {
+// Rows from the 3 months before the review period (lookback: true) are listed apart from the review period's own
+// findings: scope 'period' (the default) leaves them out, 'previous' returns only them and 'any' returns both.
+const PREVIOUS_MONTHS_ROW_SQL = `COALESCE(json_extract(f.detail_json, '$.lookback'), 0) = 1`;
+function findingScopeClause(scope) {
+  if (scope === 'any') return '';
+  return scope === 'previous' ? `AND ${PREVIOUS_MONTHS_ROW_SQL}` : `AND NOT ${PREVIOUS_MONTHS_ROW_SQL}`;
+}
+
+function getIssueFindings(issueId, orgId, page = 1, pageSize = 50, status = 'active', contact = '', scope = 'period') {
   const db = getDb();
   const safeSize = Math.min(100, Math.max(1, Number(pageSize) || 50));
   const allowedStatus = ['active', 'dismissed', 'ignored', 'ok', 'all'].includes(status) ? status : 'active';
@@ -746,7 +754,7 @@ function getIssueFindings(issueId, orgId, page = 1, pageSize = 50, status = 'act
     ? `AND (json_extract(f.detail_json, '$.name') LIKE ? ESCAPE '\\' OR json_extract(f.detail_json, '$.contact') LIKE ? ESCAPE '\\' OR json_extract(f.detail_json, '$.contactName') LIKE ? ESCAPE '\\')`
     : '';
   const like = `%${contactTerm.replace(/[\\%_]/g, ch => '\\' + ch)}%`;
-  const where = (allowedStatus === 'all' ? '' : `AND (${effectiveState}) = ?`) + ' ' + contactClause;
+  const where = (allowedStatus === 'all' ? '' : `AND (${effectiveState}) = ?`) + ' ' + contactClause + ' ' + findingScopeClause(scope);
   const params = [issueId, orgId];
   if (allowedStatus !== 'all') params.push(allowedStatus);
   if (contactTerm) params.push(like, like, like);
@@ -791,7 +799,8 @@ function getIssueFindings(issueId, orgId, page = 1, pageSize = 50, status = 'act
 // uncapped, unlike getIssueFindings' pageSize (capped at 100 for normal display pagination), since
 // a real check can have thousands of active findings (e.g. Rose's purchase_tax_missing at 2952) and
 // a bulk action must reach all of them, not silently the first 100.
-function getAllFindingKeysForIssue(issueId, orgId, status = 'active') {
+// Review-period findings only: the previous-months rows are context and are not part of "all N items".
+function getAllFindingKeysForIssue(issueId, orgId, status = 'active', contact = '') {
   const db = getDb();
   const allowedStatus = ['active', 'dismissed', 'ignored', 'ok', 'all'].includes(status) ? status : 'active';
   const effectiveState = `CASE
@@ -806,7 +815,7 @@ function getAllFindingKeysForIssue(issueId, orgId, status = 'active') {
     ? `AND (json_extract(f.detail_json, '$.name') LIKE ? ESCAPE '\\' OR json_extract(f.detail_json, '$.contact') LIKE ? ESCAPE '\\' OR json_extract(f.detail_json, '$.contactName') LIKE ? ESCAPE '\\')`
     : '';
   const like = `%${contactTerm.replace(/[\\%_]/g, ch => '\\' + ch)}%`;
-  const where = (allowedStatus === 'all' ? '' : `AND (${effectiveState}) = ?`) + ' ' + contactClause;
+  const where = (allowedStatus === 'all' ? '' : `AND (${effectiveState}) = ?`) + ' ' + contactClause + ' ' + findingScopeClause('period');
   const params = [issueId, orgId];
   if (allowedStatus !== 'all') params.push(allowedStatus);
   if (contactTerm) params.push(like, like, like);
@@ -823,9 +832,10 @@ function getAllFindingKeysForIssue(issueId, orgId, status = 'active') {
 // orgId is defense-in-depth here too — see getIssueFindings above for why.
 function getIssueFindingSummary(issueId, orgId) {
   const db = getDb();
-  const summary = { active: 0, dismissed: 0, ignored: 0, ok: 0 };
+  const summary = { active: 0, dismissed: 0, ignored: 0, ok: 0, previous: 0 };
   const rows = db.prepare(`
     SELECT CASE
+      WHEN ${PREVIOUS_MONTHS_ROW_SQL} THEN 'previous'
       WHEN r.state = 'dismissed' THEN 'dismissed'
       WHEN r.state = 'ignored' AND datetime(r.ignored_until) > datetime('now') THEN 'ignored'
       WHEN r.state = 'ok' AND r.period_key = i.period_checked THEN 'ok'
@@ -857,7 +867,7 @@ function getReportFindings(orgId, perCheckLimit = 50) {
       JOIN issues i ON i.id = f.issue_id
       LEFT JOIN finding_review_states r
         ON r.org_id = f.org_id AND r.check_type = f.check_type AND r.finding_key = f.finding_key
-      WHERE f.org_id = ? AND f.is_active = 1 AND i.is_active = 1
+      WHERE f.org_id = ? AND f.is_active = 1 AND i.is_active = 1 ${findingScopeClause('period')}
     )
     SELECT * FROM ranked WHERE row_number <= ? ORDER BY check_type, id
   `).all(orgId, limit);

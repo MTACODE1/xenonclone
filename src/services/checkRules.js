@@ -679,20 +679,28 @@ function findUnexpectedDefaultLines(documents, contactsById, defaultField, lineF
   return findings;
 }
 
-// Capital Item Review defaults + opt-out (2026-09): Xenon monitors account codes 461/473 by
-// default "if they exist" — but is_capital_candidate on its own can't tell "never configured"
-// (apply the default) apart from "explicitly unchecked" (a deliberate opt-out), since both store 0.
-// accountSettingsInitialised is the tri-state that resolves this: false/0 means the accountant has
-// never saved the Per-account Check Settings page for this org, so the documented default still
-// applies; true/1 means it has been saved at least once, so is_capital_candidate is trusted
-// verbatim — including an explicit 0 on 461 or 473, which now genuinely excludes it.
-function resolveCapitalReviewCandidateCodes(accountCheckConfigurations, accountNameByCode, accountSettingsInitialised) {
+// Capital Item Review candidates (Abdur, 27 Oct 2026): "Use all expense accounts except wages, rent, rates, insurance,
+// loan interest, depreciation and tax". This replaces Xenon's 461/473 default and its saved-settings opt-out: the
+// 461/473 ticks most clients carry came from an import of Xenon's defaults, not from the accountant, so the practice
+// default applies to every client and an account a reviewer ticks is added on top. A chart with no eligible account
+// and nothing ticked still shows "Not configured".
+const CAPITAL_DEFAULT_ACCOUNT_TYPES = new Set(['EXPENSE', 'OVERHEADS', 'DIRECTCOSTS']);
+const CAPITAL_DEFAULT_EXCLUDED_NAME = new RegExp([
+  String.raw`wages?`, String.raw`salar(?:y|ies)`, String.raw`payroll`, String.raw`paye`, String.raw`national\s+insurance`,
+  String.raw`ni`, String.raw`nic`, String.raw`pensions?`, String.raw`remuneration`,
+  String.raw`rents?`, String.raw`rental`, String.raw`rates`, String.raw`council\s+tax`,
+  String.raw`insurances?`, String.raw`interest`, String.raw`depreciation`, String.raw`amorti[sz]ation`,
+  String.raw`tax`, String.raw`taxes`, String.raw`taxation`, String.raw`vat`,
+].map(word => String.raw`\b${word}\b`).join('|'), 'i');
+function isCapitalDefaultAccount(account) {
+  if (!account || !CAPITAL_DEFAULT_ACCOUNT_TYPES.has(String(account.type || '').toUpperCase())) return false;
+  return !CAPITAL_DEFAULT_EXCLUDED_NAME.test(String(account.name || ''));
+}
+function resolveCapitalReviewCandidateCodes(accountCheckConfigurations, chartOfAccounts) {
   const codes = new Set(
     accountCheckConfigurations.filter(account => account.is_capital_candidate).map(account => account.account_code)
   );
-  if (!accountSettingsInitialised) {
-    for (const code of ['461', '473']) if (accountNameByCode[code]) codes.add(code);
-  }
+  for (const account of chartOfAccounts || []) if (account.code && isCapitalDefaultAccount(account)) codes.add(account.code);
   return codes;
 }
 
@@ -870,7 +878,45 @@ const PRACTICE_POLICY = Object.freeze({
   misallocatedThresholdGbp: 1,        // anything in a vague account is worth a look, however small
   minimumItemGbp: 1,                  // multi-account, multi-tax and unexpected tax code ignore items under £1
   multiAccountLookbackMonths: 0,      // multi-account looks at the review period only
+  previousMonthsShown: 3,             // every review-period check also lists the 3 months before it, not counted
 });
+
+// The previous 3 months (Abdur, 27 Oct 2026): every check that lists items from the review period also lists the items
+// from the 3 months before it, in a separate section that never counts towards the check's number, value or score.
+// The window runs from the same day 3 calendar months before the period start (clamped to the month's last day,
+// so 31 May gives 28 or 29 Feb) up to the period start. For a since-lock-date period the start day itself is outside
+// the period (see isWithinPeriod), so it belongs here.
+function previousMonthsStart(period, months = PRACTICE_POLICY.previousMonthsShown) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(period?.start || ''));
+  if (!match || !(months > 0)) return null;
+  const [year, month, day] = [Number(match[1]), Number(match[2]) - 1, Number(match[3])];
+  const target = new Date(Date.UTC(year, month - months, 1));
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  target.setUTCDate(Math.min(day, lastDay));
+  return target.toISOString().slice(0, 10);
+}
+function isWithinPreviousMonths(date, period, windowStart) {
+  if (!date || !windowStart || !period?.start) return false;
+  return date >= windowStart && date <= period.start && !isWithinPeriod(date, period);
+}
+// Previous-months rows go after the review-period rows (so the review-period rows keep their finding keys and review
+// states), are display only (no count, value or score) and say where they came from.
+function withPreviousMonths(counted, previous) {
+  return [...counted, ...(previous || []).map(item => ({ ...item, inPeriod: false, lookback: true, displayOnly: true }))];
+}
+
+// Xero's aged reports run to the end of the month, so a bill is aged as at the last day of the month the review
+// period ends in (Abdur, 27 Oct 2026). A period that already ends on a month end is unchanged.
+function endOfMonth(isoDate) {
+  const match = /^(\d{4})-(\d{2})-\d{2}$/.exec(String(isoDate || ''));
+  if (!match) return isoDate;
+  return new Date(Date.UTC(Number(match[1]), Number(match[2]), 0)).toISOString().slice(0, 10);
+}
+
+// Bank Processed counts what Xero lists in Account Transactions, which leaves out £0.00 transactions.
+function countsAsBankProcessed(transaction) {
+  return Math.abs(Number(transaction?.total) || 0) >= 0.005;
+}
 // A vague account is a catch-all: its name is made only of catch-all words ("General Expenses", "Sundry", "Other Costs",
 // "Miscellaneous"). A name that also says what the money is for ("General Insurance", "Other Direct Costs",
 // "Travel - Other") is a specific account and is not treated as vague.
@@ -1085,7 +1131,8 @@ module.exports = {
   selectUnapprovedBills,
   findUnexpectedDefaultLines,
   findMisallocatedLines,
-  resolveCapitalReviewCandidateCodes,
+  resolveCapitalReviewCandidateCodes, isCapitalDefaultAccount,
+  previousMonthsStart, isWithinPreviousMonths, withPreviousMonths, endOfMonth, countsAsBankProcessed,
   isOldDocument, isOverdueMoreThan,
   isPurchaseTaxExemptAccount,
   addFindingKeys,

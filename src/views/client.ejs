@@ -861,6 +861,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
                   </td>
                   <td style="padding: 8px 12px; white-space: nowrap;">
                     <label><input type="checkbox" name="capital_accounts" value="<%= acc.account_code %>" <%= acc.is_capital_candidate ? 'checked' : '' %>> Monitor</label>
+                    <% if (acc.capitalDefault) { %><div style="font-size: 0.7rem; color: #7C8FAC;">Watched by the practice default</div><% } %>
                     <input type="number" min="0.01" step="0.01" name="capital_threshold[<%= acc.account_code %>]"
                       value="<%= acc.capital_review_threshold == null ? '' : acc.capital_review_threshold %>" placeholder="£500"
                       class="form-input" style="width: 85px; padding: 4px 6px;">

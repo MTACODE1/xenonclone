@@ -81,3 +81,38 @@ test('other checks keep the normal header, and an unknown not-applicable label g
   });
   assert.match(unknown, /not applicable to this client/);
 });
+
+// ---- The previous 3 months on every review-period check (Abdur, 27 Oct 2026) ----
+const lineRow = (id, date, extra = {}) => ({
+  finding_key: `line:${id}`, invoiceId: id, contact: 'Supplier One', date, accountCode: '429', description: `desc-${id}`,
+  amount: 12.5, review_state: 'active', xero_links: [], standaloneNote: null, ...extra,
+});
+const previousRow = (id, date) => lineRow(id, date, { lookback: true, inPeriod: false, displayOnly: true });
+const renderWithPrevious = (items, previousItems) => ejs.renderFile(path.join(__dirname, '../src/views/checkDetail.ejs'), {
+  ...locals, checkType: 'misallocated_items', def: { type: 'misallocated_items', label: 'Misallocated Items', importance: 'medium' },
+  items, previousItems, previousPagination: { page: 1, totalPages: 1, total: previousItems.length, items: previousItems },
+});
+
+test('previous-months rows come after the period rows under their own heading, visible and marked not counted', async () => {
+  const html = await renderWithPrevious([lineRow('p1', '2026-01-10')], [previousRow('e1', '2025-09-10'), previousRow('e2', '2025-08-10')]);
+  assert.equal((html.match(/previous-months-heading/g) || []).length, 1, 'one heading');
+  assert.match(html, /Previous 3 months, before the review period: for context, not counted \(2\)/);
+  assert.ok(html.indexOf('desc-p1') < html.indexOf('previous-months-heading'), 'period rows first');
+  assert.ok(html.indexOf('previous-months-heading') < html.indexOf('desc-e1'), 'previous rows after the heading');
+  assert.equal((html.match(/class="previous-months-row"/g) || []).length, 2);
+  assert.doesNotMatch(html, /display-only-row/, 'not hidden behind the bank toggle');
+  assert.match(html, /previous months, not counted/);
+  assert.doesNotMatch(html, />\s*lookback\s*</i, 'the raw flag is not a column');
+});
+
+test('nothing in the period but rows in the previous months: says so and still lists them', async () => {
+  const html = await renderWithPrevious([], [previousRow('e1', '2025-09-10')]);
+  assert.match(html, /No active findings in the review period/);
+  assert.match(html, /desc-e1/);
+});
+
+test('no previous-months rows: the page is as before, with no heading', async () => {
+  const html = await renderWithPrevious([lineRow('p1', '2026-01-10')], []);
+  assert.doesNotMatch(html, /previous-months-heading/);
+  assert.match(html, /desc-p1/);
+});

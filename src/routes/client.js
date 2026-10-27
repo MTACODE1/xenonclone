@@ -30,7 +30,7 @@ const { xeroLinks } = require('../services/xeroLinks');
 const { formatTurnoverGbp, groupSupplierTransactions } = require('../services/checkPresentation');
 const { syncFreeAgentOrganisation } = require('../services/freeagentSync');
 const { CASH_HEALTH_CATEGORIES } = require('../services/insightSync');
-const { resolveCheckDisplayStatus } = require('../services/checkRules');
+const { resolveCheckDisplayStatus, isCapitalDefaultAccount } = require('../services/checkRules');
 const { fetchCompanyProfile, normalizeCompanyNumber } = require('../services/companiesHouse');
 const {
   periodInput, resolvePeriod, shouldUseCacheOnlyForReanalysis,
@@ -109,7 +109,10 @@ function clientViewData(org, query = {}) {
     companiesHouse: getCompaniesHouseProfileForOrg(org.id),
     companiesHouseKeySet: !!getSetting('companies_house_api_key'),
     expenseAccounts: getExpenseAccountsForOrg(org.id),
-    accountConfigurations: getAccountCheckConfigurationForOrg(org.id),
+    // capitalDefault: watched for Capital Item Review by the practice default, whether or not it is ticked.
+    accountConfigurations: getAccountCheckConfigurationForOrg(org.id).map(account => ({
+      ...account, capitalDefault: isCapitalDefaultAccount({ type: account.account_type, name: account.account_name }),
+    })),
     scoreBreakdown: parseScoreBreakdown(org),
     insight: getAllInsightData(org.id),
     insightKv: getInsightSettingsKv(org.id),
@@ -421,13 +424,19 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
   const issue = getIssueByCheckType(org.id, checkType);
   const def = CHECK_DEFINITIONS.find(d => d.type === checkType);
   let pagination = { items: [], page: 1, pageSize: 50, total: 0, totalPages: 1 };
-  let summary = { active: 0, dismissed: 0, ignored: 0, ok: 0 };
+  let summary = { active: 0, dismissed: 0, ignored: 0, ok: 0, previous: 0 };
+  // The 3 months before the review period, listed after the period's findings (context only, never counted).
+  let previousPagination = { items: [], page: 1, pageSize: 50, total: 0, totalPages: 1 };
   const status = ['active', 'dismissed', 'ignored', 'ok', 'all'].includes(req.query.status)
     ? req.query.status : 'all';
   const contact = typeof req.query.contact === 'string' ? req.query.contact.trim().slice(0, 100) : '';
   if (issue) {
     pagination = getIssueFindings(issue.id, org.id, req.query.page, 50, status, contact);
     summary = getIssueFindingSummary(issue.id, org.id);
+    // Shown under the Active and All tabs; the Dismissed/Ignored/OK tabs list review-period findings only.
+    if (status === 'active' || status === 'all') {
+      previousPagination = getIssueFindings(issue.id, org.id, req.query.ppage, 50, 'all', contact, 'previous');
+    }
     if (pagination.total === 0 && issue.detail_json && !contact) {
       try {
         pagination.items = JSON.parse(issue.detail_json);
@@ -458,7 +467,7 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
   // this column for. Computed at render time against the real current date, same as a user reading
   // "how old is this right now" would expect, not the sync's own as-of date used to DECIDE it's old.
   const showAge = checkType.startsWith('old_');
-  const items = pagination.items.map(item => {
+  const decorate = item => {
     const lineReviews = Array.isArray(item.transactions) && item.transactions.length
       ? getLineReviewStates(org.id, checkType, item.finding_key)
       : {};
@@ -479,14 +488,16 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
           })
         : undefined,
     };
-  });
+  };
+  const items = pagination.items.map(decorate);
+  const previousItems = previousPagination.items.map(decorate);
   const extraData = {};
   if (checkType === 'bank_balance') {
     extraData.bankReconciliation = getBankReconciliationForOrg(org.id);
     extraData.excludedBankAccountIds = getExcludedBankAccountIds(org.id);
   }
   res.render('checkDetail', {
-    org, issue, def, items, pagination, summary, status, contact, checkType, checkDescriptions, groupSupplierTransactions,
+    org, issue, def, items, pagination, previousItems, previousPagination, summary, status, contact, checkType, checkDescriptions, groupSupplierTransactions,
     displayStatus: issue ? resolveCheckDisplayStatus(issue) : null, ...extraData,
   });
 });
@@ -508,7 +519,8 @@ router.get('/:tenantId/check/:checkType/export.csv', async (req, res) => {
   const status = ['active', 'dismissed', 'ignored', 'ok', 'all'].includes(req.query.status) ? req.query.status : 'all';
   const rows = [];
   for (let page = 1; ; page++) {
-    const chunk = getIssueFindings(issue.id, org.id, page, 100, status, typeof req.query.contact === 'string' ? req.query.contact : '');
+    // Both the review period and the previous 3 months; previous-months rows carry lookback=true in their own column.
+    const chunk = getIssueFindings(issue.id, org.id, page, 100, status, typeof req.query.contact === 'string' ? req.query.contact : '', 'any');
     for (const item of chunk.items) {
       const { transactions, ...parent } = item;
       if (Array.isArray(transactions) && transactions.length) {

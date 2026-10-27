@@ -753,51 +753,39 @@ test('findMisallocatedLines computes net (ex-VAT) amount consistently regardless
   assert.equal(findings[0].amount, 100);
 });
 
-// --- Capital Item Review defaults + opt-out (resolveCapitalReviewCandidateCodes) ---
-// Confirmed gap: 461/473 were auto-added unconditionally on every sync, so an accountant could
-// never deliberately exclude either one — is_capital_candidate=0 looked identical whether it meant
-// "never touched" or "explicitly unchecked." accountSettingsInitialised is the tri-state that
-// makes an opt-out possible once the Per-account Check Settings page has been saved at least once.
+// --- Capital Item Review defaults (resolveCapitalReviewCandidateCodes) ---
+// Practice default since 27 Oct 2026 (Abdur): every expense account except wages, rent, rates, insurance, interest,
+// depreciation and tax, for every client, plus any account a reviewer ticks. It replaces Xenon's 461/473 default and
+// the "saved settings" opt-out, since the 461/473 ticks came from the Xenon import, not from the accountant.
 
-test('a never-configured organisation gets Xenon\'s documented 461/473 default automatically', () => {
-  const codes = resolveCapitalReviewCandidateCodes(
-    [], { '461': 'Printing & Stationery', '473': 'Repairs & Maintenance' }, false
-  );
-  assert.deepEqual([...codes].sort(), ['461', '473']);
+const CAPITAL_CHART = [
+  { code: '461', name: 'Printing & Stationery', type: 'OVERHEADS' },
+  { code: '473', name: 'Repairs & Maintenance', type: 'OVERHEADS' },
+  { code: '477', name: 'Wages and Salaries', type: 'EXPENSE' },
+  { code: '200', name: 'Sales', type: 'REVENUE' },
+];
+
+test('a client with nothing saved watches the practice default', () => {
+  assert.deepEqual([...resolveCapitalReviewCandidateCodes([], CAPITAL_CHART)].sort(), ['461', '473']);
 });
 
-test('461/473 are only added when the account actually exists in the chart of accounts', () => {
-  const codes = resolveCapitalReviewCandidateCodes([], { '473': 'Repairs & Maintenance' }, false);
-  assert.deepEqual([...codes], ['473']);
+test('an account is only watched by default when it exists in the chart of accounts', () => {
+  assert.deepEqual([...resolveCapitalReviewCandidateCodes([], CAPITAL_CHART.filter(a => a.code !== '461'))], ['473']);
 });
 
-test('an explicit account-level override is always respected, initialised or not', () => {
-  const configs = [{ account_code: '325', is_capital_candidate: 1 }];
-  const codes = resolveCapitalReviewCandidateCodes(configs, {}, false);
+test('an explicitly ticked account is always watched, even one the default leaves out', () => {
+  const configs = [{ account_code: '325', is_capital_candidate: 1 }, { account_code: '477', is_capital_candidate: 1 }];
+  const codes = resolveCapitalReviewCandidateCodes(configs, CAPITAL_CHART);
   assert.ok(codes.has('325'));
+  assert.ok(codes.has('477'));
 });
 
-test('once the settings page has been saved, an explicit opt-out on 461 genuinely excludes it — no auto-add override', () => {
-  // The accountant saved the form with 461 left unchecked and 473 checked: both store
-  // is_capital_candidate, but only accountSettingsInitialised=true tells us 461's 0 was deliberate.
+test('an unticked default account is still watched (the practice default applies to every client)', () => {
   const configs = [
     { account_code: '461', is_capital_candidate: 0 },
     { account_code: '473', is_capital_candidate: 1 },
   ];
-  const names = { '461': 'Printing & Stationery', '473': 'Repairs & Maintenance' };
-  assert.deepEqual([...resolveCapitalReviewCandidateCodes(configs, names, true)], ['473']);
-});
-
-test('before the settings page is ever saved, the SAME explicit-zero-on-461 data still gets auto-added back', () => {
-  // Contrast with the test above: identical is_capital_candidate data, but accountSettingsInitialised
-  // is still false (this org has genuinely never saved the form) — 461 having 0 here is coincidental
-  // (perhaps a stale default row), not a deliberate choice, so the documented default still applies.
-  const configs = [
-    { account_code: '461', is_capital_candidate: 0 },
-    { account_code: '473', is_capital_candidate: 1 },
-  ];
-  const names = { '461': 'Printing & Stationery', '473': 'Repairs & Maintenance' };
-  assert.deepEqual([...resolveCapitalReviewCandidateCodes(configs, names, false)].sort(), ['461', '473']);
+  assert.deepEqual([...resolveCapitalReviewCandidateCodes(configs, CAPITAL_CHART)].sort(), ['461', '473']);
 });
 
 // --- findDuplicates: requireExactReference (Xenon's documented "Exact Reference" toggle) ---
@@ -1187,9 +1175,10 @@ test('a brand-new client (nothing saved) starts on the practice policy without a
   const misallocatedDefault = resolveMisallocatedItemsDefaultThreshold(fresh, 1);
   assert.equal(effectiveMisallocatedThreshold(null, misallocatedDefault), 1, 'misallocated items are flagged from £1');
   assert.equal(resolvePurchaseTaxMissingExcludeCodes(fresh, 'practice-list'), 'practice-list', 'nothing saved falls through to the practice list');
-  assert.deepEqual([...resolveCapitalReviewCandidateCodes([], { 461: 'Printing', 473: 'Repairs', 429: 'General Expenses' }, 0)].sort(), ['461', '473'],
-    'the documented 461/473 candidates apply until the accountant saves the account settings');
-  assert.deepEqual([...resolveCapitalReviewCandidateCodes([], { 461: 'Printing', 473: 'Repairs' }, 1)], [], 'once saved, an empty list means none');
+  assert.deepEqual([...resolveCapitalReviewCandidateCodes([], [
+    { code: '461', name: 'Printing', type: 'OVERHEADS' }, { code: '473', name: 'Repairs', type: 'OVERHEADS' },
+    { code: '469', name: 'Rent', type: 'OVERHEADS' },
+  ])].sort(), ['461', '473'], 'every expense account except the excluded kinds is a capital candidate with nothing saved');
   assert.deepEqual([...monitoredMisallocatedExpenseCodes([], new Set(['429', '463']), { 429: 'General Expenses', 463: 'IT Software' })], ['429'],
     'a vague account is watched with no configuration at all');
 });
