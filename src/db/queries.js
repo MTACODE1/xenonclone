@@ -663,7 +663,7 @@ function mergeEntityCache(orgId, entityType, rows, { runId = null, fullRefresh =
   const idFields = {
     invoice: 'invoiceID', contact: 'contactID', credit_note: 'creditNoteID',
     bank_transaction: 'bankTransactionID', payment: 'paymentID', account: 'accountID',
-    bank_transfer: 'bankTransferID', manual_journal: 'manualJournalID',
+    bank_transfer: 'bankTransferID', manual_journal: 'manualJournalID', batch_payment: 'batchPaymentID',
     tax_rate: 'taxType',
     organisation: 'organisationID',
     journal: 'journalNumber',

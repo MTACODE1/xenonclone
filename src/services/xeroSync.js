@@ -29,7 +29,7 @@ const {
   resolveDuplicateInvoiceRequireExactReference, resolveDuplicateInvoiceIncludeFullyPaid,
   resolveDuplicateBillRequireExactReference, resolveDuplicateBillIncludeFullyPaid,
   resolveDuplicateInvoiceRequireExactTotal, resolveDuplicateBillRequireExactTotal,
-  selectAuthorisedUnreconciled, selectOldCredits, sumAbsoluteExposure,
+  selectAuthorisedUnreconciled, toUnreconciledFinding, purchaseOnlyTaxTypes, selectOldCredits, sumAbsoluteExposure,
   grossLineAmount, netLineAmount, toDateString,
   buildAccountCodeCanonicaliser, canonicaliseAccountCodes,
   withDisplayOnlyBankFindings,
@@ -232,6 +232,17 @@ async function fetchAllPayments(tenantId, ifModifiedSince = undefined) {
     await pageDelay();
   }
   return rows;
+}
+
+// Batch payments come back in one call (the endpoint is not paged). Always the whole list: reconciling a batch may not
+// change its modified date, so an incremental fetch could keep an old reconciled flag.
+async function fetchAllBatchPayments(tenantId) {
+  return apiCall(tenantId, async (xero, tid) => {
+    const response = await xero.accountingApi.getBatchPayments(tid);
+    const rows = response.body?.batchPayments;
+    if (!Array.isArray(rows)) throw new Error('BatchPayments response had no list');
+    return rows;
+  });
 }
 
 async function fetchAllJournals(tenantId, ifModifiedSince = undefined) {
@@ -674,6 +685,18 @@ async function runSync(tenantId, progressCallback, options = {}) {
     orgId, tenantId, runId, 'payment',
     since => fetchAllPayments(tenantId, since), options
   );
+  // Batch payments decide whether the payments inside them are reconciled (see selectAuthorisedUnreconciled). Optional:
+  // if they cannot be downloaded this run, Unreconciled Bank counts payments exactly as before, and the sync carries on.
+  let cachedBatchPayments = [];
+  try {
+    cachedBatchPayments = await refreshCachedEntities(
+      orgId, tenantId, runId, 'batch_payment',
+      () => fetchAllBatchPayments(tenantId), { ...options, forceFullRefresh: true }
+    );
+  } catch (err) {
+    console.error(`[batch-payments] not available for org ${orgId}, counting batch payments as before:`, err?.response?.body?.Message || err.message);
+    cachedBatchPayments = [];
+  }
   const bankTransfers = options.cacheOnly
     ? getCachedEntities(orgId, 'bank_transfer')
     : await apiCall(tenantId, async (xero, tid) => {
@@ -929,15 +952,8 @@ async function runSync(tenantId, progressCallback, options = {}) {
     const bankAccountIds = new Set((chartOfAccounts || [])
       .filter(account => account.type === 'BANK' && !excludedBankAccountIds.has(account.accountID))
       .map(account => account.accountID));
-    const unreconciled = selectAuthorisedUnreconciled(allBankTransactions, matchingPayments, bankAccountIds);
-    const toFinding = item => item.source === 'bank' ? {
-      id: item.bankTransactionID, date: toDateString(item.date), amount: Math.abs(item.total || 0),
-      contact: item.contact?.name, type: item.type, account: item.bankAccount?.name, source: item.source
-    } : {
-      id: item.paymentID, date: toDateString(item.date), amount: Math.abs(item.amount || 0),
-      contact: item.invoice?.contact?.name || item.creditNote?.contact?.name,
-      type: item.paymentType, account: item.account?.name, source: item.source
-    };
+    const unreconciled = selectAuthorisedUnreconciled(allBankTransactions, matchingPayments, bankAccountIds, cachedBatchPayments);
+    const toFinding = toUnreconciledFinding;
     const items = unreconciled.filter(item => isWithinPeriod(toDateString(item.date), period)).map(toFinding);
     const previousItems = inPreviousMonths(unreconciled).map(toFinding);
     unreconciledCount = items.length;
@@ -2343,7 +2359,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     if (!taxRates) throw new Error('tax rates unavailable this sync — cannot classify tax code direction');
     if (!chartOfAccountsAvailable) throw new Error('chart of accounts unavailable this sync — cannot classify account direction');
     const salesOnlyTaxTypes = new Set(Object.values(taxRateByType).filter(t => t.canApplyToRevenue && !t.canApplyToExpenses).map(t => t.taxType));
-    const purchaseOnlyTaxTypes = new Set(Object.values(taxRateByType).filter(t => t.canApplyToExpenses && !t.canApplyToRevenue).map(t => t.taxType));
+    const purchaseOnlyCodes = purchaseOnlyTaxTypes(Object.values(taxRateByType));   // reverse charge left out
 
     // Built for one scope at a time: the review period (counted) and the previous 3 months (listed only).
     const salesTaxOnBillsFor = ({ inPeriod, bankSpendTxns }) => {
@@ -2390,7 +2406,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       const invoicesSinceLD = sinceLD(accrecAuthorised);
       for (const inv of invoicesSinceLD) {
         for (const line of (inv.lineItems || [])) {
-          if (line.taxType && purchaseOnlyTaxTypes.has(line.taxType)) {
+          if (line.taxType && purchaseOnlyCodes.has(line.taxType)) {
             purchaseTaxOnInvoices.push({
               invoiceId: inv.invoiceID, contact: inv.contact?.name,
               date: toDateString(inv.date), taxType: line.taxType, accountCode: line.accountCode,
@@ -2401,7 +2417,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       }
       for (const txn of bankReceiveTxns) {
         for (const line of (txn.lineItems || [])) {
-          if (line.taxType && purchaseOnlyTaxTypes.has(line.taxType) && line.accountCode && revenueAccountCodes.has(line.accountCode)) {
+          if (line.taxType && purchaseOnlyCodes.has(line.taxType) && line.accountCode && revenueAccountCodes.has(line.accountCode)) {
             purchaseTaxOnBankReceive.push({
               invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
               date: toDateString(txn.date), taxType: line.taxType, accountCode: line.accountCode,

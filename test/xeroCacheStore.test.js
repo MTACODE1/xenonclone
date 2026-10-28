@@ -22,7 +22,8 @@ const exec = async (sql, params = []) => {
   }
   if (/^DELETE FROM akrio_xero_cache/i.test(sql)) {
     const [org, type, fetched] = params;
-    for (const [k, r] of mysql) if (r.org_id === org && r.entity_type === type && r.fetched_at < fetched) mysql.delete(k);
+    const byTime = /fetched_at </i.test(sql);   // without the time condition every row of that client and type goes
+    for (const [k, r] of mysql) if (r.org_id === org && r.entity_type === type && (!byTime || r.fetched_at < fetched)) mysql.delete(k);
     return [[]];
   }
   if (/^SELECT entity_type/i.test(sql)) {
@@ -96,4 +97,34 @@ test('a big save is written in small pages, so memory stays flat for very large 
   assert.equal([...mysql.keys()].filter(k => k.startsWith('5|')).length, 1500);
   assert.ok(insertSizes.length >= 4, 'several INSERTs, not one giant one');
   assert.ok(Math.max(...insertSizes) <= 400, 'no INSERT larger than one page');
+});
+
+// Batch payments are downloaded in full every sync (reconciling a batch may not change its modified date), so the saved
+// copy must follow Xero exactly: a changed reconciled flag replaces the old one, and an empty answer clears the type.
+test('batch payments: full refresh replaces the reconciled flag, and an empty answer clears saved batches', async () => {
+  const b = (id, isReconciled) => ({ batchPaymentID: id, isReconciled, updatedDateUTC: '2026-10-16T10:00:00' });
+  mergeEntityCache(6, 'batch_payment', [b('x', false), b('y', false)], { fullRefresh: true });
+  await store.drain();
+  await new Promise(r => setTimeout(r, 5));
+  mergeEntityCache(6, 'batch_payment', [b('x', true)], { fullRefresh: true });   // reconciled, same modified date; y gone
+  await store.drain();
+  assert.deepEqual(getCachedEntities(6, 'batch_payment').map(r => [r.batchPaymentID, r.isReconciled]), [['x', true]]);
+  assert.deepEqual([...mysql.keys()].filter(k => k.startsWith('6|')), ['6|batch_payment|x']);
+  await new Promise(r => setTimeout(r, 5));
+  mergeEntityCache(6, 'batch_payment', [], { fullRefresh: true });
+  await store.drain();
+  assert.equal(getCachedEntities(6, 'batch_payment').length, 0);
+  assert.equal([...mysql.keys()].filter(k => k.startsWith('6|')).length, 0, 'a restore cannot bring old batches back');
+  mergeEntityCache(6, 'invoice', [inv('m')], { fullRefresh: true });
+  await store.drain();
+  mergeEntityCache(6, 'invoice', [], { fullRefresh: true });
+  await store.drain();
+  assert.equal([...mysql.keys()].filter(k => k.startsWith('6|invoice')).length, 1, 'other types keep the empty-answer protection');
+});
+
+test('an empty batch refresh clears saved batches even with a same-or-later saved time (F1)', async () => {
+  mysql.set('7|batch_payment|z', { org_id: 7, entity_type: 'batch_payment', entity_id: 'z', modified_at: null, fetched_at: '2999-01-01 00:00:00.000', payload: Buffer.from('') });
+  mergeEntityCache(7, 'batch_payment', [], { fullRefresh: true });
+  await store.drain();
+  assert.equal([...mysql.keys()].filter(k => k.startsWith('7|')).length, 0);
 });

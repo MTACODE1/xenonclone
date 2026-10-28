@@ -383,16 +383,115 @@ function netLineAmount(doc, line) {
 // not just payments — a bank transaction is always tied to a specific bank account in Xero's own
 // data model, so filtering it against the full set of genuine bank accounts was already a no-op
 // for every currently-validated client (nothing changes unless an account is actually excluded).
-function selectAuthorisedUnreconciled(bankTransactions, payments, bankAccountIds = null) {
+// Batch payments (accountant, 28 Oct 2026): several bills or invoices paid in one bank line. Xero marks every payment
+// inside a batch IsReconciled=false; the batch itself carries the reconciled flag. So a payment in a reconciled batch is
+// not an unreconciled item, and an unreconciled batch is ONE bank line ('one_item'), listed with the bills and invoices
+// it pays ('each_part' lists every payment instead). Only the fetched batch decides: a payment whose batch was not
+// fetched, is deleted or has no flag is counted exactly as before.
+function batchReconciledFlag(batch) {
+  if (!batch || batch.status === 'DELETED') return null;
+  if (batch.isReconciled === true || batch.isReconciled === 'true') return true;
+  if (batch.isReconciled === false || batch.isReconciled === 'false') return false;
+  return null;
+}
+function selectAuthorisedUnreconciled(bankTransactions, payments, bankAccountIds = null, batchPayments = [],
+  batchCounting = PRACTICE_POLICY.unreconciledBatchCounting) {
   const bank = bankTransactions
     .filter(item => item.status === 'AUTHORISED' && item.isReconciled === false)
     .filter(item => !bankAccountIds || bankAccountIds.has(item.bankAccount?.accountID))
     .map(item => ({ ...item, source: 'bank' }));
-  const paymentItems = payments
+  const batchById = new Map((batchPayments || []).filter(b => b?.batchPaymentID).map(b => [b.batchPaymentID, b]));
+  const eligible = payments
     .filter(item => item.status === 'AUTHORISED' && item.isReconciled === false)
-    .filter(item => !bankAccountIds || bankAccountIds.has(item.account?.accountID))
-    .map(item => ({ ...item, source: 'payment' }));
+    .filter(item => !bankAccountIds || bankAccountIds.has(item.account?.accountID));
+  const batchIdOf = item => item.batchPayment?.batchPaymentID || item.batchPaymentID || null;
+  const partsByBatch = new Map();
+  for (const item of eligible) {
+    const id = batchIdOf(item);
+    if (id && batchReconciledFlag(batchById.get(id)) === false) {
+      if (!partsByBatch.has(id)) partsByBatch.set(id, []);
+      partsByBatch.get(id).push(item);
+    }
+  }
+  // Combined into one line only with a real date and total, and when the batch and all its payments sit on the same,
+  // included bank account; otherwise its payments are listed as before.
+  const realDate = value => {
+    let date = null;
+    try { date = toDateString(value); } catch (error) { return false; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) return false;
+    const parsed = new Date(`${date}T00:00:00Z`);
+    return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date;
+  };
+  const usableBatch = (batch, parts) => {
+    const accountId = batch.account?.accountID;
+    return realDate(batch.date) && batch.totalAmount != null && Number.isFinite(Number(batch.totalAmount))
+      && Boolean(accountId) && (!bankAccountIds || bankAccountIds.has(accountId))
+      && parts.every(part => part.account?.accountID === accountId);
+  };
+  const emitted = new Set();
+  const paymentItems = [];
+  for (const item of eligible) {
+    const id = batchIdOf(item);
+    const flag = id ? batchReconciledFlag(batchById.get(id)) : null;
+    if (flag === true) continue;
+    const batch = flag === false ? batchById.get(id) : null;
+    if (!batch || batchCounting !== 'one_item' || !usableBatch(batch, partsByBatch.get(id))) { paymentItems.push({ ...item, source: 'payment' }); continue; }
+    if (emitted.has(id)) continue;
+    emitted.add(id);
+    const parts = partsByBatch.get(id);
+    paymentItems.push({
+      source: 'payment', paymentID: id, batchPaymentID: id, partCount: parts.length, parts,
+      amount: Number(batch.totalAmount), date: batch.date, account: batch.account, paymentType: batch.type,
+    });
+  }
   return [...bank, ...paymentItems];
+}
+
+// One Unreconciled Bank finding row. A batch shows its total as one bank line, with the bills and invoices it pays
+// listed underneath (opened from the check page like the supplier checks' transactions).
+function toUnreconciledFinding(item) {
+  if (item.source === 'bank') {
+    return {
+      id: item.bankTransactionID, date: toDateString(item.date), amount: Math.abs(item.total || 0),
+      contact: item.contact?.name, type: item.type, account: item.bankAccount?.name, source: item.source,
+    };
+  }
+  if (!item.batchPaymentID || !Array.isArray(item.parts)) {
+    return {
+      id: item.paymentID, date: toDateString(item.date), amount: Math.abs(item.amount || 0),
+      contact: item.invoice?.contact?.name || item.creditNote?.contact?.name,
+      type: item.paymentType, account: item.account?.name, source: item.source,
+    };
+  }
+  const transactions = item.parts.map(part => {
+    const document = part.invoice || part.creditNote || {};
+    const isCredit = Boolean(part.creditNote);
+    const purchase = /^ACCPAY/.test(document.type || '') || /^AP/.test(part.paymentType || '') || part.paymentType === 'ACCPAYPAYMENT';
+    return {
+      date: toDateString(part.date), reference: document.invoiceNumber || document.creditNoteNumber || part.reference || null,
+      contact: document.contact?.name || null, amount: Math.abs(part.amount || 0),
+      ...(isCredit ? { creditNoteId: document.creditNoteID, source: 'credit_note', type: document.type } : { invoiceId: document.invoiceID, source: purchase ? 'bill' : 'invoice' }),
+    };
+  });
+  const contacts = [...new Set(transactions.map(t => t.contact).filter(Boolean))];
+  return {
+    id: item.batchPaymentID, date: toDateString(item.date), amount: Math.abs(item.amount || 0),
+    // A batch paying several suppliers has no single contact. A label such as "2 suppliers" would be shared by unrelated
+    // batches, and "Ignore this contact" (keyed on the contact name) would then hide all of them; the suppliers are
+    // listed in the batch's transactions instead.
+    contact: contacts.length === 1 ? contacts[0] : null,
+    type: `Batch payment (${item.partCount} items)`, account: item.account?.name, source: item.source,
+    batchPaymentId: item.batchPaymentID, partCount: item.partCount, transactions,
+  };
+}
+
+// Tax codes that only apply to purchases, for Purchase Tax on Invoices. Reverse charge codes are left out (accountant,
+// 28 Oct 2026): they are not to be flagged on sales invoices.
+function purchaseOnlyTaxTypes(taxRates) {
+  return new Set((taxRates || [])
+    .filter(t => t.canApplyToExpenses && !t.canApplyToRevenue)
+    .filter(t => !/^REVERSECHARGES$/i.test(t.taxType || '') && !/reverse\s*charge/i.test(t.name || ''))
+    .map(t => t.taxType));
 }
 
 // A suspected-duplicate GROUP is one issue worth ONE document amount — not one issue per extra
@@ -889,6 +988,7 @@ const PRACTICE_POLICY = Object.freeze({
   minimumItemGbp: 1,                  // multi-account, multi-tax and unexpected tax code ignore items under £1
   multiAccountLookbackMonths: 0,      // multi-account looks at the review period only
   previousMonthsShown: 3,             // every review-period check also lists the 3 months before it, not counted
+  unreconciledBatchCounting: 'one_item',   // an unreconciled batch payment is one bank line (accountant, 28 Oct 2026)
 });
 
 // The previous 3 months (Abdur, 27 Oct 2026): every check that lists items from the review period also lists the items
@@ -1149,7 +1249,7 @@ module.exports = {
   allocateFindingValues,
   isReviewStateActive,
   selectOldCredits,
-  selectAuthorisedUnreconciled,
+  selectAuthorisedUnreconciled, toUnreconciledFinding, purchaseOnlyTaxTypes,
   sumAbsoluteExposure,
   grossLineAmount,
   netLineAmount,

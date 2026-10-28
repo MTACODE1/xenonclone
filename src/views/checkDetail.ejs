@@ -323,7 +323,7 @@ function toggleBbEditForm(id) {
       const hiddenColumns = new Set([
         'finding_key', 'review_state', 'ignored_until', 'notes', 'displayOnly', 'xero_links', 'lookback', 'inPeriod',
         'contactId', 'contactID', 'invoiceId', 'invoiceID', 'bankTransactionId', 'bankTransactionID',
-        'paymentId', 'paymentID', 'creditNoteId', 'creditNoteID', 'id1', 'id2', 'id', 'documentIds',
+        'paymentId', 'paymentID', 'creditNoteId', 'creditNoteID', 'id1', 'id2', 'id', 'documentIds', 'batchPaymentId', 'partCount',
         // 'id' is the same kind of raw Xero GUID as the others above (see xeroLinks in
         // src/routes/client.js, where it's used as a fallback for the invoice/bill/credit-note
         // link) — old_unpaid_invoices/old_sales_credits/old_unpaid_bills/old_purchase_credits (and
@@ -343,11 +343,13 @@ function toggleBbEditForm(id) {
       // lineKey/ok/notes are rendered specially below (the per-line review form); accountCode/
       // accountName are combined into one colored "Account" badge column instead of two plain ones.
       const transactionHiddenColumns = new Set([...hiddenColumns, 'xero_links', 'lineKey', 'ok', 'accountCode', 'accountName', 'source', 'inPeriod', 'type']);
-      const transactionColumns = tableRows[0]?.transactions?.length
-        ? Object.keys(tableRows[0].transactions[0]).filter(key => !transactionHiddenColumns.has(key))
+      // Taken from the first row that has transactions: on Unreconciled Bank only batch payments carry them.
+      const firstWithTransactions = tableRows.find(row => row.transactions?.length);
+      const transactionColumns = firstWithTransactions
+        ? Object.keys(firstWithTransactions.transactions[0]).filter(key => !transactionHiddenColumns.has(key))
         : [];
-      const hasAccountColumn = tableRows[0]?.transactions?.some(tx => tx.accountCode);
-      const hasSourceColumn = tableRows[0]?.transactions?.some(tx => tx.source);
+      const hasAccountColumn = firstWithTransactions?.transactions?.some(tx => tx.accountCode);
+      const hasSourceColumn = firstWithTransactions?.transactions?.some(tx => tx.source);
       // A small fixed palette, assigned per account code in first-seen order within one contact's
       // transaction list — same idea as Xenon's colored account pills, so a reader can tell at a
       // glance which lines share an account without reading every code.

@@ -69,12 +69,16 @@ function queueSave(orgId, entityType, fetchedAt, fullRefresh, writtenCount) {
       last = batch[batch.length - 1].entity_id;
       await new Promise(resolve => setImmediate(resolve));   // let other work run between pages
     }
-    // Only drop rows after a complete re-download, and never when it returned nothing at all.
+    // Only drop rows after a complete re-download, and never when it returned nothing at all. Batch payments are the
+    // exception: they are downloaded in full every sync and an empty answer is a real "no batches", so the saved copy
+    // follows it (otherwise a restore after a deploy could bring back a batch's old reconciled flag).
     if (fullRefresh && writtenCount) {
       await pool.query(
         'DELETE FROM akrio_xero_cache WHERE org_id = ? AND entity_type = ? AND fetched_at < ?',
         [orgId, entityType, fetched]
       );
+    } else if (fullRefresh && entityType === 'batch_payment') {
+      await pool.query('DELETE FROM akrio_xero_cache WHERE org_id = ? AND entity_type = ?', [orgId, entityType]);
     }
   });
 }

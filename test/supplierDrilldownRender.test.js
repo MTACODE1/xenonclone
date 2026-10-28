@@ -116,3 +116,26 @@ test('no previous-months rows: the page is as before, with no heading', async ()
   assert.doesNotMatch(html, /previous-months-heading/);
   assert.match(html, /desc-p1/);
 });
+
+// ---- Unreconciled Bank: a batch payment is one line with the bills it pays underneath ----
+test('an unreconciled batch payment shows its bills even when it is not the first row', async () => {
+  const plain = { finding_key: 'line:a', id: 'p1', date: '2026-10-20', amount: 50, contact: 'Shop', type: 'SPEND', account: 'Current', source: 'bank', review_state: 'active', xero_links: [], standaloneNote: null };
+  const batchRow = {
+    finding_key: 'line:b', id: 'b1', date: '2026-10-16', amount: 300, contact: null, type: 'Batch payment (2 items)', account: 'Current', source: 'payment',
+    batchPaymentId: 'b1', review_state: 'active', xero_links: [], standaloneNote: null,
+    transactions: [
+      { date: '2026-10-16', reference: 'BILL-ONE', contact: 'Supplier A', amount: 120, invoiceId: 'i1', source: 'bill', xero_links: [], lineKey: 'i1' },
+      { date: '2026-10-16', reference: 'BILL-TWO', contact: 'Supplier B', amount: 180, invoiceId: 'i2', source: 'bill', xero_links: [], lineKey: 'i2' },
+    ],
+  };
+  const html = await ejs.renderFile(path.join(__dirname, '../src/views/checkDetail.ejs'), {
+    ...locals, checkType: 'unreconciled_bank_items', def: { type: 'unreconciled_bank_items', label: 'Unreconciled Bank', importance: 'critical' },
+    items: [plain, batchRow], previousItems: [], previousPagination: null,
+  });
+  assert.match(html, /Batch payment \(2 items\)/);
+  assert.match(html, /Show 2 transactions/);
+  assert.match(html, /BILL-ONE/);
+  assert.match(html, /BILL-TWO/);
+  assert.doesNotMatch(html, />\s*b1\s*</, 'the raw batch id is not shown');
+  assert.equal((html.match(/Ignore this contact/g) || []).length, 1, 'only the plain row offers it; the multi-supplier batch does not');
+});
