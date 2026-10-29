@@ -7,10 +7,11 @@
 const enc = encodeURIComponent;
 
 function directionOf(item) {
-  if (item.source === 'bill') return 'payable';
-  if (item.source === 'invoice') return 'receivable';
+  // The Xero type is the most exact: Historical Changes labels every document source 'invoice', bills included.
   if (item.type === 'ACCPAY' || item.type === 'ACCPAYCREDIT') return 'payable';
   if (item.type === 'ACCREC' || item.type === 'ACCRECCREDIT') return 'receivable';
+  if (item.source === 'bill') return 'payable';
+  if (item.source === 'invoice') return 'receivable';
   return null;
 }
 

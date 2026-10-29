@@ -318,9 +318,11 @@ function historicalChanges({ journals, invoices, creditNotes, bankTransactions, 
   const after = v => { const d = toIsoDate(v); return d && d > filingDate ? d : null; };
   const inFiled = v => { const d = toIsoDate(v); return d && d <= madeUpTo ? d : null; };
   const items = [];
-  const push = (kind, id, number, date, updated, amount, reason, contact) => items.push({
+  // `link` carries what "Open in Xero" needs: the document's own id field and, for invoices and credit notes, its Xero
+  // type (a supplier bill and a sales invoice open on different pages). None of it is part of the finding's identity.
+  const push = (kind, id, number, date, updated, amount, reason, contact, link = {}) => items.push({
     documentId: id, number: number || null, date, source: kind, contact: contact || null,
-    accountCode: null, description: reason, amount: Math.abs(Number(amount) || 0), updatedDate: updated, filingDate, madeUpTo,
+    accountCode: null, description: reason, amount: Math.abs(Number(amount) || 0), updatedDate: updated, filingDate, madeUpTo, ...link,
   });
   for (const j of journals || []) {
     const date = inFiled(j.date), updated = after(j.updatedDateUTC);
@@ -335,12 +337,14 @@ function historicalChanges({ journals, invoices, creditNotes, bankTransactions, 
     if (explainedByPayment) continue;
     push(doc.invoiceID ? 'invoice' : 'credit_note', doc.invoiceID || doc.creditNoteID, doc.invoiceNumber || doc.creditNoteNumber, date, updated, doc.total,
       gone ? `Document ${doc.status.toLowerCase()} after accounts for the period to ${madeUpTo} were filed on ${filingDate}.`
-           : `Document changed or added after accounts for the period to ${madeUpTo} were filed on ${filingDate}.`, doc.contact && doc.contact.name);
+           : `Document changed or added after accounts for the period to ${madeUpTo} were filed on ${filingDate}.`, doc.contact && doc.contact.name,
+      { ...(doc.invoiceID ? { invoiceId: doc.invoiceID } : { creditNoteId: doc.creditNoteID }), ...(doc.type ? { type: doc.type } : {}) });
   }
   for (const t of bankTransactions || []) {
     const date = inFiled(t.date), updated = after(t.updatedDateUTC);
     if (date && updated && t.status === 'DELETED') push('bank_transaction', t.bankTransactionID, t.reference, date, updated, t.total,
-      `Bank transaction deleted after accounts for the period to ${madeUpTo} were filed on ${filingDate}.`, t.contact && t.contact.name);
+      `Bank transaction deleted after accounts for the period to ${madeUpTo} were filed on ${filingDate}.`, t.contact && t.contact.name,
+      { bankTransactionId: t.bankTransactionID });
   }
   return items;
 }
