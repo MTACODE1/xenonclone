@@ -457,10 +457,14 @@ function toUnreconciledFinding(item) {
     };
   }
   if (!item.batchPaymentID || !Array.isArray(item.parts)) {
+    const document = item.invoice || item.creditNote;
+    const documentId = item.invoice?.invoiceID || item.creditNote?.creditNoteID;
     return {
       id: item.paymentID, date: toDateString(item.date), amount: Math.abs(item.amount || 0),
       contact: item.invoice?.contact?.name || item.creditNote?.contact?.name,
       type: item.paymentType, account: item.account?.name, source: item.source,
+      // The bill, invoice or credit note the payment is for, so the row can open it (a payment has no page of its own).
+      ...(documentId && document?.type ? { linkId: documentId, linkType: document.type } : {}),
     };
   }
   const transactions = item.parts.map(part => {
@@ -649,6 +653,19 @@ function selectUnapprovedBills(draftBills) {
 function isOverdueMoreThan(document, asOf, days = CHECK_DEFAULTS.oldDocumentDays) {
   const age = daysBetween(asOf, document.dueDate || document.date);
   return age != null && age > days;
+}
+
+// Old Unpaid Invoices (accountant, round 3, 30 Oct 2026): aged like Xero's Aged Receivables, by DUE date as at the end of
+// the month (the same basis already used for bills). An invoice with no due date falls back to its invoice date.
+function selectOldUnpaidInvoices(invoices, asOf, days = CHECK_DEFAULTS.oldDocumentDays) {
+  return invoices.filter(invoice => (invoice.amountDue || 0) > 0 && isOverdueMoreThan(invoice, asOf, days));
+}
+
+// An amount in the organisation's own currency. Xero reports a foreign-currency invoice or credit note in its own
+// currency with a rate (units of foreign currency per £1); adding the raw figures treated euros and dollars as pounds.
+function amountInBase(amount, document) {
+  const rate = Number(document?.currencyRate);
+  return (Number(amount) || 0) / (Number.isFinite(rate) && rate > 0 ? rate : 1);
 }
 
 function isOldDocument(document, asOf, days = CHECK_DEFAULTS.oldDocumentDays) {
@@ -1182,6 +1199,13 @@ function keepFlatRateLargeItems(lines, limit = FLAT_RATE_SINGLE_ITEM_LIMIT) {
 }
 
 // Duplicate groups from the usual rules plus any supplier/invoice-number repeats they did not already cover.
+// Undocumented Bills (accountant, 29 Oct 2026): every posted supplier bill with no file attached, paid or not. Drafts,
+// submitted, voided and deleted bills are not posted bills and stay out. A bill whose attachment flag is missing is
+// treated as having none, as before. Callers pass the bills already limited to the review period.
+function selectUndocumentedBills(bills) {
+  return bills.filter(bill => bill.type === 'ACCPAY' && ['AUTHORISED', 'PAID'].includes(bill.status) && !bill.hasAttachments);
+}
+
 function findDuplicatesWithSameNumber(items, windowDays, options = {}) {
   const usual = findDuplicates(items, windowDays, options);
   const covered = new Set(usual.flatMap(group => group.documentIds));
@@ -1189,7 +1213,14 @@ function findDuplicatesWithSameNumber(items, windowDays, options = {}) {
     .filter(group => !group.documentIds.every(id => covered.has(id)))
     // A number shared by many bills is a reused account or reference number (Sky, Meta Ads, Toast...), not a bill
     // entered twice. A real duplicate is a pair, occasionally a trio.
-    .filter(group => group.documentIds.length <= 3);
+    .filter(group => group.documentIds.length <= 3)
+    // A repeated number alone is not enough (accountant, 29 Oct 2026): the bills must also have the same amount, to the
+    // penny, and dates inside the window. Supplier + date + amount alone is the ordinary pass above.
+    .filter(group => {
+      const pennies = new Set(group.documents.map(document => Math.round((Number(document.amount) || 0) * 100)));
+      const first = daysBetween(group.date2, group.date1);
+      return pennies.size === 1 && first != null && first <= windowDays;
+    });
   return [...usual, ...extra].sort((a, b) => String(b.date2 || '').localeCompare(String(a.date2 || '')));
 }
 
@@ -1243,13 +1274,13 @@ module.exports = {
   findMisallocatedLines,
   resolveCapitalReviewCandidateCodes, isCapitalDefaultAccount,
   previousMonthsStart, isWithinPreviousMonths, withPreviousMonths, endOfMonth, countsAsBankProcessed,
-  isOldDocument, isOverdueMoreThan,
+  isOldDocument, isOverdueMoreThan, selectOldUnpaidInvoices, amountInBase,
   isPurchaseTaxExemptAccount,
   addFindingKeys,
   allocateFindingValues,
   isReviewStateActive,
   selectOldCredits,
-  selectAuthorisedUnreconciled, toUnreconciledFinding, purchaseOnlyTaxTypes,
+  selectAuthorisedUnreconciled, toUnreconciledFinding, purchaseOnlyTaxTypes, selectUndocumentedBills,
   sumAbsoluteExposure,
   grossLineAmount,
   netLineAmount,

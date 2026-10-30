@@ -111,6 +111,7 @@ test('finding rows: a batch lists its bills; a single payment and a bank line lo
   assert.equal(sameSupplier.contact, 'One Ltd');
   assert.deepEqual(toUnreconciledFinding({ ...pay('p9', null), source: 'payment' }), {
     id: 'p9', date: '2026-10-16', amount: 100, contact: 'Supplier p9', type: 'ACCPAYPAYMENT', account: 'Current Account', source: 'payment',
+    linkId: 'inv-p9', linkType: 'ACCPAY',   // the bill it pays, so the row opens it
   });
   assert.deepEqual(toUnreconciledFinding({ ...bankTxn('t1'), contact: { name: 'Shop' }, source: 'bank' }), {
     id: 't1', date: '2026-10-16', amount: 50, contact: 'Shop', type: 'SPEND', account: 'Current Account', source: 'bank',

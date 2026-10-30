@@ -323,7 +323,7 @@ function toggleBbEditForm(id) {
       const hiddenColumns = new Set([
         'finding_key', 'review_state', 'ignored_until', 'notes', 'displayOnly', 'xero_links', 'lookback', 'inPeriod',
         'contactId', 'contactID', 'invoiceId', 'invoiceID', 'bankTransactionId', 'bankTransactionID',
-        'paymentId', 'paymentID', 'creditNoteId', 'creditNoteID', 'id1', 'id2', 'id', 'documentIds', 'batchPaymentId', 'partCount',
+        'paymentId', 'paymentID', 'creditNoteId', 'creditNoteID', 'id1', 'id2', 'id', 'documentIds', 'batchPaymentId', 'partCount', 'linkId', 'linkType',
         // 'id' is the same kind of raw Xero GUID as the others above (see xeroLinks in
         // src/routes/client.js, where it's used as a fallback for the invoice/bill/credit-note
         // link) — old_unpaid_invoices/old_sales_credits/old_unpaid_bills/old_purchase_credits (and

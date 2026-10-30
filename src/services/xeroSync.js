@@ -21,7 +21,7 @@ const {
   findDuplicateContacts, findDuplicates, excludeDuplicateDrafts, selectUnapprovedBills, findUnexpectedDefaultLines,
   findMisallocatedLines, resolveCapitalReviewCandidateCodes,
   previousMonthsStart, isWithinPreviousMonths, withPreviousMonths, endOfMonth, countsAsBankProcessed,
-  isOldDocument, isOverdueMoreThan, isPurchaseTaxExemptAccount, resolvePeriodChecked, resolveSupplierPatternLookbackMonths,
+  isOldDocument, isOverdueMoreThan, selectOldUnpaidInvoices, amountInBase, isPurchaseTaxExemptAccount, resolvePeriodChecked, resolveSupplierPatternLookbackMonths,
   resolveMultiAccountPatternLookbackMonths,
   resolveMultiAccountSuppliersMinValue, resolveMultiTaxSuppliersMinValue,
   resolveCapitalReviewDefaultThreshold, resolveMisallocatedItemsDefaultThreshold,
@@ -29,7 +29,7 @@ const {
   resolveDuplicateInvoiceRequireExactReference, resolveDuplicateInvoiceIncludeFullyPaid,
   resolveDuplicateBillRequireExactReference, resolveDuplicateBillIncludeFullyPaid,
   resolveDuplicateInvoiceRequireExactTotal, resolveDuplicateBillRequireExactTotal,
-  selectAuthorisedUnreconciled, toUnreconciledFinding, purchaseOnlyTaxTypes, selectOldCredits, sumAbsoluteExposure,
+  selectAuthorisedUnreconciled, toUnreconciledFinding, purchaseOnlyTaxTypes, selectUndocumentedBills, selectOldCredits, sumAbsoluteExposure,
   grossLineAmount, netLineAmount, toDateString,
   buildAccountCodeCanonicaliser, canonicaliseAccountCodes,
   withDisplayOnlyBankFindings,
@@ -1041,18 +1041,19 @@ async function runSync(tenantId, progressCallback, options = {}) {
 
   // --- HIGH: Old Unpaid Invoices (document date older than 60 days, amountDue > 0) ---
   try {
-    const asOf = new Date(`${period.end}T00:00:00.000Z`);
-    const overdue = throughPeriodEnd(accrecAuthorised).filter(i =>
-      (i.amountDue || 0) > 0 && isOldDocument(i, asOf)
-    );
+    // Aged like Xero's Aged Receivables: by due date, as at the end of the month (accountant, 30 Oct 2026).
+    const asOf = new Date(`${endOfMonth(period.end)}T00:00:00.000Z`);
+    const overdue = selectOldUnpaidInvoices(throughPeriodEnd(accrecAuthorised), asOf);
     const issue = {
       org_id: orgId, check_type: 'old_unpaid_invoices', importance: 'high',
-      count: overdue.length, potential_value_gbp: sumAbsoluteExposure(overdue, i => i.amountDue),
+      count: overdue.length, potential_value_gbp: sumAbsoluteExposure(overdue, i => amountInBase(i.amountDue, i)),
       detail_json: JSON.stringify(overdue.map(i => ({
         id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
-        date: toDateString(i.date), dueDate: toDateString(i.dueDate), amountDue: i.amountDue
+        date: toDateString(i.date), dueDate: toDateString(i.dueDate), amountDue: i.amountDue,
+        ...(i.currencyCode && i.currencyCode !== orgInfo.baseCurrency ? { currency: i.currencyCode } : {}),
+        potentialValue: amountInBase(i.amountDue, i),
       }))),
-      period_checked: 'document_date_over_60_days_ago_all_time'
+      period_checked: 'due_date_over_60_days_ago_at_month_end'
     };
     insertIssue(issue); issueResults.push(issue);
   } catch (err) {
@@ -1061,14 +1062,16 @@ async function runSync(tenantId, progressCallback, options = {}) {
 
   // --- HIGH: Old Sales Credits (ACCREC, older than 60 days, unallocated) ---
   try {
-    const asOf = new Date(`${period.end}T00:00:00.000Z`);
+    const asOf = new Date(`${endOfMonth(period.end)}T00:00:00.000Z`);   // as at month end, like Xero's aged reports
     const credits = selectOldCredits(throughPeriodEnd(salesCredits), asOf);
     const issue = {
       org_id: orgId, check_type: 'old_sales_credits', importance: 'high',
-      count: credits.length, potential_value_gbp: sumAbsoluteExposure(credits, c => c.remainingCredit),
+      count: credits.length, potential_value_gbp: sumAbsoluteExposure(credits, c => amountInBase(c.remainingCredit, c)),
       detail_json: JSON.stringify(credits.map(c => ({
         id: c.creditNoteID, number: c.creditNoteNumber, contact: c.contact?.name,
-        date: toDateString(c.date), remaining: c.remainingCredit
+        date: toDateString(c.date), remaining: c.remainingCredit,
+        ...(c.currencyCode && c.currencyCode !== orgInfo.baseCurrency ? { currency: c.currencyCode } : {}),
+        potentialValue: amountInBase(c.remainingCredit, c),
       }))),
       period_checked: 'older_than_60_days'
     };
@@ -1086,10 +1089,12 @@ async function runSync(tenantId, progressCallback, options = {}) {
     const overdue = throughPeriodEnd(accpayAuthorised).filter(i => isOverdueMoreThan(i, asOf) && (i.amountDue || 0) > 0);
     const issue = {
       org_id: orgId, check_type: 'old_unpaid_bills', importance: 'high',
-      count: overdue.length, potential_value_gbp: sumAbsoluteExposure(overdue, i => i.amountDue),
+      count: overdue.length, potential_value_gbp: sumAbsoluteExposure(overdue, i => amountInBase(i.amountDue, i)),
       detail_json: JSON.stringify(overdue.map(i => ({
         id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
-        date: toDateString(i.date), dueDate: toDateString(i.dueDate), amountDue: i.amountDue
+        date: toDateString(i.date), dueDate: toDateString(i.dueDate), amountDue: i.amountDue,
+        ...(i.currencyCode && i.currencyCode !== orgInfo.baseCurrency ? { currency: i.currencyCode } : {}),
+        potentialValue: amountInBase(i.amountDue, i),
       }))),
       period_checked: 'due_date_over_60_days_ago'
     };
@@ -1101,17 +1106,19 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // --- HIGH: Old Purchase Credits (ACCPAY, older than 60 days, unallocated) ---
   // Xenon: AUTHORISED only (MBX: SUBMITTED+AUTH=6 vs AUTH=4=Xenon; other clients unchanged).
   try {
-    const asOf = new Date(`${period.end}T00:00:00.000Z`);
+    const asOf = new Date(`${endOfMonth(period.end)}T00:00:00.000Z`);   // as at month end, like Xero's aged reports
     const credits = selectOldCredits(
       throughPeriodEnd(purchaseCredits).filter((c) => c.status === 'AUTHORISED'),
       asOf
     );
     const issue = {
       org_id: orgId, check_type: 'old_purchase_credits', importance: 'high',
-      count: credits.length, potential_value_gbp: sumAbsoluteExposure(credits, c => c.remainingCredit),
+      count: credits.length, potential_value_gbp: sumAbsoluteExposure(credits, c => amountInBase(c.remainingCredit, c)),
       detail_json: JSON.stringify(credits.map(c => ({
         id: c.creditNoteID, number: c.creditNoteNumber, contact: c.contact?.name,
-        date: toDateString(c.date), remaining: c.remainingCredit
+        date: toDateString(c.date), remaining: c.remainingCredit,
+        ...(c.currencyCode && c.currencyCode !== orgInfo.baseCurrency ? { currency: c.currencyCode } : {}),
+        potentialValue: amountInBase(c.remainingCredit, c),
       }))),
       period_checked: 'older_than_60_days'
     };
@@ -1638,7 +1645,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             const threshold = capitalThresholdFor(line.accountCode);
             if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)) {
               capitalItems.push({
-                invoiceId: bill.invoiceID, contact: bill.contact?.name,
+                invoiceId: bill.invoiceID, contact: bill.contact?.name, type: 'ACCPAY',
                 date: toDateString(bill.date), accountCode: line.accountCode,
                 description: line.description, amount
               });
@@ -1829,7 +1836,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
           const amount = Math.abs(netLineAmount(bill, line));
           if (amount > 0 && amount <= LOW_COST_THRESHOLD && line.accountCode && fixedAssetAccountCodes.has(line.accountCode)) {
             lowCostItems.push({
-              invoiceId: bill.invoiceID, contact: bill.contact?.name,
+              invoiceId: bill.invoiceID, contact: bill.contact?.name, type: 'ACCPAY',
               date: toDateString(bill.date), accountCode: line.accountCode,
               description: line.description, amount
             });
@@ -1932,7 +1939,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
           contactId: bill.contact?.contactID, contact: bill.contact?.name,
           date: toDateString(bill.date), accountCode: line.accountCode,
           expectedAccountCode: expected,
-          description: line.description, amount: Math.abs(netLineAmount(bill, line)), source: 'bill'
+          description: line.description, amount: Math.abs(netLineAmount(bill, line)), source: 'bill', linkId: bill.invoiceID, linkType: 'ACCPAY'
         });
       }
       const invoicesSinceLD = sinceLD(accrecAuthorised);
@@ -1945,7 +1952,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
               contactId: inv.contact?.contactID, contact: inv.contact?.name,
               date: toDateString(inv.date), accountCode: line.accountCode,
               expectedAccountCode: contact.salesDefaultAccountCode,
-              description: line.description, amount: Math.abs(netLineAmount(inv, line)), source: 'invoice'
+              description: line.description, amount: Math.abs(netLineAmount(inv, line)), source: 'invoice', linkId: inv.invoiceID, linkType: 'ACCREC'
             });
           }
         }
@@ -1959,7 +1966,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
               contactId: txn.contact?.contactID, contact: txn.contact?.name,
               date: toDateString(txn.date), accountCode: line.accountCode,
               expectedAccountCode: contact.purchasesDefaultAccountCode,
-              description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_spend'
+              description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_spend', linkId: txn.bankTransactionID, linkType: 'BANK'
             });
           }
         }
@@ -1973,7 +1980,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
               contactId: txn.contact?.contactID, contact: txn.contact?.name,
               date: toDateString(txn.date), accountCode: line.accountCode,
               expectedAccountCode: contact.salesDefaultAccountCode,
-              description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_receive'
+              description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_receive', linkId: txn.bankTransactionID, linkType: 'BANK'
             });
           }
         }
@@ -2006,7 +2013,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
           contactId: bill.contact?.contactID, contact: bill.contact?.name,
           date: toDateString(bill.date), taxType: line.taxType,
           expectedTaxType: expected,
-          description: line.description, amount: Math.abs(netLineAmount(bill, line)), source: 'bill'
+          description: line.description, amount: Math.abs(netLineAmount(bill, line)), source: 'bill', linkId: bill.invoiceID, linkType: 'ACCPAY'
         });
       }
       const invoicesSinceLD = sinceLD(accrecAuthorised);
@@ -2019,7 +2026,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
               contactId: inv.contact?.contactID, contact: inv.contact?.name,
               date: toDateString(inv.date), taxType: line.taxType,
               expectedTaxType: contact.accountsReceivableTaxType,
-              description: line.description, amount: Math.abs(netLineAmount(inv, line)), source: 'invoice'
+              description: line.description, amount: Math.abs(netLineAmount(inv, line)), source: 'invoice', linkId: inv.invoiceID, linkType: 'ACCREC'
             });
           }
         }
@@ -2033,7 +2040,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
               contactId: txn.contact?.contactID, contact: txn.contact?.name,
               date: toDateString(txn.date), taxType: line.taxType,
               expectedTaxType: contact.accountsPayableTaxType,
-              description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_spend'
+              description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_spend', linkId: txn.bankTransactionID, linkType: 'BANK'
             });
           }
         }
@@ -2047,7 +2054,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
               contactId: txn.contact?.contactID, contact: txn.contact?.name,
               date: toDateString(txn.date), taxType: line.taxType,
               expectedTaxType: contact.accountsReceivableTaxType,
-              description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_receive'
+              description: line.description, amount: Math.abs(netLineAmount(txn, line)), source: 'bank_receive', linkId: txn.bankTransactionID, linkType: 'BANK'
             });
           }
         }
@@ -2123,13 +2130,12 @@ async function runSync(tenantId, progressCallback, options = {}) {
     console.error('bill_or_direct check failed — skipping (will show as "Not synced"):', err.message);
   }
 
-  // --- MEDIUM: Undocumented Bills (no attachment on AUTHORISED unpaid/open bills) ---
-  // Paid bills are excluded — Xenon reports 0 for Handymanz while a single PAID bill without
-  // an attachment would otherwise keep this permanently non-zero.
+  // --- MEDIUM: Undocumented Bills (no attachment on a posted bill, paid or not) ---
+  // Paid bills are included from 29 Oct 2026 (accountant: "bills with a missing attachment should be flagged"); Xenon
+  // leaves them out, so counts here are higher than Xenon's by design.
   try {
     // Built for one scope at a time: the review period (counted) and the previous 3 months (listed only).
-    const undocumentedFor = ({ inPeriod }) => inPeriod(accpayAuthorised).filter(b => b.status === 'AUTHORISED')
-      .filter(b => !b.hasAttachments);
+    const undocumentedFor = ({ inPeriod }) => selectUndocumentedBills(inPeriod(accpayAuthorised));
     const toFinding = b => ({
       invoiceId: b.invoiceID, number: b.invoiceNumber, contact: b.contact?.name,
       date: toDateString(b.date), total: b.total

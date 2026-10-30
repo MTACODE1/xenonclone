@@ -1011,13 +1011,20 @@ test('Purchase Tax Missing on a Flat Rate Scheme client keeps only single items 
   assert.deepEqual(keepFlatRateLargeItems([{ amount: 1999 }]), []);
 });
 
-test('Duplicate Bills also flags the same supplier and invoice number with a different amount', () => {
+// Accountant, 29 Oct 2026: a duplicate needs the same amount AND date. The same number alone (a different amount, or the
+// same amount months apart) is not flagged. This replaces the earlier rule that flagged a repeated number on its own.
+test('Duplicate Bills: the same invoice number with a different amount is no longer flagged', () => {
   const { findDuplicatesWithSameNumber } = require('../src/services/checkRules');
   const supplier = { contactID: 'c1', name: 'Acme' };
   const bill = (id, number, total, date) => ({ invoiceID: id, invoiceNumber: number, total, amountDue: total, date, contact: supplier, status: 'AUTHORISED' });
   const found = findDuplicatesWithSameNumber([bill('a', 'INV-100', 100, '2026-03-01'), bill('b', 'inv 100', 105, '2026-05-20'), bill('c', 'INV-200', 50, '2026-05-21')], 3, { requireUnpaidPair: true });
-  assert.equal(found.length, 1);
-  assert.deepEqual(found[0].documentIds.sort(), ['a', 'b']);
+  assert.equal(found.length, 0, 'different amount and months apart: not a duplicate');
+  const sameDay = findDuplicatesWithSameNumber([bill('a', 'INV-100', 100, '2026-05-01'), bill('b', 'inv 100', 105, '2026-05-01')], 3, { requireUnpaidPair: true });
+  assert.equal(sameDay.length, 0, 'same number and same day but a different amount: not a duplicate');
+  const sameAmountSameDay = findDuplicatesWithSameNumber([bill('a', 'INV-100', 100, '2026-05-01'), bill('b', 'inv 100', 100, '2026-05-01')], 3, { requireUnpaidPair: true });
+  assert.deepEqual(sameAmountSameDay.map(g => g.documentIds.sort()), [['a', 'b']], 'same supplier, number, amount and date');
+  const sameAmountMonthsApart = findDuplicatesWithSameNumber([bill('a', 'INV-100', 100, '2026-03-01'), bill('b', 'inv 100', 100, '2026-09-01')], 3, { requireUnpaidPair: true });
+  assert.equal(sameAmountMonthsApart.length, 0, 'same number and amount but months apart: not a duplicate');
   const other = findDuplicatesWithSameNumber([bill('a', 'INV-100', 100, '2026-03-01'), { ...bill('b', 'INV-100', 105, '2026-05-20'), contact: { contactID: 'c2', name: 'Other' } }], 3, {});
   assert.equal(other.length, 0, 'a different supplier with the same number is not a duplicate');
   const same = findDuplicatesWithSameNumber([bill('a', 'X1', 100, '2026-05-01'), bill('b', 'X9', 100, '2026-05-02')], 3, { requireUnpaidPair: true });
@@ -1045,15 +1052,19 @@ test('Same invoice number on fully paid bills is not a duplicate (account number
   const paid = (id, total, date) => ({ invoiceID: id, invoiceNumber: '625010011520', total, amountDue: 0, date, contact: supplier, status: 'PAID' });
   assert.equal(findDuplicatesWithSameNumber([paid('a', 33, '2026-01-19'), paid('b', 36, '2026-03-19')], 3, { requireUnpaidPair: true }).length, 0);
   const unpaid = { ...paid('c', 36, '2026-04-18'), amountDue: 36, status: 'AUTHORISED' };
-  assert.equal(findDuplicatesWithSameNumber([paid('a', 33, '2026-01-19'), unpaid], 3, { requireUnpaidPair: true }).length, 1);
+  assert.equal(findDuplicatesWithSameNumber([paid('a', 33, '2026-01-19'), unpaid], 3, { requireUnpaidPair: true }).length, 0, 'months apart and a different amount');
+  const sameAmountSameDay = { ...paid('d', 36, '2026-04-18'), amountDue: 0 };
+  assert.equal(findDuplicatesWithSameNumber([sameAmountSameDay, unpaid], 3, { requireUnpaidPair: true }).length, 1, 'same number, amount and day');
 });
 
-test('Same invoice number on paid bills dated the same day is a duplicate even with different amounts', () => {
+test('Same invoice number on paid bills dated the same day is a duplicate only when the amount is also the same', () => {
   const { findDuplicatesWithSameNumber } = require('../src/services/checkRules');
   const supplier = { contactID: 'c1', name: 'The Priory' };
   const paid = (id, total, date) => ({ invoiceID: id, invoiceNumber: 'G 46965', total, amountDue: 0, date, contact: supplier, status: 'PAID' });
-  assert.equal(findDuplicatesWithSameNumber([paid('a', 738, '2025-09-08'), paid('b', 1137.22, '2025-09-08')], 3, { requireUnpaidPair: true }).length, 1);
-  assert.equal(findDuplicatesWithSameNumber([paid('a', 738, '2025-06-08'), paid('b', 1137.22, '2025-09-08')], 3, { requireUnpaidPair: true }).length, 0);
+  assert.equal(findDuplicatesWithSameNumber([paid('a', 738, '2025-09-08'), paid('b', 1137.22, '2025-09-08')], 3, { requireUnpaidPair: true }).length, 0, 'different amounts');
+  assert.equal(findDuplicatesWithSameNumber([paid('a', 738, '2025-09-08'), paid('b', 738, '2025-09-08')], 3, { requireUnpaidPair: true }).length, 1);
+  assert.equal(findDuplicatesWithSameNumber([paid('a', 738, '2025-06-08'), paid('b', 738, '2025-09-08')], 3, { requireUnpaidPair: true }).length, 0);
+  assert.equal(findDuplicatesWithSameNumber([paid('a', 738, '2025-09-08'), paid('b', 738.004, '2025-09-10')], 3, { requireUnpaidPair: true }).length, 1, 'to the penny, inside the window');
 });
 
 test('A number shared by many bills is a reused account number, not a duplicate', () => {
@@ -1062,7 +1073,9 @@ test('A number shared by many bills is a reused account number, not a duplicate'
   const day = n => `2026-03-0${n}`;
   const bills = [1, 2, 3, 4, 5].map(n => ({ invoiceID: 'm' + n, invoiceNumber: '811427073840242', total: 40 + n, amountDue: 0, date: day(n), contact: supplier, status: 'PAID' }));
   assert.equal(findDuplicatesWithSameNumber(bills, 3, { requireUnpaidPair: true }).length, 0);
-  assert.equal(findDuplicatesWithSameNumber(bills.slice(0, 3), 3, { requireUnpaidPair: true }).length, 1, 'three bills can still be a duplicate');
+  assert.equal(findDuplicatesWithSameNumber(bills.slice(0, 3), 3, { requireUnpaidPair: true }).length, 0, 'different amounts are not a duplicate');
+  const sameAmount = [1, 2, 3].map(n => ({ ...bills[n - 1], total: 40 }));
+  assert.equal(findDuplicatesWithSameNumber(sameAmount, 3, { requireUnpaidPair: true }).length, 1, 'three bills of the same amount can still be a duplicate');
 });
 
 test('Recalculating from stored data: an empty record type is fine, a client with nothing stored is not', () => {

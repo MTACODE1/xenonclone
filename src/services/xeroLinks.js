@@ -48,7 +48,8 @@ function xeroLinks(checkType, item) {
   const bankId = item.bankTransactionId || item.bankTransactionID || (bankSource ? (item.invoiceId || item.id) : null);
   if (bankId) add('Open bank transaction', `https://go.xero.com/Bank/ViewTransaction.aspx?bankTransactionID=${enc(bankId)}`);
   const paymentId = item.paymentId || item.paymentID || (item.source === 'payment' ? item.id : null);
-  if (paymentId) add('Find payment', `https://go.xero.com/Search/Default.aspx?searchTerm=${enc(paymentId)}`);
+  // A payment has no page of its own: when the bill or invoice it pays is known (linkId), that is the link.
+  if (paymentId && !item.linkId) add('Find payment', `https://go.xero.com/Search/Default.aspx?searchTerm=${enc(paymentId)}`);
   const creditId = item.creditNoteId || item.creditNoteID
     || ((/credits/.test(checkType) || isCreditType(item.type) || item.source === 'credit_note') ? item.id : null);
   if (creditId) {
@@ -56,8 +57,20 @@ function xeroLinks(checkType, item) {
     add('Open credit note',
       `https://go.xero.com/${payable ? 'AccountsPayable' : 'AccountsReceivable'}/ViewCreditNote.aspx?creditNoteID=${enc(creditId)}`);
   }
+  // Findings that carry the document they came from under linkId/linkType (not part of the finding's identity, so adding
+  // them keeps existing review states): a bill, an invoice, a credit note or a bank transaction.
+  if (item.linkId) {
+    if (item.linkType === 'BANK') add('Open bank transaction', `https://go.xero.com/Bank/ViewTransaction.aspx?bankTransactionID=${enc(item.linkId)}`);
+    else if (isCreditType(item.linkType)) add('Open credit note', `https://go.xero.com/${item.linkType === 'ACCPAYCREDIT' ? 'AccountsPayable' : 'AccountsReceivable'}/ViewCreditNote.aspx?creditNoteID=${enc(item.linkId)}`);
+    else if (item.linkType === 'ACCPAY' || item.linkType === 'ACCREC') {
+      add(item.linkType === 'ACCPAY' ? 'Open bill' : 'Open invoice',
+        `https://go.xero.com/${item.linkType === 'ACCPAY' ? 'AccountsPayable' : 'AccountsReceivable'}/View.aspx?InvoiceID=${enc(item.linkId)}`);
+    }
+  }
   const contactIds = [item.contactId, item.contactID];
   if (/duplicate_contacts/.test(checkType)) contactIds.push(item.id1, item.id2);
+  // Contact Defaults and Inactive Contacts list the contact itself; its id is the finding's id.
+  if (/^(contact_defaults|inactive_contacts)$/.test(checkType)) contactIds.push(item.id);
   for (const contactId of contactIds.filter(Boolean)) {
     add('Open contact', `https://go.xero.com/Contacts/View/${enc(contactId)}`);
   }
