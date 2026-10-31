@@ -275,14 +275,38 @@ async function fetchDocumentContent(documentUrl, apiKey, accept) {
   return response.text();
 }
 
+// How many filed year-ends are compared against Xero. Xenon checks every filed year; one
+// comparison per filing costs a Balance Sheet (and sometimes a P&L) call per client per sync, so
+// the newest few are enough — anything older predates the bookkeeping for most clients anyway.
+const FILED_ACCOUNTS_YEARS = 3;
+
 /**
- * Resolve the filed net-assets figure for a company's most recently filed accounts.
+ * The balance-sheet dates to read filed accounts for: the profile's latest made-up-to date plus
+ * the next most recent accounts filings, newest first, capped at `limit`. The profile date is
+ * always included even if the filing history has not caught up with it yet, so the previous
+ * single-filing behaviour is a strict subset of this one.
+ */
+function selectFiledAccountsDates(items, { latestMadeUpTo, limit = FILED_ACCOUNTS_YEARS } = {}) {
+  const dates = new Set();
+  const latest = firstDate(latestMadeUpTo);
+  if (latest) dates.add(latest);
+  for (const item of (Array.isArray(items) ? items : []).filter(isAccountsFiling)) {
+    const date = filingMadeUpDate(item);
+    if (date) dates.add(date);
+  }
+  return [...dates].sort().reverse().slice(0, Math.max(1, limit));
+}
+
+/**
+ * Resolve the filed net-assets figure for a company's accounts made up to `madeUpTo`.
  *
  * Returns a result object in every case — including every failure — so the caller can persist
  * the attempt as evidence. `value` is null unless a figure was positively identified for the
- * exact balance-sheet date, in GBP, from an undimensioned instant context.
+ * exact balance-sheet date, in GBP, from an undimensioned instant context. A caller reading
+ * several filings passes the filing history it already fetched as `filingHistory` so the
+ * register is asked for it once, not once per year-end.
  */
-async function fetchFiledNetAssets(companyNumber, apiKey, { madeUpTo, fetchers = {} } = {}) {
+async function fetchFiledNetAssets(companyNumber, apiKey, { madeUpTo, filingHistory = null, fetchers = {} } = {}) {
   const getFilingHistory = fetchers.fetchFilingHistory || fetchFilingHistory;
   const getMetadata = fetchers.fetchDocumentMetadata || fetchDocumentMetadata;
   const getContent = fetchers.fetchDocumentContent || fetchDocumentContent;
@@ -295,7 +319,7 @@ async function fetchFiledNetAssets(companyNumber, apiKey, { madeUpTo, fetchers =
   };
   if (!base.madeUpTo) return { ...base, reason: 'no_made_up_to_date' };
 
-  const items = await getFilingHistory(companyNumber, apiKey);
+  const items = Array.isArray(filingHistory) ? filingHistory : await getFilingHistory(companyNumber, apiKey);
   const selection = selectAccountsFiling(items, base.madeUpTo);
   if (!selection.filing) {
     return { ...base, reason: selection.reason, availableDates: selection.availableDates || [] };
@@ -350,5 +374,6 @@ module.exports = {
   normalizeCompanyNumber, parseCompanyProfile, fetchCompanyProfile,
   fetchFilingHistory, fetchDocumentMetadata, fetchDocumentContent,
   fetchFiledNetAssets, selectAccountsFiling, selectDocumentContentType,
+  selectFiledAccountsDates, FILED_ACCOUNTS_YEARS,
   isTrustedDocumentUrl, filingMadeUpDate,
 };

@@ -12,5 +12,25 @@
 // git history for the previous SQLite-based version. Original file header, for context:
 // (no original header comment)
 const test = require('node:test');
+const assert = require('node:assert/strict');
 
 test('statementEvidence.test.js is skipped pending a MySQL-safe rewrite', { skip: 'unsafe to run against the shared MySQL database as written — see file header' }, () => {});
+
+test('eligibleFiledAccounts drops older filings with confirmed no bookkeeping but keeps the newest one strict', () => {
+  const { eligibleFiledAccounts } = require('../src/services/statementEvidence');
+  const synced = '2026-10-31 02:00:00';
+  const rows = [
+    { filing_date: '2025-05-31', xero_net_assets: -4346.36, xero_synced_at: synced },
+    { filing_date: '2024-05-31', xero_net_assets: -6511, xero_synced_at: synced },
+    { filing_date: '2023-05-31', xero_net_assets: null, xero_synced_at: synced },   // predates Xero: skip
+    { filing_date: '2022-05-31', xero_net_assets: null, xero_synced_at: null },     // not synced yet: keep (needs_sync)
+  ];
+  assert.deepEqual(eligibleFiledAccounts(rows).map(r => r.filing_date), ['2025-05-31', '2024-05-31', '2022-05-31']);
+  // newest filing with no bookkeeping stays: that is a genuine "cannot compare", as before
+  const newestEmpty = [
+    { filing_date: '2025-05-31', xero_net_assets: null, xero_synced_at: synced },
+    { filing_date: '2024-05-31', xero_net_assets: 10, xero_synced_at: synced },
+  ];
+  assert.deepEqual(eligibleFiledAccounts(newestEmpty).map(r => r.filing_date), ['2025-05-31', '2024-05-31']);
+  assert.deepEqual(eligibleFiledAccounts([]), []);
+});

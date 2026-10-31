@@ -14,7 +14,10 @@ const {
   updateOrganisationCompanyNumber, upsertCompaniesHouseProfile, getCompaniesHouseProfileForOrg,
   upsertFiledAccountsFromCompaniesHouse, recordFiledAccountsExtraction, getFiledAccountsExtractionsForOrg, getReviewFrom
 } = require('../db/queries');
-const { fetchCompanyProfile, findCompanyNumberByName, fetchFiledNetAssets, normalizeCompanyNumber } = require('./companiesHouse');
+const {
+  fetchCompanyProfile, findCompanyNumberByName, fetchFiledNetAssets, fetchFilingHistory,
+  selectFiledAccountsDates, normalizeCompanyNumber,
+} = require('./companiesHouse');
 const { getDb: getDatabase } = require('../db/schema');
 const {
   CHECK_DEFAULTS, CHECK_DEFINITIONS, ALL_CHECK_DEFINITIONS, NON_SCORED_CHECKS, calculateHealthScore, findDirectMatches,
@@ -414,15 +417,27 @@ async function runSync(tenantId, progressCallback, options = {}) {
         // the filing itself is public and machine-readable when submitted as iXBRL. Every attempt
         // (including each failure mode) is recorded as evidence; only a positively identified
         // figure is written to filed_accounts, and never over an accountant-entered one.
+        // Every recent filed year-end is read, not just the latest one (Xenon compares each filed
+        // year; E4Office's May 2024 accounts were a real difference Akrio never looked at). The
+        // filing history is fetched once here and handed to each read; if it cannot be fetched the
+        // latest date alone is read, exactly as before.
         if (madeUpTo && getSetting('companies_house_filed_accounts_disabled') !== '1') {
           emit({ step: 'companies_house_accounts', message: 'Reading filed accounts for net assets...' });
+          let filingHistory = null;
+          let filedDates = [madeUpTo];
           try {
-            const filed = await fetchFiledNetAssets(companyNumber, apiKey, { madeUpTo });
+            filingHistory = await fetchFilingHistory(companyNumber, apiKey);
+            filedDates = selectFiledAccountsDates(filingHistory, { latestMadeUpTo: madeUpTo });
+          } catch (historyError) {
+            console.error('Companies House filing history skipped (latest filing only):', historyError.message);
+          }
+          for (const filedMadeUpTo of filedDates) try {
+            const filed = await fetchFiledNetAssets(companyNumber, apiKey, { madeUpTo: filedMadeUpTo, filingHistory });
             let applied = false;
             if (filed.value != null) {
               applied = upsertFiledAccountsFromCompaniesHouse(orgId, {
-                filingDate: madeUpTo,
-                madeUpTo,
+                filingDate: filedMadeUpTo,
+                madeUpTo: filedMadeUpTo,
                 netAssets: filed.value,
                 sourceNote: `Companies House ${filed.filingDescription || 'accounts'}` +
                   ` filed ${filed.filingDate || 'unknown date'}` +
@@ -437,7 +452,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
               });
             }
             recordFiledAccountsExtraction(orgId, {
-              madeUpTo, companyNumber,
+              madeUpTo: filedMadeUpTo, companyNumber,
               chTransactionId: filed.transactionId, chDocumentId: filed.documentId,
               filingDate: filed.filingDate, filingDescription: filed.filingDescription,
               contentType: filed.contentType, taxonomyConcept: filed.concept,
@@ -454,7 +469,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
             });
           } catch (filedError) {
             recordFiledAccountsExtraction(orgId, {
-              madeUpTo, companyNumber, failureReason: `fetch_failed: ${filedError.message}`,
+              madeUpTo: filedMadeUpTo, companyNumber, failureReason: `fetch_failed: ${filedError.message}`,
               applied: false,
             });
           }

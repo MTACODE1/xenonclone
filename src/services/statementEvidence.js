@@ -400,6 +400,19 @@ function extractNetAssetsFromBalanceSheet(report) {
   return values.length ? values[0] : null;
 }
 
+// Several filed year-ends are read from Companies House now, and the older ones often predate the
+// Xero bookkeeping altogether (a client who moved to Xero two years ago has no balance sheet at
+// its three-year-old year end). The sync records that case as "synced, no figure" — xero_synced_at
+// set, xero_net_assets null — and it must not drag the whole check to 'unavailable' when the
+// newest filing compares fine. The newest filing keeps the strict rule: no bookkeeping at the
+// latest year end is a real "cannot compare", exactly as it was before older filings were read.
+function eligibleFiledAccounts(filedAccounts) {
+  const rows = Array.isArray(filedAccounts) ? filedAccounts : [];
+  const newest = rows.map(row => String(row.filing_date || '')).sort().pop() || '';
+  return rows.filter(row => String(row.filing_date || '') === newest
+    || row.xero_net_assets != null || !row.xero_synced_at);
+}
+
 function evidenceFreshness(date, now = new Date()) {
   if (!date) return 'unknown';
   return dayDistance(date, now.toISOString().slice(0, 10)) > 35 ? 'stale' : 'current';
@@ -503,7 +516,7 @@ async function recomputeEvidenceIssues(orgId, periodKey = null, onlyCheck = null
   // was silently reducing to filed[0], which meant a client with two historical filings that both
   // differ from Xero could only ever surface one. Findings carry `date: filing_date` so
   // addFindingKeys' fallback identity keys each filing by its own date, not just by its £ amount.
-  const filedAccounts = getFiledAccountsForOrg(orgId);
+  const filedAccounts = eligibleFiledAccounts(getFiledAccountsForOrg(orgId));
   const filedComparisons = filedAccounts.map(filed => ({
     filed, comparison: filedAccountsComparison(filed.net_assets, filed.xero_net_assets, null, org),
   }));
@@ -538,7 +551,7 @@ async function recomputeEvidenceIssues(orgId, periodKey = null, onlyCheck = null
 module.exports = {
   allocateStatementMatches, balanceDiscrepancy, detectColumnMapping,
   extractNetAssetsFromBalanceSheet,
-  balanceSheetHoldsBookkeeping,
+  balanceSheetHoldsBookkeeping, eligibleFiledAccounts,
   filedAccountsComparison, matchStatementLine, matchStatementLines,
   normalizeStatementLines, parseCsv, recomputeEvidenceIssues, sha256,
 };

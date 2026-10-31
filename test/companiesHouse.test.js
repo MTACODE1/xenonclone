@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const {
   normalizeCompanyNumber, parseCompanyProfile, selectAccountsFiling,
   selectDocumentContentType, isTrustedDocumentUrl, fetchFiledNetAssets,
+  selectFiledAccountsDates, FILED_ACCOUNTS_YEARS,
 } = require('../src/services/companiesHouse');
 
 test('company numbers are normalised to the 8-character register format', () => {
@@ -202,4 +203,41 @@ test('extraction is skipped without a balance-sheet date and makes no requests',
   });
   assert.equal(result.reason, 'no_made_up_to_date');
   assert.equal(called, false);
+});
+
+test('selectFiledAccountsDates returns the newest filed year-ends, latest profile date first, capped', () => {
+  const history = [
+    { category: 'accounts', description_values: { made_up_date: '2024-05-31' } },
+    { category: 'accounts', description_values: { made_up_date: '2023-05-31' } },
+    { category: 'accounts', description_values: { made_up_date: '2025-05-31' } },
+    // amended accounts for a year already listed must not add a second date
+    { category: 'accounts', description_values: { made_up_date: '2024-05-31' } },
+    { category: 'accounts', description_values: { made_up_date: '2022-05-31' } },
+    { category: 'confirmation-statement', description_values: { made_up_date: '2025-07-01' } },
+  ];
+  assert.equal(FILED_ACCOUNTS_YEARS, 3);
+  assert.deepEqual(selectFiledAccountsDates(history, { latestMadeUpTo: '2025-05-31' }),
+    ['2025-05-31', '2024-05-31', '2023-05-31']);
+  // the profile's latest date is kept even when the filing history has not caught up with it
+  assert.deepEqual(selectFiledAccountsDates(history.slice(0, 2), { latestMadeUpTo: '2025-05-31' }),
+    ['2025-05-31', '2024-05-31', '2023-05-31']);
+  // no history at all: the previous single-date behaviour
+  assert.deepEqual(selectFiledAccountsDates(null, { latestMadeUpTo: '2025-05-31' }), ['2025-05-31']);
+  assert.deepEqual(selectFiledAccountsDates(history, { latestMadeUpTo: null, limit: 2 }), ['2025-05-31', '2024-05-31']);
+});
+
+test('a pre-fetched filing history is used instead of asking the register again', async () => {
+  let historyCalls = 0;
+  const fetchers = stubFetchers({ fetchFilingHistory: async () => { historyCalls += 1; return []; } });
+  const history = [{
+    category: 'accounts', transaction_id: 'txn-1', date: '2025-06-01',
+    description_values: { made_up_date: '2024-12-31' },
+    links: { document_metadata: METADATA_URL },
+  }];
+  const result = await fetchFiledNetAssets('12345678', 'key', {
+    madeUpTo: '2024-12-31', filingHistory: history, fetchers,
+  });
+  assert.equal(historyCalls, 0);
+  assert.equal(result.value, 42500);
+  assert.equal(result.transactionId, 'txn-1');
 });
