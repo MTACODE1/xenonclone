@@ -560,14 +560,20 @@ function motorVehicleExpenses({ accounts, documents, journals, from, to, balance
   if (!expenseCodes.size) return [];
   const assetCodes = new Set([...byCode].filter(([, a]) => String(a.type || '').toUpperCase() === 'FIXED' && VEHICLE_ASSET_NAME.test(a.name || '')).map(([c]) => c));
   const codeOf = line => String(line.accountCode || '').toUpperCase();
-  const touchesAsset = (documents || []).some(d => (d.lineItems || []).some(l => assetCodes.has(codeOf(l))))
-    || (journals || []).some(j => (j.journalLines || []).some(l => assetCodes.has(codeOf(l))));
-  if (touchesAsset) return [];
-  // A vehicle can be on the books without any bill, spend or manual journal in the window (opening balances,
-  // an older purchase), so when the Balance Sheet is available a vehicle cost account with a balance counts too.
-  if (balanceSheet && balanceSheetRows(balanceSheet).some(row => row.isAsset && VEHICLE_ASSET_NAME.test(row.label)
-    && !/depreciation|accumulated/i.test(row.label) && Math.abs(row.value) > 0.005)) return [];
   const inWindow = date => date && (!from || date >= from) && (!to || date <= to);
+  const touchesAssetWhen = keep => (documents || []).some(d => keep(lineDate(d)) && (d.lineItems || []).some(l => assetCodes.has(codeOf(l))))
+    || (journals || []).some(j => keep(lineDate(j)) && (j.journalLines || []).some(l => assetCodes.has(codeOf(l))));
+  if (balanceSheet) {
+    // With the Balance Sheet, a vehicle exists when a vehicle cost account has a balance, or was posted to in the review
+    // period (a purchase or disposal). One bought in an earlier year and since disposed of, back at nil, is no vehicle
+    // (accountant, 30 Oct 2026).
+    if (balanceSheetRows(balanceSheet).some(row => row.isAsset && VEHICLE_ASSET_NAME.test(row.label)
+      && !/depreciation|accumulated/i.test(row.label) && Math.abs(row.value) > 0.005)) return [];
+    if (touchesAssetWhen(inWindow)) return [];
+  } else if (touchesAssetWhen(() => true)) {
+    // Without a Balance Sheet an older purchase cannot be told from a vehicle still owned, so it counts (the earlier rule).
+    return [];
+  }
   const items = [];
   for (const doc of documents || []) {
     const date = lineDate(doc);

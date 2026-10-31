@@ -810,12 +810,14 @@ function findUnexpectedDefaultLines(documents, contactsById, defaultField, lineF
 // 461/473 ticks most clients carry came from an import of Xenon's defaults, not from the accountant, so the practice
 // default applies to every client and an account a reviewer ticks is added on top. A chart with no eligible account
 // and nothing ticked still shows "Not configured".
-const CAPITAL_DEFAULT_ACCOUNT_TYPES = new Set(['EXPENSE', 'OVERHEADS', 'DIRECTCOSTS']);
+// Fixed asset accounts are included (Abdur, 30 Oct 2026): a large purchase coded straight to Computer Equipment is still
+// reviewed. Accumulated depreciation accounts are excluded by name below.
+const CAPITAL_DEFAULT_ACCOUNT_TYPES = new Set(['EXPENSE', 'OVERHEADS', 'DIRECTCOSTS', 'FIXED']);
 const CAPITAL_DEFAULT_EXCLUDED_NAME = new RegExp([
   String.raw`wages?`, String.raw`salar(?:y|ies)`, String.raw`payroll`, String.raw`paye`, String.raw`national\s+insurance`,
   String.raw`ni`, String.raw`nic`, String.raw`pensions?`, String.raw`remuneration`,
   String.raw`rents?`, String.raw`rental`, String.raw`rates`, String.raw`council\s+tax`,
-  String.raw`insurances?`, String.raw`interest`, String.raw`depreciation`, String.raw`amorti[sz]ation`,
+  String.raw`insurances?`, String.raw`interest`, String.raw`depreciation`, String.raw`accumulated`, String.raw`amorti[sz]ation`,
   String.raw`tax`, String.raw`taxes`, String.raw`taxation`, String.raw`vat`,
 ].map(word => String.raw`\b${word}\b`).join('|'), 'i');
 function isCapitalDefaultAccount(account) {
@@ -1158,6 +1160,15 @@ function monitoredMisallocatedExpenseCodes(configuredCodes, expenseCodes, nameBy
   for (const code of expenseCodes || []) if (isVagueAccountName(nameByCode[code])) codes.add(code);
   return codes;
 }
+// Revenue accounts watched for Misallocated Items when nothing is configured: the vaguely named ones, except "Other Revenue"
+// and "Other Income" (accountant, 30 Oct 2026: interest, cashback and refunds belong there). Accounts a reviewer ticks are
+// always watched, and once a client's settings have been saved nothing is guessed.
+const OTHER_INCOME_ACCOUNT_NAME = /\bother\b/i;
+function monitoredMisallocatedRevenueCodes(configuredCodes, revenueCodes, nameByCode, useVagueGuess) {
+  if ((configuredCodes || []).length) return new Set(configuredCodes);
+  if (!useVagueGuess) return new Set();
+  return new Set([...(revenueCodes || [])].filter(code => isVagueAccountName(nameByCode[code]) && !OTHER_INCOME_ACCOUNT_NAME.test(nameByCode[code] || '')));
+}
 // Single amounts under £1 (and £0 lines) are never worth a finding; used where items are counted one at a time.
 function isUnderMinimumItem(amount, minimum = PRACTICE_POLICY.minimumItemGbp) {
   return Math.abs(Number(amount) || 0) < minimum;
@@ -1235,7 +1246,7 @@ function storedEntitiesForRecalculation(cachedRows, entityType, clientHasAnyStor
 module.exports = {
   storedEntitiesForRecalculation,
   findDuplicatesWithSameNumber,
-  BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise, keepFlatRateLargeItems, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, balanceSheetNeeded, turnoverAdjustmentFromPayments, nonCompanyDividendIssue, selectUnapprovedInPeriod, BALANCE_SHEET_CHECK_TYPES, reviewFromDate, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, keepAtLeast, isUnderMinimumItem, FLAT_RATE_SINGLE_ITEM_LIMIT, missingContactDefaults,
+  BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise, keepFlatRateLargeItems, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, balanceSheetNeeded, turnoverAdjustmentFromPayments, nonCompanyDividendIssue, selectUnapprovedInPeriod, BALANCE_SHEET_CHECK_TYPES, reviewFromDate, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, monitoredMisallocatedRevenueCodes, keepAtLeast, isUnderMinimumItem, FLAT_RATE_SINGLE_ITEM_LIMIT, missingContactDefaults,
   CHECK_DEFAULTS,
   CHECK_DEFINITIONS,
   REVIEW_CHECK_DEFINITIONS,

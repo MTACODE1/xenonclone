@@ -33,7 +33,7 @@ const {
   grossLineAmount, netLineAmount, toDateString,
   buildAccountCodeCanonicaliser, canonicaliseAccountCodes,
   withDisplayOnlyBankFindings,
-  storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, keepFlatRateLargeItems, missingContactDefaults, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, balanceSheetNeeded, turnoverAdjustmentFromPayments, nonCompanyDividendIssue, selectUnapprovedInPeriod, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, keepAtLeast, isUnderMinimumItem, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
+  storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, keepFlatRateLargeItems, missingContactDefaults, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, balanceSheetNeeded, turnoverAdjustmentFromPayments, nonCompanyDividendIssue, selectUnapprovedInPeriod, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, monitoredMisallocatedRevenueCodes, keepAtLeast, isUnderMinimumItem, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
 const { saveBankLines } = require('../db/bankLines');
@@ -1897,9 +1897,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     // Expense side: the configured accounts plus every vaguely named account, for every client, because a GL account
     // called General Expenses or similar should not be used at all. Revenue side stays as configured.
     const monitoredExpenseCodes = monitoredMisallocatedExpenseCodes(configuredMisallocatedCodes, expenseAccountCodes, accountNameByCode);
-    const monitoredRevenueCodes = new Set(configuredMisallocatedCodes.length
-      ? configuredMisallocatedCodes
-      : useVagueGuess ? [...revenueAccountCodes].filter(code => isVagueAccountName(accountNameByCode[code])) : []);
+    const monitoredRevenueCodes = monitoredMisallocatedRevenueCodes(configuredMisallocatedCodes, revenueAccountCodes, accountNameByCode, useVagueGuess);
     const getThresholdForAccount = code =>
       effectiveMisallocatedThreshold(accountConfigByCode.get(code)?.misallocated_threshold, defaultMisallocatedThreshold);
     // Built for one scope at a time: the review period (counted) and the previous 3 months (listed only).

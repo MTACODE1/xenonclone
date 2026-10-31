@@ -1227,3 +1227,13 @@ test('the capital floor is £2,000 and the practice setting can only raise it', 
   assert.equal(floorFor('5000'), 5000);
   assert.equal(effectiveCapitalThreshold(null, null, floorFor('200')), 2000);
 });
+
+// Accountant, round 3 v3 (30 Oct 2026): "Please remove 'other revenue' and other income from the parameters of this check."
+test('Misallocated Items does not watch Other Revenue or Other Income by default, but still watches other vague income names', () => {
+  const { monitoredMisallocatedRevenueCodes } = require('../src/services/checkRules');
+  const names = { 260: 'Other Revenue', 205: 'Other Income', 270: 'Sundry Income', 280: 'Miscellaneous Revenue', 200: 'Sales' };
+  const codes = new Set(['260', '205', '270', '280', '200']);
+  assert.deepEqual([...monitoredMisallocatedRevenueCodes([], codes, names, true)].sort(), ['270', '280'], 'sundry and miscellaneous stay; other revenue and other income go');
+  assert.deepEqual([...monitoredMisallocatedRevenueCodes([], codes, names, false)], [], 'once settings are saved, nothing is guessed');
+  assert.deepEqual([...monitoredMisallocatedRevenueCodes(['260'], codes, names, true)], ['260'], 'an account a reviewer ticks is still watched');
+});

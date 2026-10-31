@@ -352,3 +352,18 @@ test('every client gets a standing Bank Statements Review reminder, one line per
   assert.equal(journalChecks.bankStatementReviewItems([]).length, 1, 'a client with no bank account still gets the reminder');
   assert.equal(journalChecks.bankStatementReviewItems(null).length, 1);
 });
+
+// Accountant, round 3 v3 (30 Oct 2026): a client with motor expenses and "no vehicle registered" must be flagged. A vehicle
+// bought in an earlier year and since disposed of (cost account back to nil) is no vehicle; any posting to the vehicle
+// account inside the review period, or a balance on the Balance Sheet, still means a vehicle exists.
+test('a vehicle bought years ago and since disposed of does not hide motor expenses once the Balance Sheet shows nil', () => {
+  const args = { accounts: motorAccounts, from: '2026-01-01', to: '2026-12-31', journals: [], documents: [billOn('412'), billOn('710', '2021-08-05')] };
+  const sheet = rows => ({ rows: [{ rowType: 'Section', title: 'Fixed Assets', rows: [{ rowType: 'Section', title: 'Tangible Assets', rows: rows.map(([label, value]) => ({ rowType: 'Row', cells: [{ value: label }, { value: String(value) }] })) }] }] });
+  assert.equal(journalChecks.motorVehicleExpenses({ ...args, balanceSheet: sheet([['Motor Vehicles', 0]]) }).length, 1, 'bought in 2021, nil balance: flagged');
+  assert.deepEqual(journalChecks.motorVehicleExpenses({ ...args, balanceSheet: sheet([['Motor Vehicles', 9000]]) }), [], 'balance on the Balance Sheet: a vehicle exists');
+  const inPeriod = { ...args, documents: [billOn('412'), billOn('710', '2026-03-01')] };
+  assert.deepEqual(journalChecks.motorVehicleExpenses({ ...inPeriod, balanceSheet: sheet([['Motor Vehicles', 0]]) }), [], 'bought or sold in the period: a vehicle was recorded');
+  assert.deepEqual(journalChecks.motorVehicleExpenses({ ...args, balanceSheet: null }), [], 'no Balance Sheet: an old purchase still counts, as before');
+  const journalInPeriod = { ...args, documents: [billOn('412')], journals: [{ status: 'POSTED', date: '2026-04-01', journalLines: [{ accountCode: '710', lineAmount: -9000 }] }] };
+  assert.deepEqual(journalChecks.motorVehicleExpenses({ ...journalInPeriod, balanceSheet: sheet([['Motor Vehicles', 0]]) }), [], 'a disposal journal in the period counts');
+});

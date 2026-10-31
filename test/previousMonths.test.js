@@ -110,9 +110,23 @@ test('every expense-type account is watched by default', () => {
   for (const type of ['EXPENSE', 'OVERHEADS', 'DIRECTCOSTS']) {
     assert.equal(isCapitalDefaultAccount({ type, name: 'Repairs and Maintenance' }), true, type);
   }
-  for (const type of ['DEPRECIATN', 'REVENUE', 'FIXED', 'CURRLIAB', 'BANK', undefined]) {
+  for (const type of ['DEPRECIATN', 'REVENUE', 'CURRLIAB', 'BANK', undefined]) {
     assert.equal(isCapitalDefaultAccount({ type, name: 'Computer Equipment' }), false, String(type));
   }
+});
+
+// Abdur, round 3 v3 (30 Oct 2026): an eBay bill of £4,999 coded DR Computer Equipment / CR Accounts payable "should have
+// been flagged", so purchases posted to fixed asset accounts are reviewed too; accumulated depreciation is not a purchase.
+test('fixed asset accounts are watched by default, except accumulated depreciation', () => {
+  assert.equal(isCapitalDefaultAccount({ type: 'FIXED', name: 'Computer Equipment' }), true);
+  assert.equal(isCapitalDefaultAccount({ type: 'FIXED', name: 'Office Equipment' }), true);
+  assert.equal(isCapitalDefaultAccount({ type: 'FIXED', name: 'Less Accumulated Depreciation on Computer Equipment' }), false);
+  assert.equal(isCapitalDefaultAccount({ type: 'FIXED', name: 'Accumulated Depreciation' }), false);
+  const codes = resolveCapitalReviewCandidateCodes([], [
+    { code: '720', name: 'Computer Equipment', type: 'FIXED' },
+    { code: '721', name: 'Less Accumulated Depreciation on Computer Equipment', type: 'FIXED' },
+  ]);
+  assert.deepEqual([...codes], ['720']);
 });
 
 test('wages, rent, rates, insurance, interest, depreciation and tax are left out', () => {
