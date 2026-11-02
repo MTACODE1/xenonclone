@@ -640,6 +640,13 @@ function excludeDuplicateDrafts(items, windowDays = CHECK_DEFAULTS.duplicateWind
   return items.filter(item => !duplicateIds.has(item.invoiceID));
 }
 
+// Unapproved INVOICES (accountant, 2 Nov 2026): "All 'draft' invoices and bills in Xero should get flagged in unapproved",
+// so identical duplicate drafts stay in the count too (ARC Renewables: Xenon 5, Akrio was 3) and get cleaned up. This
+// replaces the RBC Sutherland cluster exclusion above for Xero; excludeDuplicateDrafts is still used by FreeAgent.
+function selectUnapprovedInvoices(draftInvoices) {
+  return [...draftInvoices];
+}
+
 // Unapproved BILLS count every draft/submitted bill, duplicates included. The cluster exclusion above
 // was proven on invoices (RBC Sutherland), but on supplier bills Xenon keeps the duplicates: Adeola
 // Gboyega has 46 in-period draft bills including two identical Amazon ones and Xenon, Xero and a raw
@@ -1281,6 +1288,7 @@ module.exports = {
   findDuplicates,
   excludeDuplicateDrafts,
   selectUnapprovedBills,
+  selectUnapprovedInvoices,
   findUnexpectedDefaultLines,
   findMisallocatedLines,
   resolveCapitalReviewCandidateCodes, isCapitalDefaultAccount,

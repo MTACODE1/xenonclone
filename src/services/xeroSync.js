@@ -21,7 +21,7 @@ const {
 const { getDb: getDatabase } = require('../db/schema');
 const {
   CHECK_DEFAULTS, CHECK_DEFINITIONS, ALL_CHECK_DEFINITIONS, NON_SCORED_CHECKS, calculateHealthScore, findDirectMatches,
-  findDuplicateContacts, findDuplicates, excludeDuplicateDrafts, selectUnapprovedBills, findUnexpectedDefaultLines,
+  findDuplicateContacts, findDuplicates, selectUnapprovedBills, selectUnapprovedInvoices, findUnexpectedDefaultLines,
   findMisallocatedLines, resolveCapitalReviewCandidateCodes,
   previousMonthsStart, isWithinPreviousMonths, withPreviousMonths, endOfMonth, countsAsBankProcessed,
   isOldDocument, isOverdueMoreThan, selectOldUnpaidInvoices, amountInBase, isPurchaseTaxExemptAccount, resolvePeriodChecked, resolveSupplierPatternLookbackMonths,
@@ -125,27 +125,6 @@ async function fetchDocumentHistory(tenantId, invoiceId) {
     console.error(`Invoice history fetch failed for ${invoiceId}:`, err.message);
     return null;
   }
-}
-
-// Live-only: a cacheOnly reanalysis (e.g. previewing a different period from what's already
-// cached) skips the history fetch entirely rather than hitting Xero, so those documents simply
-// show without a history note until the next real sync repopulates it.
-async function buildDuplicateDraftFindings(tenantId, duplicateGroups, cacheOnly) {
-  const findings = [];
-  for (const group of duplicateGroups) {
-    for (const doc of group.documents) {
-      const history = cacheOnly ? undefined : await fetchDocumentHistory(tenantId, doc.id);
-      findings.push({
-        id: doc.id, number: doc.reference, contact: group.contact,
-        date: doc.date, total: doc.amount, status: doc.status,
-        displayOnly: true,
-        suspectedDuplicateOf: group.documentIds.filter(id => id !== doc.id),
-        history,
-      });
-      if (!cacheOnly) await pageDelay();
-    }
-  }
-  return findings;
 }
 
 // Paginated contacts fetch — Xero returns up to 100 per call, like invoices
@@ -1145,14 +1124,8 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // --- MEDIUM: Unapproved Invoices (since lock date to avoid historical noise) ---
   try {
     const draftInvoices = selectUnapprovedInPeriod(accrecDraft, period);
-    const duplicateInvoiceGroups = findDuplicates(draftInvoices);
-    const invoices = excludeDuplicateDrafts(draftInvoices, undefined, duplicateInvoiceGroups);
-    // Excluded duplicates still appear here as displayOnly findings (zero count/value impact,
-    // per addFindingKeys/allocateFindingValues) so an accountant can see *why* the number dropped
-    // and — via Xero's own History log on each one — decide whether to go delete the extras.
-    const duplicateInvoiceFindings = await buildDuplicateDraftFindings(
-      tenantId, duplicateInvoiceGroups, Boolean(options.cacheOnly)
-    );
+    // Every draft/submitted invoice counts, identical duplicates included (accountant, 2 Nov 2026).
+    const invoices = selectUnapprovedInvoices(draftInvoices);
     const issue = {
       org_id: orgId, check_type: 'unapproved_invoices', importance: 'medium',
       // Potential value is an exposure magnitude, not a net position: a negative draft (e.g. an
@@ -1164,7 +1137,6 @@ async function runSync(tenantId, progressCallback, options = {}) {
           id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
           date: toDateString(i.date), total: i.total, status: i.status
         })),
-        ...duplicateInvoiceFindings,
       ], inPreviousMonths(accrecDraft).map(i => ({
         id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
         date: toDateString(i.date), total: i.total, status: i.status

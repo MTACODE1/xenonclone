@@ -13,6 +13,7 @@ const {
   findDuplicates,
   excludeDuplicateDrafts,
   selectUnapprovedBills,
+  selectUnapprovedInvoices,
   findUnexpectedDefaultLines,
   findMisallocatedLines,
   resolveCapitalReviewCandidateCodes,
@@ -1236,4 +1237,15 @@ test('Misallocated Items does not watch Other Revenue or Other Income by default
   assert.deepEqual([...monitoredMisallocatedRevenueCodes([], codes, names, true)].sort(), ['270', '280'], 'sundry and miscellaneous stay; other revenue and other income go');
   assert.deepEqual([...monitoredMisallocatedRevenueCodes([], codes, names, false)], [], 'once settings are saved, nothing is guessed');
   assert.deepEqual([...monitoredMisallocatedRevenueCodes(['260'], codes, names, true)], ['260'], 'an account a reviewer ticks is still watched');
+});
+
+test('selectUnapprovedInvoices keeps identical duplicate drafts (accountant, 2 Nov 2026: ARC Renewables 5, not 3)', () => {
+  const draft = (id, number, total) => ({
+    invoiceID: id, invoiceNumber: number, type: 'ACCREC', status: 'DRAFT', total, date: '2026-09-01',
+    reference: 'ARC-0111', contact: { contactID: 'arc', name: 'ARC' },
+  });
+  // INV-80275 and INV-80276: both drafts, both 22,717.92, same reference and contact.
+  const drafts = [draft('a', 'INV-80275', 22717.92), draft('b', 'INV-80276', 22717.92), draft('c', 'INV-1', 100)];
+  assert.equal(excludeDuplicateDrafts(drafts).length, 1);
+  assert.equal(selectUnapprovedInvoices(drafts).length, 3);
 });
