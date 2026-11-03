@@ -168,6 +168,18 @@ function parseFactValue(rawText, tag) {
   return { value, reason: null };
 }
 
+// Some filing software prints the brackets of a negative figure in the page text AROUND the tag
+// and leaves sign="-" off it (seen on a Capium filing, 30 Oct 2026: printed "(8,702)" but the tag
+// carries +8,702). Both the opening and the closing bracket must hug the fact, optionally with
+// whitespace or inline wrapper elements between, so prose such as "(see note 8,702)" is not read as one.
+const BRACKET_BEFORE = /\(\s*(?:<[^>]+>\s*)*$/;
+const BRACKET_AFTER = /^\s*(?:<\/[^>]+>\s*)*\)/;
+
+function isBracketedInPage(xml, start, end) {
+  return BRACKET_BEFORE.test(xml.slice(Math.max(0, start - 200), start)) &&
+    BRACKET_AFTER.test(xml.slice(end, end + 200));
+}
+
 function parseFacts(xml) {
   const facts = [];
   const pattern = elementPattern('nonFraction');
@@ -178,6 +190,9 @@ function parseFacts(xml) {
     const concept = localName(name);
     if (!CONCEPT_TIER_BY_NAME.has(concept)) continue;
     const parsed = parseFactValue(match[2], tag);
+    const bracketedInPage = parsed.value != null && parsed.value > 0 &&
+      isBracketedInPage(xml, match.index, pattern.lastIndex);
+    if (bracketedInPage) parsed.value = -parsed.value;
     facts.push({
       concept,
       conceptQualifiedName: name,

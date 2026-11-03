@@ -230,3 +230,19 @@ test('unparsable numerals are reported rather than coerced', () => {
   assert.equal(parseFactValue('', '<ix:nonFraction>').reason, 'empty_fact');
   assert.equal(parseFactValue('1 234', '<ix:nonFraction>').value, 1234);
 });
+
+test('brackets printed around an unsigned tag make net assets negative (Capium filing, London Mada)', () => {
+  const base = { units: GBP_UNIT, contexts: instantContext('c', '2026-01-31') };
+  const cases = [
+    ['<td>(<ix:nonFraction name="core:NetAssetsLiabilities" contextRef="c" unitRef="GBP" decimals="0">8,702</ix:nonFraction>)</td>', -8702],
+    ['<td>( <span><ix:nonFraction name="core:NetAssetsLiabilities" contextRef="c" unitRef="GBP" decimals="0">8,702</ix:nonFraction></span> )</td>', -8702],
+    ['<td>(<ix:nonFraction name="core:NetAssetsLiabilities" contextRef="c" unitRef="GBP" decimals="0" sign="-">8,702</ix:nonFraction>)</td>', -8702],
+    ['<td>(see note <ix:nonFraction name="core:NetAssetsLiabilities" contextRef="c" unitRef="GBP" decimals="0">8,702</ix:nonFraction> below)</td>', 8702],
+    ['<td>(<ix:nonFraction name="core:NetAssetsLiabilities" contextRef="c" unitRef="GBP" decimals="0">8,702</ix:nonFraction></td>', 8702],
+    ['<td><ix:nonFraction name="core:NetAssetsLiabilities" contextRef="c" unitRef="GBP" decimals="0">8,702</ix:nonFraction></td>', 8702],
+  ];
+  for (const [facts, expected] of cases) {
+    const result = extractNetAssetsFromIxbrl(document({ ...base, facts }), { madeUpTo: '2026-01-31' });
+    assert.equal(result.value, expected, facts);
+  }
+});
