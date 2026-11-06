@@ -676,6 +676,12 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
       <% } %>
     </div>
 
+    <%# Check settings (accountant, 4 Nov 2026: "remove all the parameters at the bottom of the health check page to keep it clean").
+        Folded away instead of deleted: the saved values still drive the checks, and staff can open this to change them. %>
+    <details id="check-settings-panel" class="card" style="margin-top: 24px;">
+      <summary style="cursor: pointer; padding: 14px 20px; font-weight: 600; color: #2A3547;">
+        Check settings <span style="font-weight: 400; color: #7C8FAC; font-size: 0.8rem;">(detection windows, thresholds and per-account settings)</span>
+      </summary>
     <div class="card" id="supplier-pattern-lookback" style="margin-top: 24px;">
       <div class="card-header" style="background: var(--grey-100);">
         <h5>Multi-Account / Multi-Tax Code Suppliers — Detection Window</h5>
@@ -887,6 +893,20 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
         </form>
       <% } %>
     </div>
+    </details>
+    <script>
+      // A link to one of the folded settings cards (for example #capital-review-accounts) opens the panel first.
+      (function () {
+        var panel = document.getElementById('check-settings-panel');
+        function openForHash() {
+          if (!panel || !location.hash) return;
+          var target = document.getElementById(location.hash.slice(1));
+          if (target && panel.contains(target)) { panel.open = true; target.scrollIntoView(); }
+        }
+        window.addEventListener('hashchange', openForHash);
+        openForHash();
+      })();
+    </script>
 
   </div>
 </div>

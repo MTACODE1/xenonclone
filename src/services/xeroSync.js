@@ -36,7 +36,7 @@ const {
   grossLineAmount, netLineAmount, toDateString,
   buildAccountCodeCanonicaliser, canonicaliseAccountCodes,
   withDisplayOnlyBankFindings,
-  storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, keepFlatRateLargeItems, missingContactDefaults, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, balanceSheetNeeded, turnoverAdjustmentFromPayments, nonCompanyDividendIssue, selectUnapprovedInPeriod, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, monitoredMisallocatedRevenueCodes, keepAtLeast, isUnderMinimumItem, isExpenseAccountLine, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
+  storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, keepFlatRateLargeItems, missingContactDefaults, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, balanceSheetNeeded, turnoverAdjustmentFromPayments, nonCompanyDividendIssue, selectUnapprovedInPeriod, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, monitoredMisallocatedRevenueCodes, keepAtLeast, isUnderMinimumItem, isExpenseAccountLine, isLowCostFixedAssetLine, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
 const { saveBankLines } = require('../db/bankLines');
@@ -1615,6 +1615,10 @@ async function runSync(tenantId, progressCallback, options = {}) {
     console.error('sales_tax_missing check failed — skipping (will show as "Not synced"):', err.message);
   }
 
+  // Shared by Low Cost Fixed Assets and Capital Item Review so a fixed-asset line is reported by one of them, not both.
+  // £2,000 by default (team feedback); the 'low_cost_fixed_assets_threshold' setting can change it.
+  const lowCostFixedAssetThreshold = parseFloat(getSetting('low_cost_fixed_assets_threshold')) || 2000;
+
   // --- MEDIUM: Capital Item Review (lines on capital-candidate accounts >= threshold since lock date) ---
   try {
     if (!chartOfAccountsAvailable) throw new Error('chart of accounts unavailable this sync — cannot classify expense accounts');
@@ -1634,7 +1638,8 @@ async function runSync(tenantId, progressCallback, options = {}) {
             // Inclusive, so raw lineAmount would overstate and inflate the count.
             const amount = Math.abs(netLineAmount(bill, line));
             const threshold = capitalThresholdFor(line.accountCode);
-            if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)) {
+            if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)
+              && !isLowCostFixedAssetLine(line.accountCode, amount, fixedAssetAccountCodes, lowCostFixedAssetThreshold)) {
               capitalItems.push({
                 invoiceId: bill.invoiceID, contact: bill.contact?.name, type: 'ACCPAY',
                 date: toDateString(bill.date), accountCode: line.accountCode,
@@ -1647,7 +1652,8 @@ async function runSync(tenantId, progressCallback, options = {}) {
           for (const line of (txn.lineItems || [])) {
             const amount = Math.abs(netLineAmount(txn, line));
             const threshold = capitalThresholdFor(line.accountCode);
-            if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)) {
+            if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)
+              && !isLowCostFixedAssetLine(line.accountCode, amount, fixedAssetAccountCodes, lowCostFixedAssetThreshold)) {
               capitalItems.push({
                 invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
                 date: toDateString(txn.date), accountCode: line.accountCode,
@@ -1662,7 +1668,8 @@ async function runSync(tenantId, progressCallback, options = {}) {
           for (const line of (txn.lineItems || [])) {
             const amount = Math.abs(netLineAmount(txn, line));
             const threshold = capitalThresholdFor(line.accountCode);
-            if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)) {
+            if (amount >= threshold && line.accountCode && capitalReviewCandidateCodes.has(line.accountCode)
+              && !isLowCostFixedAssetLine(line.accountCode, amount, fixedAssetAccountCodes, lowCostFixedAssetThreshold)) {
               capitalItems.push({
                 invoiceId: txn.bankTransactionID, contact: txn.contact?.name,
                 date: toDateString(txn.date), accountCode: line.accountCode,
@@ -1814,8 +1821,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // --- MEDIUM: Low Cost Fixed Assets (fixed-asset-coded lines <= £200 since lock date) ---
   try {
     if (!chartOfAccountsAvailable) throw new Error('chart of accounts unavailable this sync — cannot classify fixed asset accounts');
-    // £2,000 by default (team feedback); the 'low_cost_fixed_assets_threshold' setting can change it.
-    const LOW_COST_THRESHOLD = parseFloat(getSetting('low_cost_fixed_assets_threshold')) || 2000;
+    const LOW_COST_THRESHOLD = lowCostFixedAssetThreshold;
     // Built for one scope at a time: the review period (counted) and the previous 3 months (listed only).
     const lowCostItemsFor = ({ inPeriod, bankSpendTxns }) => {
       const lowCostItems = [];

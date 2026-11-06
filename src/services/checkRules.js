@@ -826,10 +826,20 @@ const CAPITAL_DEFAULT_EXCLUDED_NAME = new RegExp([
   String.raw`rents?`, String.raw`rental`, String.raw`rates`, String.raw`council\s+tax`,
   String.raw`insurances?`, String.raw`interest`, String.raw`depreciation`, String.raw`accumulated`, String.raw`amorti[sz]ation`,
   String.raw`tax`, String.raw`taxes`, String.raw`taxation`, String.raw`vat`,
+  // Money paid to an owner is not a purchase to capitalise, even where Xero classes the account as an expense
+  // (Beyond Project: a £14,000 payment on its "Dividends" account, 4 Nov 2026).
+  String.raw`dividends?`, String.raw`drawings`,
 ].map(word => String.raw`\b${word}\b`).join('|'), 'i');
 function isCapitalDefaultAccount(account) {
   if (!account || !CAPITAL_DEFAULT_ACCOUNT_TYPES.has(String(account.type || '').toUpperCase())) return false;
   return !CAPITAL_DEFAULT_EXCLUDED_NAME.test(String(account.name || ''));
+}
+// Low Cost Fixed Assets already lists a fixed-asset line up to the low-cost threshold. Capital Item Review also covers
+// fixed-asset accounts (Abdur, 30 Oct 2026), so a line at or under that threshold stays out of it: an item of exactly
+// £2,000 was shown in both checks (Sentry, an eBay bill, 4 Nov 2026).
+function isLowCostFixedAssetLine(accountCode, amount, fixedAssetAccountCodes, lowCostThreshold) {
+  return !!accountCode && !!fixedAssetAccountCodes && fixedAssetAccountCodes.has(accountCode)
+    && amount > 0 && amount <= lowCostThreshold;
 }
 function resolveCapitalReviewCandidateCodes(accountCheckConfigurations, chartOfAccounts) {
   const codes = new Set(
@@ -1264,7 +1274,7 @@ function storedEntitiesForRecalculation(cachedRows, entityType, clientHasAnyStor
 module.exports = {
   storedEntitiesForRecalculation,
   findDuplicatesWithSameNumber,
-  BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise, keepFlatRateLargeItems, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, balanceSheetNeeded, turnoverAdjustmentFromPayments, nonCompanyDividendIssue, selectUnapprovedInPeriod, BALANCE_SHEET_CHECK_TYPES, reviewFromDate, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, monitoredMisallocatedRevenueCodes, keepAtLeast, isUnderMinimumItem, isExpenseAccountLine, FLAT_RATE_SINGLE_ITEM_LIMIT, missingContactDefaults,
+  BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise, keepFlatRateLargeItems, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, balanceSheetNeeded, turnoverAdjustmentFromPayments, nonCompanyDividendIssue, selectUnapprovedInPeriod, BALANCE_SHEET_CHECK_TYPES, reviewFromDate, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, monitoredMisallocatedRevenueCodes, keepAtLeast, isUnderMinimumItem, isExpenseAccountLine, isLowCostFixedAssetLine, FLAT_RATE_SINGLE_ITEM_LIMIT, missingContactDefaults,
   CHECK_DEFAULTS,
   CHECK_DEFINITIONS,
   REVIEW_CHECK_DEFINITIONS,

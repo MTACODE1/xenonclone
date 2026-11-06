@@ -242,3 +242,27 @@ test('supplier drill-down: earlier lines keep their own labelled group', () => {
   assert.deepEqual(grouped.groups.map(g => g.key), ['period', 'earlier']);
   assert.match(grouped.groups[1].label, /earlier than the review period/i);
 });
+
+// Beyond Project (4 Nov 2026): a £14,000 payment on an account named "Dividends", which Xero classes as an expense,
+// was listed in Capital Item Review. Money paid to an owner is not a purchase to capitalise.
+test('Capital Item Review default leaves out Dividends and Drawings accounts', () => {
+  for (const name of ['Dividends', 'Dividends Paid', 'Director Drawings', 'Drawings']) {
+    assert.equal(isCapitalDefaultAccount({ type: 'EXPENSE', name }), false, name);
+  }
+  assert.equal(isCapitalDefaultAccount({ type: 'EXPENSE', name: 'Repairs and Maintenance' }), true);
+  assert.equal(isCapitalDefaultAccount({ type: 'DIRECTCOSTS', name: 'Direct Expenses' }), true);
+});
+
+// Sentry (4 Nov 2026): one eBay bill of exactly £2,000 on a fixed asset account was in both Low Cost Fixed Assets
+// (up to £2,000) and Capital Item Review (£2,000 and over).
+test('a fixed-asset line that Low Cost Fixed Assets lists is not repeated in Capital Item Review', () => {
+  const { isLowCostFixedAssetLine } = require('../src/services/checkRules');
+  const fixed = new Set(['720']);
+  assert.equal(isLowCostFixedAssetLine('720', 2000, fixed, 2000), true);
+  assert.equal(isLowCostFixedAssetLine('720', 1500, fixed, 2000), true);
+  assert.equal(isLowCostFixedAssetLine('720', 2000.01, fixed, 2000), false);
+  assert.equal(isLowCostFixedAssetLine('720', 4999, fixed, 2000), false);
+  assert.equal(isLowCostFixedAssetLine('463', 2000, fixed, 2000), false);
+  assert.equal(isLowCostFixedAssetLine('720', 0, fixed, 2000), false);
+  assert.equal(isLowCostFixedAssetLine('720', 2000, null, 2000), false);
+});
