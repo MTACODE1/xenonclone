@@ -1177,6 +1177,17 @@ function monitoredMisallocatedRevenueCodes(configuredCodes, revenueCodes, nameBy
   return new Set([...(revenueCodes || [])].filter(code => isVagueAccountName(nameByCode[code]) && !OTHER_INCOME_ACCOUNT_NAME.test(nameByCode[code] || '')));
 }
 // Single amounts under £1 (and £0 lines) are never worth a finding; used where items are counted one at a time.
+// Multi-Account Suppliers compares the EXPENSE accounts a supplier is coded to (accountant, 8 Oct 2026: "to check if
+// suppliers are impacting different expense accounts, 100% yes"). Balance-sheet lines (loans, director's loan, fixed
+// assets, VAT, payables, bank) are not part of the comparison. Only an account Xero positively classifies as something
+// other than EXPENSE is left out: a code missing from the chart, or an empty chart, keeps the line so a failed chart
+// fetch can never blank the whole check.
+function isExpenseAccountLine(accountCode, accountClassByCode) {
+  if (!accountClassByCode || !accountClassByCode.size) return true;
+  const accountClass = accountClassByCode.get(String(accountCode || '').toUpperCase());
+  return !accountClass || accountClass === 'EXPENSE';
+}
+
 function isUnderMinimumItem(amount, minimum = PRACTICE_POLICY.minimumItemGbp) {
   return Math.abs(Number(amount) || 0) < minimum;
 }
@@ -1253,7 +1264,7 @@ function storedEntitiesForRecalculation(cachedRows, entityType, clientHasAnyStor
 module.exports = {
   storedEntitiesForRecalculation,
   findDuplicatesWithSameNumber,
-  BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise, keepFlatRateLargeItems, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, balanceSheetNeeded, turnoverAdjustmentFromPayments, nonCompanyDividendIssue, selectUnapprovedInPeriod, BALANCE_SHEET_CHECK_TYPES, reviewFromDate, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, monitoredMisallocatedRevenueCodes, keepAtLeast, isUnderMinimumItem, FLAT_RATE_SINGLE_ITEM_LIMIT, missingContactDefaults,
+  BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise, keepFlatRateLargeItems, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, balanceSheetNeeded, turnoverAdjustmentFromPayments, nonCompanyDividendIssue, selectUnapprovedInPeriod, BALANCE_SHEET_CHECK_TYPES, reviewFromDate, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, monitoredMisallocatedRevenueCodes, keepAtLeast, isUnderMinimumItem, isExpenseAccountLine, FLAT_RATE_SINGLE_ITEM_LIMIT, missingContactDefaults,
   CHECK_DEFAULTS,
   CHECK_DEFINITIONS,
   REVIEW_CHECK_DEFINITIONS,

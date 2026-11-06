@@ -13,7 +13,7 @@ const {
   findDuplicates,
   excludeDuplicateDrafts,
   selectUnapprovedBills,
-  selectUnapprovedInvoices,
+  selectUnapprovedInvoices, isExpenseAccountLine,
   findUnexpectedDefaultLines,
   findMisallocatedLines,
   resolveCapitalReviewCandidateCodes,
@@ -1248,4 +1248,26 @@ test('selectUnapprovedInvoices keeps identical duplicate drafts (accountant, 2 N
   const drafts = [draft('a', 'INV-80275', 22717.92), draft('b', 'INV-80276', 22717.92), draft('c', 'INV-1', 100)];
   assert.equal(excludeDuplicateDrafts(drafts).length, 1);
   assert.equal(selectUnapprovedInvoices(drafts).length, 3);
+});
+
+test('Multi-Account Suppliers compares expense accounts only: loan, director loan and fixed asset lines are left out', () => {
+  const chart = new Map([
+    ['437', 'EXPENSE'], ['473', 'EXPENSE'], ['463', 'EXPENSE'],
+    ['900', 'LIABILITY'], ['835', 'LIABILITY'], ['720', 'ASSET'],
+  ]);
+  // Cross Engineering, 4 Nov 2026: Funding Circle (437 Interest Paid + 900 Loan), Allan Howarth (473 + 835 Directors' Loan)
+  // and eBay (463 + 720 Computer Equipment) are each coded to ONE expense account; Unknown (433 + 473) to two.
+  const expenseCodes = codes => codes.filter(code => isExpenseAccountLine(code, chart));
+  assert.deepEqual(expenseCodes(['437', '900']), ['437']);
+  assert.deepEqual(expenseCodes(['473', '835']), ['473']);
+  assert.deepEqual(expenseCodes(['463', '720']), ['463']);
+  assert.deepEqual(expenseCodes(['433', '473']).length, 2);
+});
+
+test('an unknown account code or an empty chart keeps the line, so a failed chart fetch cannot blank the check', () => {
+  assert.equal(isExpenseAccountLine('999', new Map([['437', 'EXPENSE']])), true);
+  assert.equal(isExpenseAccountLine('437', new Map()), true);
+  assert.equal(isExpenseAccountLine('437', null), true);
+  assert.equal(isExpenseAccountLine('ab1', new Map([['AB1', 'EXPENSE']])), true);
+  assert.equal(isExpenseAccountLine('ab1', new Map([['AB1', 'LIABILITY']])), false);
 });

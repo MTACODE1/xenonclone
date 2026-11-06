@@ -36,7 +36,7 @@ const {
   grossLineAmount, netLineAmount, toDateString,
   buildAccountCodeCanonicaliser, canonicaliseAccountCodes,
   withDisplayOnlyBankFindings,
-  storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, keepFlatRateLargeItems, missingContactDefaults, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, balanceSheetNeeded, turnoverAdjustmentFromPayments, nonCompanyDividendIssue, selectUnapprovedInPeriod, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, monitoredMisallocatedRevenueCodes, keepAtLeast, isUnderMinimumItem, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
+  storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, keepFlatRateLargeItems, missingContactDefaults, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, balanceSheetNeeded, turnoverAdjustmentFromPayments, nonCompanyDividendIssue, selectUnapprovedInPeriod, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, monitoredMisallocatedRevenueCodes, keepAtLeast, isUnderMinimumItem, isExpenseAccountLine, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
 const { saveBankLines } = require('../db/bankLines');
@@ -1248,11 +1248,15 @@ async function runSync(tenantId, progressCallback, options = {}) {
   try {
     const allTime = {};
     const sinceLDByContact = {};
+    // Expense accounts only (accountant, 8 Oct 2026): a supplier paid through a loan, director's loan or fixed asset
+    // account alongside an expense account is not an inconsistent expense coding.
+    const accountClassByCode = new Map((chartOfAccounts || []).filter(a => a.code).map(a => [String(a.code).toUpperCase(), a._class]));
     // txMeta carries what the drill-down UI needs to show each underlying transaction (date,
     // reference, which account it hit, and the raw Xero id for an "Open in Xero" link) — kept
     // separate from the aggregate totals above, which drive the actual count/value calculation.
     const record = (contactId, name, lineAmount, accountCode, isSinceLD, txMeta) => {
       if (!contactId || !accountCode) return;
+      if (!isExpenseAccountLine(accountCode, accountClassByCode)) return;
       if (isUnderMinimumItem(lineAmount)) return;   // items under £1 are ignored
       if (!allTime[contactId]) allTime[contactId] = { name, accountAmounts: {}, transactions: [] };
       const amount = Math.abs(lineAmount || 0);
@@ -1304,7 +1308,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     const flaggedSuppliers = new Map(multi.map(m => [m.contactId, m]));
     const previousLines = new Map();
     const addPreviousLine = (contactId, lineAmount, accountCode, txMeta) => {
-      if (!flaggedSuppliers.has(contactId) || !accountCode || isUnderMinimumItem(lineAmount)) return;
+      if (!flaggedSuppliers.has(contactId) || !accountCode || !isExpenseAccountLine(accountCode, accountClassByCode) || isUnderMinimumItem(lineAmount)) return;
       if (!previousLines.has(contactId)) previousLines.set(contactId, []);
       previousLines.get(contactId).push({
         ...txMeta, inPeriod: false, accountCode, accountName: accountNameByCode[accountCode] || null, amount: Math.abs(lineAmount || 0),
