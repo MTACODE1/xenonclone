@@ -395,7 +395,7 @@ function toggleBbEditForm(id) {
             <% if (item.lookback && (rowIndex === 0 || !tableRows[rowIndex - 1].lookback)) { %>
               <tr class="previous-months-heading">
                 <td colspan="<%= columns.length + 3 + (mainHasSourceColumn ? 1 : 0) + (mainHasAccountColumn ? 1 : 0) + (mainHasAge ? 1 : 0) %>" style="background:#F2F6FA; font-weight:600; font-size:0.8rem; color:#4a5a73;">
-                  Previous 3 months, before the review period: for context, not counted (<%= previousPage ? previousPage.total : previousRows.length %>)
+                  <%= checkType === 'unreconciled_bank_items' ? 'Before the review period, still unreconciled: for context, not counted' : 'Previous 3 months, before the review period: for context, not counted' %> (<%= previousPage ? previousPage.total : previousRows.length %>)
                 </td>
               </tr>
             <% } %>

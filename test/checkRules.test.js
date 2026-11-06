@@ -1271,3 +1271,30 @@ test('an unknown account code or an empty chart keeps the line, so a failed char
   assert.equal(isExpenseAccountLine('ab1', new Map([['AB1', 'EXPENSE']])), true);
   assert.equal(isExpenseAccountLine('ab1', new Map([['AB1', 'LIABILITY']])), false);
 });
+
+test('creditFromOverpayment shapes Xero overpayments and prepayments as credit notes for the old credit checks', () => {
+  const { creditFromOverpayment, beforePeriodUnreconciled } = require('../src/services/checkRules');
+  // TEQHOU: Bilfinger's RECEIVE-OVERPAYMENT of 20 Dec 2018, £921.60 still unallocated.
+  const credit = creditFromOverpayment({
+    overpaymentID: '589b9352', type: 'RECEIVE-OVERPAYMENT', status: 'AUTHORISED', date: '2018-12-20T00:00:00.000Z',
+    total: 3009.6, remainingCredit: 921.6, contact: { name: 'Bilfinger' }, currencyCode: 'GBP', currencyRate: 1,
+  });
+  assert.equal(credit.type, 'ACCRECCREDIT');
+  assert.equal(credit.creditNoteID, '589b9352');
+  assert.equal(credit.creditNoteNumber, 'Overpayment');
+  assert.equal(credit.remainingCredit, 921.6);
+  assert.equal(credit.source, 'overpayment');
+  assert.equal(creditFromOverpayment({ prepaymentID: 'p1', type: 'SPEND-PREPAYMENT', status: 'AUTHORISED', date: '2026-01-01', remainingCredit: 5 }, 'prepayment').type, 'ACCPAYCREDIT');
+  assert.equal(creditFromOverpayment({ overpaymentID: 'x', type: 'UNKNOWN' }), null);
+  assert.equal(creditFromOverpayment(null), null);
+  // Old-credit selection then treats it like any credit note.
+  const old = selectOldCredits([credit], '2026-11-30');
+  assert.equal(old.length, 1);
+  // Unreconciled lines before the period are listed oldest first; in-period and undated lines are left out.
+  const period = { start: '2025-09-30', end: '2026-11-06' };
+  const before = beforePeriodUnreconciled([
+    { date: '2026-01-05', total: 5 }, { date: '2023-09-30', total: 68 }, { date: '2024-02-01', total: 1 }, { date: null, total: 9 },
+  ], period);
+  assert.deepEqual(before.map(item => item.total), [68, 1]);
+  assert.deepEqual(beforePeriodUnreconciled([{ date: '2023-09-30', total: 68 }], {}), []);
+});

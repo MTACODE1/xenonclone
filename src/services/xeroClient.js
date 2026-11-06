@@ -222,6 +222,13 @@ async function apiCall(tenantId, fn, retries = 6) {
         failure.xeroDailyAllowance = true;
         throw failure;
       }
+      // A 401 straight after another tenant on the same connection rotated the token: the next attempt re-reads the
+      // fresh token row (getAuthenticatedClient), so two quick retries cover the race without masking a real revocation.
+      if (err?.response?.statusCode === 401 && attempt < 3) {
+        console.log(`Unauthorised (attempt ${attempt}/${retries}); re-reading the token and retrying...`);
+        await new Promise(r => setTimeout(r, 1500 * attempt));
+        continue;
+      }
       if (isTransientError(err)) {
         const { delay, reason } = computeRetryDelayMs(attempt, err);
         console.log(`${reason} (attempt ${attempt}/${retries}), waiting ${delay}ms...`);

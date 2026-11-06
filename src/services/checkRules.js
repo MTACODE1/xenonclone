@@ -1263,6 +1263,36 @@ function findDuplicatesWithSameNumber(items, windowDays, options = {}) {
   return [...usual, ...extra].sort((a, b) => String(b.date2 || '').localeCompare(String(a.date2 || '')));
 }
 
+// Xero overpayments and prepayments are unallocated credit too (TEQHOU: Bilfinger's £921.60 overpayment from Dec 2018
+// nets three old invoices to nil on Xero's aged report, so the credit must be listed with the invoices). They are
+// shaped like a credit note so the Old Sales / Old Purchase Credits checks treat them the same: RECEIVE-* is customer
+// credit, SPEND-* is supplier credit. Xero opens both from the credit-note screen, so the id works for the link.
+function creditFromOverpayment(document, kind = 'overpayment') {
+  if (!document) return null;
+  const type = String(document.type || '').toUpperCase();
+  const side = type.startsWith('RECEIVE') ? 'ACCRECCREDIT' : type.startsWith('SPEND') ? 'ACCPAYCREDIT' : null;
+  if (!side) return null;
+  const id = document.overpaymentID || document.prepaymentID;
+  return {
+    creditNoteID: id, creditNoteNumber: kind === 'prepayment' ? 'Prepayment' : 'Overpayment',
+    reference: document.reference || null, type: side, status: document.status, date: document.date,
+    contact: document.contact, total: document.total, remainingCredit: document.remainingCredit,
+    currencyCode: document.currencyCode, currencyRate: document.currencyRate,
+    updatedDateUTC: document.updatedDateUTC, source: kind,
+  };
+}
+
+// Unreconciled Bank: every still-unreconciled line dated before the review period, oldest first. Listed for context
+// (Local Trade Frames' £68 receipt from Sep 2023), never counted: TEQHOU alone has 637 such lines inside its locked
+// period, so counting them would bury the current period (Abdur, 6 Nov 2026: list them; counting is his call).
+function beforePeriodUnreconciled(unreconciled, period) {
+  const start = period && period.start;
+  if (!start) return [];
+  return unreconciled
+    .filter(item => { const date = toDateString(item.date); return date && date <= start; })
+    .sort((a, b) => String(toDateString(a.date) || '').localeCompare(String(toDateString(b.date) || '')));
+}
+
 // A cache-only recalculation reads the client's stored copy of Xero data. An empty record type is normal (a client
 // with no credit notes or no manual journals has none to store); only a client with nothing stored at all cannot be
 // recalculated, so that is the only case that fails.
@@ -1272,7 +1302,7 @@ function storedEntitiesForRecalculation(cachedRows, entityType, clientHasAnyStor
 }
 
 module.exports = {
-  storedEntitiesForRecalculation,
+  storedEntitiesForRecalculation, creditFromOverpayment, beforePeriodUnreconciled,
   findDuplicatesWithSameNumber,
   BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME, dropTaxMissingNoise, keepFlatRateLargeItems, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, balanceSheetNeeded, turnoverAdjustmentFromPayments, nonCompanyDividendIssue, selectUnapprovedInPeriod, BALANCE_SHEET_CHECK_TYPES, reviewFromDate, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, monitoredMisallocatedRevenueCodes, keepAtLeast, isUnderMinimumItem, isExpenseAccountLine, isLowCostFixedAssetLine, FLAT_RATE_SINGLE_ITEM_LIMIT, missingContactDefaults,
   CHECK_DEFAULTS,

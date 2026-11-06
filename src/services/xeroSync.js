@@ -36,7 +36,7 @@ const {
   grossLineAmount, netLineAmount, toDateString,
   buildAccountCodeCanonicaliser, canonicaliseAccountCodes,
   withDisplayOnlyBankFindings,
-  storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, keepFlatRateLargeItems, missingContactDefaults, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, balanceSheetNeeded, turnoverAdjustmentFromPayments, nonCompanyDividendIssue, selectUnapprovedInPeriod, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, monitoredMisallocatedRevenueCodes, keepAtLeast, isUnderMinimumItem, isExpenseAccountLine, isLowCostFixedAssetLine, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
+  storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, keepFlatRateLargeItems, missingContactDefaults, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, balanceSheetNeeded, turnoverAdjustmentFromPayments, nonCompanyDividendIssue, selectUnapprovedInPeriod, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, monitoredMisallocatedRevenueCodes, keepAtLeast, isUnderMinimumItem, isExpenseAccountLine, isLowCostFixedAssetLine, creditFromOverpayment, beforePeriodUnreconciled, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
 const { saveBankLines } = require('../db/bankLines');
@@ -163,6 +163,39 @@ async function fetchAllCreditNotes(tenantId, ifModifiedSince = undefined) {
     await pageDelay();
   }
   return allCreditNotes;
+}
+
+// Overpayments and prepayments live on their own endpoints; both page at 100 like credit notes.
+async function fetchAllOverpayments(tenantId, ifModifiedSince = undefined) {
+  const all = [];
+  let page = 1;
+  while (true) {
+    const batch = await apiCall(tenantId, async (xero, tid) => {
+      const resp = await xero.accountingApi.getOverpayments(tid, ifModifiedSince, undefined, 'UpdatedDateUTC ASC', page);
+      return resp.body.overpayments || [];
+    });
+    all.push(...batch);
+    if (batch.length < 100) break;
+    page++;
+    await pageDelay();
+  }
+  return all;
+}
+
+async function fetchAllPrepayments(tenantId, ifModifiedSince = undefined) {
+  const all = [];
+  let page = 1;
+  while (true) {
+    const batch = await apiCall(tenantId, async (xero, tid) => {
+      const resp = await xero.accountingApi.getPrepayments(tid, ifModifiedSince, undefined, 'UpdatedDateUTC ASC', page);
+      return resp.body.prepayments || [];
+    });
+    all.push(...batch);
+    if (batch.length < 100) break;
+    page++;
+    await pageDelay();
+  }
+  return all;
 }
 
 async function fetchAllBankTransactions(tenantId, ifModifiedSince = undefined) {
@@ -328,7 +361,13 @@ async function runSync(tenantId, progressCallback, options = {}) {
       { ...options, forceFullRefresh: true }
     );
   } catch (err) {
-    throw new Error(`Failed to fetch org info: ${err.message}`);
+    // xero-node rejects with the raw response for some failures, so err.message can be undefined (6 Nov 2026: eight
+    // clients failed with "undefined" in the second a shared token was refreshed). Say what Xero returned, and mark a
+    // token-refresh race (401) or an unexplained failure as temporary so the job queue retries it.
+    const status = err?.response?.statusCode || err?.statusCode;
+    const detail = err?.message || err?.body?.Detail || err?.body?.Message || (status ? `HTTP ${status}` : 'no error message');
+    const temporary = status === 401 || !err?.message;
+    throw new Error(`Failed to fetch org info: ${detail}${temporary ? ' (temporary, will retry)' : ''}`);
   }
 
   await upsertOrganisation({
@@ -534,6 +573,25 @@ async function runSync(tenantId, progressCallback, options = {}) {
   );
   const salesCredits = allCredits.filter(item => item.type === 'ACCRECCREDIT');
   const purchaseCredits = allCredits.filter(item => item.type === 'ACCPAYCREDIT');
+  // Unallocated overpayments and prepayments are credit as well, for the Old Sales / Old Purchase Credits checks only.
+  // A failure here must not take the whole sync down: the credit-note checks then run on credit notes alone.
+  let otherCredits = [];
+  try {
+    const overpayments = await refreshCachedEntities(
+      orgId, tenantId, runId, 'overpayment', since => fetchAllOverpayments(tenantId, since), options
+    );
+    const prepayments = await refreshCachedEntities(
+      orgId, tenantId, runId, 'prepayment', since => fetchAllPrepayments(tenantId, since), options
+    );
+    otherCredits = [
+      ...overpayments.map(item => creditFromOverpayment(item, 'overpayment')),
+      ...prepayments.map(item => creditFromOverpayment(item, 'prepayment')),
+    ].filter(Boolean);
+  } catch (err) {
+    console.error('overpayment/prepayment refresh failed — old credit checks run on credit notes only:', err.message);
+  }
+  const salesCreditsWithOverpayments = [...salesCredits, ...otherCredits.filter(item => item.type === 'ACCRECCREDIT')];
+  const purchaseCreditsWithOverpayments = [...purchaseCredits, ...otherCredits.filter(item => item.type === 'ACCPAYCREDIT')];
 
   emit({ step: 'fetch_contacts', message: 'Refreshing contact cache...' });
   const contacts = await refreshCachedEntities(
@@ -949,7 +1007,8 @@ async function runSync(tenantId, progressCallback, options = {}) {
     const unreconciled = selectAuthorisedUnreconciled(allBankTransactions, matchingPayments, bankAccountIds, cachedBatchPayments);
     const toFinding = toUnreconciledFinding;
     const items = unreconciled.filter(item => isWithinPeriod(toDateString(item.date), period)).map(toFinding);
-    const previousItems = inPreviousMonths(unreconciled).map(toFinding);
+    // Everything still unreconciled from before the period, not just the previous 3 months (Abdur, 6 Nov 2026).
+    const previousItems = beforePeriodUnreconciled(unreconciled, period).map(toFinding);
     unreconciledCount = items.length;
     const issue = {
       org_id: orgId, check_type: 'unreconciled_bank_items', importance: 'critical',
@@ -1057,12 +1116,13 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // --- HIGH: Old Sales Credits (ACCREC, older than 60 days, unallocated) ---
   try {
     const asOf = new Date(`${endOfMonth(period.end)}T00:00:00.000Z`);   // as at month end, like Xero's aged reports
-    const credits = selectOldCredits(throughPeriodEnd(salesCredits), asOf);
+    const credits = selectOldCredits(throughPeriodEnd(salesCreditsWithOverpayments), asOf);
     const issue = {
       org_id: orgId, check_type: 'old_sales_credits', importance: 'high',
       count: credits.length, potential_value_gbp: sumAbsoluteExposure(credits, c => amountInBase(c.remainingCredit, c)),
       detail_json: JSON.stringify(credits.map(c => ({
         id: c.creditNoteID, number: c.creditNoteNumber, contact: c.contact?.name,
+        ...(c.source ? { source: c.source } : {}),
         date: toDateString(c.date), remaining: c.remainingCredit,
         ...(c.currencyCode && c.currencyCode !== orgInfo.baseCurrency ? { currency: c.currencyCode } : {}),
         potentialValue: amountInBase(c.remainingCredit, c),
@@ -1102,7 +1162,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
   try {
     const asOf = new Date(`${endOfMonth(period.end)}T00:00:00.000Z`);   // as at month end, like Xero's aged reports
     const credits = selectOldCredits(
-      throughPeriodEnd(purchaseCredits).filter((c) => c.status === 'AUTHORISED'),
+      throughPeriodEnd(purchaseCreditsWithOverpayments).filter((c) => c.status === 'AUTHORISED'),
       asOf
     );
     const issue = {
@@ -1110,6 +1170,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       count: credits.length, potential_value_gbp: sumAbsoluteExposure(credits, c => amountInBase(c.remainingCredit, c)),
       detail_json: JSON.stringify(credits.map(c => ({
         id: c.creditNoteID, number: c.creditNoteNumber, contact: c.contact?.name,
+        ...(c.source ? { source: c.source } : {}),
         date: toDateString(c.date), remaining: c.remainingCredit,
         ...(c.currencyCode && c.currencyCode !== orgInfo.baseCurrency ? { currency: c.currencyCode } : {}),
         potentialValue: amountInBase(c.remainingCredit, c),

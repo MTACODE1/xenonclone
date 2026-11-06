@@ -16,7 +16,7 @@ function directionOf(item) {
 }
 
 // Items whose generic `id` is not an invoice id.
-const NOT_AN_INVOICE_SOURCE = new Set(['payment', 'manual_journal', 'credit_note']);
+const NOT_AN_INVOICE_SOURCE = new Set(['payment', 'manual_journal', 'credit_note', 'overpayment', 'prepayment']);
 
 const isCreditType = type => type === 'ACCPAYCREDIT' || type === 'ACCRECCREDIT';
 
