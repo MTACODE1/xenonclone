@@ -817,9 +817,10 @@ function findUnexpectedDefaultLines(documents, contactsById, defaultField, lineF
 // 461/473 ticks most clients carry came from an import of Xenon's defaults, not from the accountant, so the practice
 // default applies to every client and an account a reviewer ticks is added on top. A chart with no eligible account
 // and nothing ticked still shows "Not configured".
-// Fixed asset accounts are included (Abdur, 30 Oct 2026): a large purchase coded straight to Computer Equipment is still
-// reviewed. Accumulated depreciation accounts are excluded by name below.
-const CAPITAL_DEFAULT_ACCOUNT_TYPES = new Set(['EXPENSE', 'OVERHEADS', 'DIRECTCOSTS', 'FIXED']);
+// Expense accounts only. Fixed asset accounts were included on 30 Oct 2026 for Cross Engineering's eBay bill, but that
+// bill was already on 720 Computer Equipment, so there was nothing to review; Abdur withdrew the request on 6 Nov 2026.
+// A purchase already coded to a fixed-asset account is Low Cost Fixed Assets' concern (under £2,000), not this check's.
+const CAPITAL_DEFAULT_ACCOUNT_TYPES = new Set(['EXPENSE', 'OVERHEADS', 'DIRECTCOSTS']);
 const CAPITAL_DEFAULT_EXCLUDED_NAME = new RegExp([
   String.raw`wages?`, String.raw`salar(?:y|ies)`, String.raw`payroll`, String.raw`paye`, String.raw`national\s+insurance`,
   String.raw`ni`, String.raw`nic`, String.raw`pensions?`, String.raw`remuneration`,

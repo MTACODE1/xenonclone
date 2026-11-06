@@ -115,18 +115,20 @@ test('every expense-type account is watched by default', () => {
   }
 });
 
-// Abdur, round 3 v3 (30 Oct 2026): an eBay bill of £4,999 coded DR Computer Equipment / CR Accounts payable "should have
-// been flagged", so purchases posted to fixed asset accounts are reviewed too; accumulated depreciation is not a purchase.
-test('fixed asset accounts are watched by default, except accumulated depreciation', () => {
-  assert.equal(isCapitalDefaultAccount({ type: 'FIXED', name: 'Computer Equipment' }), true);
-  assert.equal(isCapitalDefaultAccount({ type: 'FIXED', name: 'Office Equipment' }), true);
+// Abdur, 30 Oct 2026, asked for fixed asset accounts after Cross Engineering's £4,999 eBay bill; on 6 Nov 2026 he withdrew
+// it (the bill was already on 720 Computer Equipment, nothing to review), so the check is back to expense accounts only.
+test('fixed asset accounts are not watched by default (Abdur, 6 Nov 2026: a purchase already on a fixed-asset code needs no review)', () => {
+  assert.equal(isCapitalDefaultAccount({ type: 'FIXED', name: 'Computer Equipment' }), false);
+  assert.equal(isCapitalDefaultAccount({ type: 'FIXED', name: 'Office Equipment' }), false);
   assert.equal(isCapitalDefaultAccount({ type: 'FIXED', name: 'Less Accumulated Depreciation on Computer Equipment' }), false);
-  assert.equal(isCapitalDefaultAccount({ type: 'FIXED', name: 'Accumulated Depreciation' }), false);
+  assert.equal(isCapitalDefaultAccount({ type: 'EXPENSE', name: 'Computer Expenses' }), true);
   const codes = resolveCapitalReviewCandidateCodes([], [
     { code: '720', name: 'Computer Equipment', type: 'FIXED' },
-    { code: '721', name: 'Less Accumulated Depreciation on Computer Equipment', type: 'FIXED' },
+    { code: '463', name: 'IT Software and Consumables', type: 'EXPENSE' },
   ]);
-  assert.deepEqual([...codes], ['720']);
+  assert.deepEqual([...codes], ['463']);
+  // An account a reviewer ticks is still watched, whatever its type.
+  assert.deepEqual([...resolveCapitalReviewCandidateCodes([{ account_code: '720', is_capital_candidate: 1 }], [{ code: '720', name: 'Computer Equipment', type: 'FIXED' }])], ['720']);
 });
 
 test('wages, rent, rates, insurance, interest, depreciation and tax are left out', () => {
