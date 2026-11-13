@@ -1060,6 +1060,19 @@ function endOfMonth(isoDate) {
   return new Date(Date.UTC(Number(match[1]), Number(match[2]), 0)).toISOString().slice(0, 10);
 }
 
+// The "as at" date for the old invoices, bills and credits checks: the last COMPLETED month end on or before the
+// period end. The accountant runs Xero's aged reports at the last month end (31 Oct when checking in November);
+// ageing at the end of the current month (30 Nov) listed items 60 days old only by then, which looked like Akrio
+// "running the report to today" (BC Data Management, 11 Nov 2026: INV-48938 and INV-48961, due 28 Sep, were 63
+// days old at 30 Nov and 33 at 31 Oct). A period that already ends on a past month end is unchanged.
+function ageingDate(periodEnd, today = new Date()) {
+  const monthEnd = endOfMonth(periodEnd);
+  const todayIso = today.toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(monthEnd)) || monthEnd <= todayIso) return monthEnd;
+  const [y, m] = monthEnd.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, 0)).toISOString().slice(0, 10);
+}
+
 // Bank Processed counts what Xero lists in Account Transactions, which leaves out £0.00 transactions.
 function countsAsBankProcessed(transaction) {
   return Math.abs(Number(transaction?.total) || 0) >= 0.005;
@@ -1344,7 +1357,7 @@ module.exports = {
   findUnexpectedDefaultLines,
   findMisallocatedLines,
   resolveCapitalReviewCandidateCodes, isCapitalDefaultAccount,
-  previousMonthsStart, isWithinPreviousMonths, withPreviousMonths, endOfMonth, countsAsBankProcessed,
+  previousMonthsStart, isWithinPreviousMonths, withPreviousMonths, endOfMonth, ageingDate, countsAsBankProcessed,
   isOldDocument, isOverdueMoreThan, selectOldUnpaidInvoices, amountInBase,
   isPurchaseTaxExemptAccount,
   addFindingKeys,

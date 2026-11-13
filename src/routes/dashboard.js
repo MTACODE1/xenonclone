@@ -253,12 +253,18 @@ router.get('/sync-jobs/:jobId/events', async (req, res) => {
     Connection: 'keep-alive',
   });
   res.flushHeaders();
+  // The longest sync step (refreshing a big client's invoice cache, 100+ Xero pages with rate-limit
+  // waits) sends no progress for minutes. The load balancer closes any connection idle for 60 s,
+  // which the browser saw as a failed sync while the job was still running. A comment line every
+  // 20 s keeps the stream open; EventSource ignores it.
+  const heartbeat = setInterval(() => { if (!res.writableEnded) res.write(': keep-alive\n\n'); }, 20000);
   const unsubscribe = await subscribe(req.params.jobId, job => {
+    if (res.writableEnded) return;
     res.write(`data: ${JSON.stringify(job)}\n\n`);
-    if (['succeeded', 'failed', 'cancelled'].includes(job.status)) res.end();
+    if (['succeeded', 'failed', 'cancelled'].includes(job.status)) { clearInterval(heartbeat); res.end(); }
   });
-  if (!unsubscribe) return res.end(`event: error\ndata: ${JSON.stringify({ error: 'Sync job not found or expired' })}\n\n`);
-  req.on('close', unsubscribe);
+  if (!unsubscribe) { clearInterval(heartbeat); return res.end(`event: error\ndata: ${JSON.stringify({ error: 'Sync job not found or expired' })}\n\n`); }
+  req.on('close', () => { clearInterval(heartbeat); unsubscribe(); });
 });
 
 router.get('/health', async (req, res, next) => {
@@ -281,3 +287,4 @@ router.get('/health', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.startOrganisationJob = startOrganisationJob;

@@ -7,6 +7,8 @@ const {
 } = require('../db/queries');
 const { isStaffManager } = require('../services/staffPermissions');
 const crypto = require('crypto');
+// Required lazily: dashboard.js exports the router plus startOrganisationJob.
+const startOrganisationJob = (...args) => require('./dashboard').startOrganisationJob(...args);
 
 router.get('/connect', async (req, res) => {
   try {
@@ -41,6 +43,15 @@ router.get('/callback', async (req, res) => {
 
     console.log('[OAuth callback] Tenants received:', tenants.length);
 
+    // Xero returns every organisation this login has authorised (40+), not only the one just added.
+    // Only a client that has never synced is new; it is queued for its first sync here, ahead of
+    // the queue, so it fills in without anyone having to find and press Sync.
+    const newTenantIds = [];
+    for (const tenant of tenants) {
+      const existing = await getOrganisationByTenantId(tenant.tenantId);
+      if (!existing || !existing.last_synced_at) newTenantIds.push(tenant.tenantId);
+    }
+
     for (const tenant of tenants) {
       const expiresAt = tokenSet.expires_at
         ? new Date(tokenSet.expires_at * 1000).toISOString()
@@ -71,6 +82,15 @@ router.get('/callback', async (req, res) => {
       if (!isStaffManager(req.session.staffRole) && req.session.staffId) {
         const org = await getOrganisationByTenantId(tenant.tenantId);
         if (org) await toggleStaffOrgAccess(req.session.staffId, org.id, true);
+      }
+    }
+
+    for (const tenantId of newTenantIds) {
+      try {
+        await startOrganisationJob(tenantId, {}, null, { priority: true });
+        console.log('[OAuth callback] first sync queued for new tenant');
+      } catch (e) {
+        console.error('[OAuth callback] could not queue first sync:', e.message);
       }
     }
 

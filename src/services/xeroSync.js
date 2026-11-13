@@ -23,7 +23,7 @@ const {
   CHECK_DEFAULTS, CHECK_DEFINITIONS, ALL_CHECK_DEFINITIONS, NON_SCORED_CHECKS, calculateHealthScore, findDirectMatches,
   findDuplicateContacts, findDuplicates, selectUnapprovedBills, selectUnapprovedInvoices, findUnexpectedDefaultLines,
   findMisallocatedLines, resolveCapitalReviewCandidateCodes,
-  previousMonthsStart, isWithinPreviousMonths, withPreviousMonths, endOfMonth, countsAsBankProcessed,
+  previousMonthsStart, isWithinPreviousMonths, withPreviousMonths, endOfMonth, ageingDate, countsAsBankProcessed,
   isOldDocument, isOverdueMoreThan, selectOldUnpaidInvoices, amountInBase, isPurchaseTaxExemptAccount, resolvePeriodChecked, resolveSupplierPatternLookbackMonths,
   resolveMultiAccountPatternLookbackMonths,
   resolveMultiAccountSuppliersMinValue, resolveMultiTaxSuppliersMinValue,
@@ -66,10 +66,11 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-async function fetchAllInvoices(tenantId, ifModifiedSince = undefined) {
+async function fetchAllInvoices(tenantId, ifModifiedSince = undefined, onPage = null) {
   const allInvoices = [];
   let page = 1;
   while (true) {
+    if (onPage && page > 1) onPage(page, allInvoices.length);
     const invoices = await apiCall(tenantId, async (xero, tid) => {
       const resp = await xero.accountingApi.getInvoices(
         tid, ifModifiedSince, undefined, 'UpdatedDateUTC ASC',
@@ -198,9 +199,10 @@ async function fetchAllPrepayments(tenantId, ifModifiedSince = undefined) {
   return all;
 }
 
-async function fetchAllBankTransactions(tenantId, ifModifiedSince = undefined) {
+async function fetchAllBankTransactions(tenantId, ifModifiedSince = undefined, onPage = null) {
   const rows = [];
   for (let page = 1; ; page++) {
+    if (onPage && page > 1) onPage(page, rows.length);
     const batch = await apiCall(tenantId, async (xero, tid) => {
       const response = await xero.accountingApi.getBankTransactions(
         tid, ifModifiedSince, undefined, 'UpdatedDateUTC ASC', page
@@ -536,9 +538,11 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // "this dataset is genuinely empty" apart from "we don't know, the fetch failed", so that a
   // failed check is skipped (shown as "Not synced") rather than silently reported as clean.
   emit({ step: 'fetch_invoices', message: 'Refreshing invoice and bill cache...' });
+  // A first sync of a big client is 100+ pages at Xero's rate limit: say how far it has got.
   const allInvoices = await refreshCachedEntities(
     orgId, tenantId, runId, 'invoice',
-    since => fetchAllInvoices(tenantId, since), options
+    since => fetchAllInvoices(tenantId, since, (page, soFar) =>
+      emit({ step: 'fetch_invoices', message: `Refreshing invoice and bill cache... page ${page} (${soFar} so far)` })), options
   );
   if (!options.cacheOnly) {
     const needsHydration = allInvoices.filter(i => !i.lineItems || i.lineItems.length === 0);
@@ -699,7 +703,8 @@ async function runSync(tenantId, progressCallback, options = {}) {
   emit({ step: 'fetch_bank', message: 'Refreshing bank transaction cache...' });
   const allBankTransactions = await refreshCachedEntities(
     orgId, tenantId, runId, 'bank_transaction',
-    since => fetchAllBankTransactions(tenantId, since), options
+    since => fetchAllBankTransactions(tenantId, since, (page, soFar) =>
+      emit({ step: 'fetch_bank', message: `Refreshing bank transaction cache... page ${page} (${soFar} so far)` })), options
   );
   canonicaliseAccountCodes(canonicalAccountCode, { documents: allBankTransactions });
   // Keep the account each bank line was coded to in MySQL (survives deploys, searchable). Skipped for
@@ -1094,8 +1099,8 @@ async function runSync(tenantId, progressCallback, options = {}) {
 
   // --- HIGH: Old Unpaid Invoices (document date older than 60 days, amountDue > 0) ---
   try {
-    // Aged like Xero's Aged Receivables: by due date, as at the end of the month (accountant, 30 Oct 2026).
-    const asOf = new Date(`${endOfMonth(period.end)}T00:00:00.000Z`);
+    // Aged like Xero's Aged Receivables: by due date, as at the last completed month end (accountant, 30 Oct and 13 Nov 2026).
+    const asOf = new Date(`${ageingDate(period.end)}T00:00:00.000Z`);
     const overdue = selectOldUnpaidInvoices(throughPeriodEnd(accrecAuthorised), asOf);
     const issue = {
       org_id: orgId, check_type: 'old_unpaid_invoices', importance: 'high',
@@ -1115,7 +1120,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
 
   // --- HIGH: Old Sales Credits (ACCREC, older than 60 days, unallocated) ---
   try {
-    const asOf = new Date(`${endOfMonth(period.end)}T00:00:00.000Z`);   // as at month end, like Xero's aged reports
+    const asOf = new Date(`${ageingDate(period.end)}T00:00:00.000Z`);   // as at the last completed month end, like the accountant's Xero aged reports
     const credits = selectOldCredits(throughPeriodEnd(salesCreditsWithOverpayments), asOf);
     const issue = {
       org_id: orgId, check_type: 'old_sales_credits', importance: 'high',
@@ -1139,7 +1144,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // Jun 2027 is not overdue. Customer invoices still age from the invoice date until the practice says otherwise.
   // Aged as at the end of the month the period ends in, as Xero's Aged Payables report is (Abdur, 27 Oct 2026).
   try {
-    const asOf = new Date(`${endOfMonth(period.end)}T00:00:00.000Z`);
+    const asOf = new Date(`${ageingDate(period.end)}T00:00:00.000Z`);
     const overdue = throughPeriodEnd(accpayAuthorised).filter(i => isOverdueMoreThan(i, asOf) && (i.amountDue || 0) > 0);
     const issue = {
       org_id: orgId, check_type: 'old_unpaid_bills', importance: 'high',
@@ -1160,7 +1165,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // --- HIGH: Old Purchase Credits (ACCPAY, older than 60 days, unallocated) ---
   // Xenon: AUTHORISED only (MBX: SUBMITTED+AUTH=6 vs AUTH=4=Xenon; other clients unchanged).
   try {
-    const asOf = new Date(`${endOfMonth(period.end)}T00:00:00.000Z`);   // as at month end, like Xero's aged reports
+    const asOf = new Date(`${ageingDate(period.end)}T00:00:00.000Z`);   // as at the last completed month end, like the accountant's Xero aged reports
     const credits = selectOldCredits(
       throughPeriodEnd(purchaseCreditsWithOverpayments).filter((c) => c.status === 'AUTHORISED'),
       asOf

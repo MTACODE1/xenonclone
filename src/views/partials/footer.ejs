@@ -110,10 +110,25 @@ function followJob(jobId, btn, originalHTML) {
       btn.innerHTML = originalHTML;
     }
   };
+  // A dropped stream (network blip, proxy timeout) does not mean the sync failed: the job carries
+  // on server-side. Keep following it by polling until it finishes.
   stream.onerror = () => {
     stream.close();
-    btn.disabled = false;
-    btn.innerHTML = originalHTML;
+    const poll = async () => {
+      try {
+        const job = await fetch('<%= basePath %>/sync-jobs/' + encodeURIComponent(jobId)).then(r => r.json());
+        if (job.status === 'succeeded') return window.location.reload();
+        if (job.status === 'failed' || job.status === 'cancelled') {
+          alert('Sync failed: ' + (job.error || job.status));
+          btn.disabled = false;
+          btn.innerHTML = originalHTML;
+          return;
+        }
+        btn.textContent = job.progress?.message || 'Syncing…';
+      } catch (e) { /* try again on the next tick */ }
+      window.setTimeout(poll, 3000);
+    };
+    window.setTimeout(poll, 3000);
   };
 }
 </script>
