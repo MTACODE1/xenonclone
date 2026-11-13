@@ -1099,7 +1099,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
 
   // --- HIGH: Old Unpaid Invoices (document date older than 60 days, amountDue > 0) ---
   try {
-    // Aged like Xero's Aged Receivables: by due date, as at the last completed month end (accountant, 30 Oct and 13 Nov 2026).
+    // Aged like Xero's Aged Receivables: by due date, as at the end of the current month, the date Xero's aged reports open at (accountant, 30 Oct and 12 Nov 2026).
     const asOf = new Date(`${ageingDate(period.end)}T00:00:00.000Z`);
     const overdue = selectOldUnpaidInvoices(throughPeriodEnd(accrecAuthorised), asOf);
     const issue = {
@@ -1120,7 +1120,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
 
   // --- HIGH: Old Sales Credits (ACCREC, older than 60 days, unallocated) ---
   try {
-    const asOf = new Date(`${ageingDate(period.end)}T00:00:00.000Z`);   // as at the last completed month end, like the accountant's Xero aged reports
+    const asOf = new Date(`${ageingDate(period.end)}T00:00:00.000Z`);   // as at the end of the current month, like Xero's aged reports
     const credits = selectOldCredits(throughPeriodEnd(salesCreditsWithOverpayments), asOf);
     const issue = {
       org_id: orgId, check_type: 'old_sales_credits', importance: 'high',
@@ -1165,7 +1165,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // --- HIGH: Old Purchase Credits (ACCPAY, older than 60 days, unallocated) ---
   // Xenon: AUTHORISED only (MBX: SUBMITTED+AUTH=6 vs AUTH=4=Xenon; other clients unchanged).
   try {
-    const asOf = new Date(`${ageingDate(period.end)}T00:00:00.000Z`);   // as at the last completed month end, like the accountant's Xero aged reports
+    const asOf = new Date(`${ageingDate(period.end)}T00:00:00.000Z`);   // as at the end of the current month, like Xero's aged reports
     const credits = selectOldCredits(
       throughPeriodEnd(purchaseCreditsWithOverpayments).filter((c) => c.status === 'AUTHORISED'),
       asOf

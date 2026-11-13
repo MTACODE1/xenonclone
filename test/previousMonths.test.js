@@ -269,17 +269,16 @@ test('a fixed-asset line that Low Cost Fixed Assets lists is not repeated in Cap
   assert.equal(isLowCostFixedAssetLine('720', 2000, null, 2000), false);
 });
 
-// Abdur, 13 Nov 2026 (BC Data Management): old items are aged at the last completed month end, the date he runs
-// Xero's aged reports at, not the end of the month still in progress.
-test('ageingDate is the last completed month end on or before the period end', () => {
+// Abdur, 12 Nov 2026 (BC Data Management, Neat): old items are aged at the end of the CURRENT month, the date Xero's
+// aged reports open at, whatever the review period's end date.
+test('ageingDate is the end of the current month, not the period end', () => {
   const today = new Date('2026-11-13T09:00:00Z');
-  assert.equal(ageingDate('2026-11-13', today), '2026-10-31', 'a live period ending today ages at 31 Oct, not 30 Nov');
-  assert.equal(ageingDate('2026-11-30', new Date('2026-11-30T23:00:00Z')), '2026-11-30', 'on the last day the month is complete');
-  assert.equal(ageingDate('2026-10-31', today), '2026-10-31', 'a custom period ending on a past month end is unchanged');
-  assert.equal(ageingDate('2026-04-30', today), '2026-04-30');
-  assert.equal(ageingDate('2026-04-12', today), '2026-04-30', 'a past mid-month end still rounds up to its month end');
-  assert.equal(ageingDate('2026-01-05', new Date('2026-01-05T00:00:00Z')), '2025-12-31', 'January rolls back to December');
-  const bill = { dueDate: '2026-09-28', amountDue: 6.34 };
-  assert.equal(isOverdueMoreThan(bill, new Date(`${ageingDate('2026-11-13', today)}T00:00:00.000Z`)), false, '33 days at 31 Oct');
-  assert.equal(isOverdueMoreThan(bill, new Date(`${endOfMonth('2026-11-13')}T00:00:00.000Z`)), true, '63 days at 30 Nov');
+  assert.equal(ageingDate('2026-11-13', today), '2026-11-30', 'a live period ending today ages at 30 Nov');
+  assert.equal(ageingDate('2026-10-31', today), '2026-11-30', 'a custom period to 31 Oct still ages at 30 Nov (BC Data)');
+  assert.equal(ageingDate('2026-04-30', today), '2026-11-30');
+  assert.equal(ageingDate('2026-11-30', new Date('2026-11-30T23:00:00Z')), '2026-11-30');
+  assert.equal(ageingDate('2027-02-10', today), '2027-02-28', 'a period ending in the future ages at its own month end');
+  const invoice = { dueDate: '2026-09-28', amountDue: 6.34 };
+  assert.equal(isOverdueMoreThan(invoice, new Date(`${ageingDate('2026-10-31', today)}T00:00:00.000Z`)), true, '63 days at 30 Nov');
+  assert.equal(isOverdueMoreThan(invoice, new Date('2026-10-31T00:00:00.000Z')), false, '33 days at 31 Oct');
 });

@@ -1060,17 +1060,16 @@ function endOfMonth(isoDate) {
   return new Date(Date.UTC(Number(match[1]), Number(match[2]), 0)).toISOString().slice(0, 10);
 }
 
-// The "as at" date for the old invoices, bills and credits checks: the last COMPLETED month end on or before the
-// period end. The accountant runs Xero's aged reports at the last month end (31 Oct when checking in November);
-// ageing at the end of the current month (30 Nov) listed items 60 days old only by then, which looked like Akrio
-// "running the report to today" (BC Data Management, 11 Nov 2026: INV-48938 and INV-48961, due 28 Sep, were 63
-// days old at 30 Nov and 33 at 31 Oct). A period that already ends on a past month end is unchanged.
+// The "as at" date for the old invoices, bills and credits checks: the end of the CURRENT calendar month, the
+// date Xero's aged reports open at and the date the accountant compares with ("to the end of the month as Xero
+// shows the report", Abdur, 12 Nov 2026). It does not follow the period end: BC Data Management run on a custom
+// period to 31 Oct was aged at 31 Oct (6 invoices) when he expected 30 Nov (8: INV-48938 and INV-48961, due 28
+// Sep, 63 days old at 30 Nov). Neat's £300 Masterclass Kitchen credit is "1 month old if checked to the end of
+// the month" for a period ending 11 Nov: the month end is 30 Nov. A dated period still limits WHICH documents
+// are considered (throughPeriodEnd); this only fixes the date they are aged at.
 function ageingDate(periodEnd, today = new Date()) {
-  const monthEnd = endOfMonth(periodEnd);
   const todayIso = today.toISOString().slice(0, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(monthEnd)) || monthEnd <= todayIso) return monthEnd;
-  const [y, m] = monthEnd.split('-').map(Number);
-  return new Date(Date.UTC(y, m - 1, 0)).toISOString().slice(0, 10);
+  return endOfMonth(/^\d{4}-\d{2}-\d{2}$/.test(String(periodEnd)) && periodEnd > todayIso ? periodEnd : todayIso);
 }
 
 // Bank Processed counts what Xero lists in Account Transactions, which leaves out £0.00 transactions.
