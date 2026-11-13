@@ -99,12 +99,29 @@ function revenueDebitedAgainstExpense(journals, index) {
 }
 
 // Any manual journal touching the VAT control account sits outside the normal VAT return posting.
+// A line coded straight to the VAT control account, or a line with a tax rate: Xero then posts the tax
+// amount to the control account itself, and the journal shows on the account's transactions without any
+// line naming it (Neat, 12 Nov 2026: monthly "Mileage Claim" journals, 7306 at INPUT2, £1.14 of VAT each).
 function vatControlManualJournals(journals, index) {
   const items = [];
+  const controlAccount = [...index.values()].find(isVatControl) || null;
   for (const journal of journals) {
     for (const line of journalLines(journal)) {
       const account = lineAccount(index, line);
-      if (isVatControl(account) && line.signed !== 0) items.push(baseItem(journal, line, account));
+      if (isVatControl(account) && line.signed !== 0) {
+        items.push(baseItem(journal, line, account));
+        continue;
+      }
+      const taxAmount = Number(line.taxAmount) || 0;
+      if (taxAmount !== 0 && line.taxType && line.taxType !== 'NONE') {
+        items.push(baseItem(journal, line, controlAccount || account, {
+          amount: Math.abs(taxAmount), lineAmount: Math.abs(line.signed),
+          accountCode: controlAccount ? controlAccount.code : line.accountCode,
+          accountName: controlAccount ? controlAccount.name : (account ? account.name : null),
+          taxType: line.taxType, taxOnAccountCode: line.accountCode,
+          taxOnAccountName: account ? account.name : null, postedVia: 'Tax rate on the journal line',
+        }));
+      }
     }
   }
   return items;

@@ -37,6 +37,28 @@ test('flags any manual journal line on the VAT control account', () => {
   assert.equal(out[CHECK_TYPES.vatControl].length, 1);
 });
 
+// Neat (SW), 12 Nov 2026: Xero's VAT Liability account listed ten "Mileage Claim" manual journals that Akrio did not
+// flag, because no line was coded to 820; the VAT reached the control account through the INPUT2 tax rate on an
+// expense line. The item carries the tax amount and names the control account, with the taxed line alongside.
+test('flags a manual journal line whose tax rate posts VAT to the control account', () => {
+  const taxed = journal('J3b', [['477', 24.51], ['090', -24.51], ['477', 6.84], ['090', -6.84]]);
+  taxed.journalLines[2].taxType = 'INPUT2';
+  taxed.journalLines[2].taxAmount = 1.14;
+  taxed.journalLines[0].taxType = 'NONE';
+  const out = detectUnusualJournals({ accounts, journals: [taxed] });
+  assert.equal(out[CHECK_TYPES.vatControl].length, 1);
+  const item = out[CHECK_TYPES.vatControl][0];
+  assert.equal(item.amount, 1.14);
+  assert.equal(item.accountCode, '820');
+  assert.equal(item.taxOnAccountCode, '477');
+  assert.equal(item.postedVia, 'Tax rate on the journal line');
+  // A zero tax amount or a NONE tax type is an ordinary line.
+  const plain = journal('J3c', [['477', 10], ['090', -10]]);
+  plain.journalLines[0].taxType = 'NONE';
+  plain.journalLines[0].taxAmount = 0;
+  assert.equal(detectUnusualJournals({ accounts, journals: [plain] })[CHECK_TYPES.vatControl].length, 0);
+});
+
 test('flags manual journal lines posted to a bank account', () => {
   const out = detectUnusualJournals({ accounts, journals: [journal('J4', [['090', 300], ['200', -300]])] });
   assert.equal(out[CHECK_TYPES.bankJournal].length, 1);
