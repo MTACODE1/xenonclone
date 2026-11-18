@@ -22,6 +22,9 @@ function csvCell(value) {
   return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
+// The stored type for a reconciliation adjustment is an internal code; exports show it in words.
+const csvTypeLabel = type => (type === 'RECON ADJUSTMENT' ? 'Reconciliation adjustment' : type);
+
 const CSV_HEADER = ['Client', 'Date', 'Type', 'Status', 'Reconciled', 'Contact', 'Reference', 'Bank account',
   'Account code', 'Account name', 'Account type', 'Description', 'Tax type', 'Net', 'Tax', 'Gross', 'Currency',
   'Xero ID'];
@@ -31,7 +34,7 @@ async function sendBankLinesCsv(res, filters, filename) {
   res.write('﻿' + CSV_HEADER.join(',') + '\r\n');
   await eachBankLinePage(filters, 2000, rows => {
     res.write(rows.map(r => [
-      r.client_name, r.txn_date, r.txn_type, r.status, r.is_reconciled ? 'Yes' : 'No', r.contact_name, r.reference,
+      r.client_name, r.txn_date, csvTypeLabel(r.txn_type), r.status, r.is_reconciled ? 'Yes' : 'No', r.contact_name, r.reference,
       r.bank_account_name, r.account_code, r.account_name || (String(r.txn_type || '').includes('TRANSFER') ? 'Bank transfer' : ''),
       r.account_type, r.description, r.tax_type, r.net, r.tax, r.gross, r.currency, r.bank_transaction_id,
     ].map(csvCell).join(',')).join('\r\n') + '\r\n');
@@ -46,4 +49,4 @@ async function bankLinesPageData(filters, page) {
   return { rows, total, accounts, page: current, pages: Math.max(1, Math.ceil(total / PAGE_SIZE)), pageSize: PAGE_SIZE };
 }
 
-module.exports = { parseBankLineFilters, sendBankLinesCsv, bankLinesPageData, csvCell };
+module.exports = { parseBankLineFilters, sendBankLinesCsv, bankLinesPageData, csvCell, csvTypeLabel };

@@ -39,7 +39,7 @@ const {
   storedEntitiesForRecalculation, findDuplicatesWithSameNumber, dropTaxMissingNoise, keepFlatRateLargeItems, missingContactDefaults, PRACTICE_POLICY, LIVE_ONLY_CHECK_TYPES, preservedLiveChecks, balanceSheetNeeded, turnoverAdjustmentFromPayments, nonCompanyDividendIssue, selectUnapprovedInPeriod, isVagueAccountName, PURCHASE_TAX_NOISE_ACCOUNT_NAME, effectiveCapitalThreshold, effectiveMisallocatedThreshold, monitoredMisallocatedExpenseCodes, monitoredMisallocatedRevenueCodes, keepAtLeast, isUnderMinimumItem, isExpenseAccountLine, isLowCostFixedAssetLine, creditFromOverpayment, beforePeriodUnreconciled, BANK_FEE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
-const { saveBankLines } = require('../db/bankLines');
+const { saveBankLines, reconciliationAdjustmentsToLines, saveReconciliationAdjustmentLines } = require('../db/bankLines');
 const { hydrateOrgIfEmpty, drain: drainXeroCacheSaves } = require('../db/xeroCacheStore');
 const journalChecks = require('./journalChecks');
 const {
@@ -2783,6 +2783,18 @@ async function runSync(tenantId, progressCallback, options = {}) {
       );
       journalCount = allJournals
         .filter(item => isWithinPeriod(toDateString(item.journalDate), period)).length;
+      // Reconciliation adjustments live only in the ledger; add them to the bank lines from the journals just
+      // refreshed. Skipped when the journal refresh was skipped or timed out (the rows then stay as they were), and
+      // a failure here must never fail the sync.
+      if (!options.cacheOnly) {
+        try {
+          await saveReconciliationAdjustmentLines(orgId, reconciliationAdjustmentsToLines(
+            orgId, allJournals, Array.isArray(chartOfAccounts) ? chartOfAccounts : [], orgInfo?.baseCurrency
+          ));
+        } catch (adjustmentError) {
+          console.error(`[bank-lines] could not save reconciliation adjustments for org ${orgId}: ${adjustmentError.message}`);
+        }
+      }
     } catch (journalError) {
       console.error('Journal count unavailable — continuing without it:', journalError.message);
     }
