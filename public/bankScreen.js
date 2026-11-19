@@ -41,7 +41,7 @@
   async function updateOne(base, csrfToken, tenantId, shortCode) {
     const answer = await askExtension({ type: 'READ_BANK_PAGE', shortCode }, 120000);
     if (!answer) throw new Error('The extension did not answer in time.');
-    if (!answer.ok) throw new Error(answer.message || 'Xero could not be read.');
+    if (!answer.ok) { const error = new Error(answer.message || 'Xero could not be read.'); error.code = answer.error; throw error; }
     return getJson(base + '/api/bank-screen/readings', {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'application/json', 'x-csrf-token': csrfToken },
@@ -78,6 +78,37 @@
     return days + (days === 1 ? ' day ago' : ' days ago');
   }
 
+  const ALERT_TONES = {
+    bad: 'background:#FDEDE8;border:1px solid #F7C6BB;color:#7A271A;',
+    muted: 'background:#F4F6FA;border:1px solid #E5EAF2;color:#5A6A85;',
+  };
+  function alertBox(tone, title, message, link) {
+    const box = el('div', null, 'border-radius:8px;padding:10px 14px;margin-bottom:10px;font-size:0.8rem;line-height:1.45;' + ALERT_TONES[tone]);
+    box.setAttribute('role', tone === 'bad' ? 'alert' : 'note');
+    box.appendChild(el('div', title, 'font-weight:700;margin-bottom:2px;'));
+    box.appendChild(el('div', message));
+    if (link) {
+      const anchor = el('a', link.label, 'display:inline-block;margin-top:6px;font-weight:600;');
+      anchor.href = link.href; anchor.target = '_blank'; anchor.rel = 'noopener';
+      box.appendChild(anchor);
+    }
+    return box;
+  }
+
+  // A plain title and next step for each way a read can fail.
+  function failureBox(error) {
+    const XERO_LOGIN = { label: 'Open Xero sign-in', href: 'https://login.xero.com/' };
+    switch (error.code) {
+      case 'not_signed_in': return alertBox('bad', 'Xero is not signed in', 'Sign in to Xero in this browser, then click "Update from Xero" again.', XERO_LOGIN);
+      case 'wrong_organisation': return alertBox('bad', 'Xero did not open this client', 'Your Xero login may not have access to this client. Check you are signed in to Xero with the practice login that can open it.', XERO_LOGIN);
+      case 'timeout': case 'not_settled': return alertBox('bad', 'Xero took too long to load', 'Nothing was saved. Check your connection and try again.');
+      case 'not_readable': case 'unexpected_page': return alertBox('bad', 'Xero\'s Bank accounts page could not be read', 'Nothing was saved. Open the client in Xero to check the Bank accounts page loads, then try again.');
+      case 'no_extension': return alertBox('bad', 'Browser extension not found', 'Install the Akrio Verify extension in this browser, or reload this page if you have just installed it.');
+      case 'no_short_code': return alertBox('bad', 'This client has not been synced yet', 'Run a sync for this client first, then try again.');
+      default: return alertBox('bad', 'The bank feed could not be updated', error.message || 'Nothing was saved. Try again.');
+    }
+  }
+
   function tile(label, value, sub, tone) {
     const box = el('div', null, 'flex:1 1 170px;border:1px solid #E5EAF2;border-radius:10px;padding:12px 14px;background:#fff;');
     box.appendChild(el('div', label, 'font-size:0.68rem;letter-spacing:0.06em;text-transform:uppercase;color:#7C8FAC;font-weight:600;'));
@@ -103,6 +134,19 @@
     if (stale) {
       body.appendChild(el('div', 'This reading is more than ' + data.staleAfterDays + ' days old. Update it before relying on these figures.',
         'background:#FDEDE8;color:#B42318;border-radius:8px;padding:8px 12px;font-size:0.8rem;font-weight:600;margin-bottom:12px;'));
+    }
+    for (const account of accounts) {
+      const since = account.statementDateLabel ? ' The last statement date Xero shows is ' + account.statementDateLabel + '.' : '';
+      if (account.stoppedImporting) {
+        body.appendChild(alertBox('bad', 'Bank not connected: ' + account.accountName,
+          'This account has stopped importing transactions from the bank.' + since + ' Renew the bank connection in Xero (Accounting > Bank accounts > Renew bank connection). Until then, no new transactions reach Xero or Akrio Verify.'));
+      } else if (account.feedProblem) {
+        body.appendChild(alertBox('bad', 'Bank feed problem: ' + account.accountName,
+          'Xero reports a problem with this bank feed.' + since + ' Open the account in Xero and click Details to see what Xero needs.'));
+      } else if (account.noFeed) {
+        body.appendChild(alertBox('muted', 'No bank feed: ' + account.accountName,
+          'This account has no automatic bank feed, so statements only arrive when someone imports them into Xero.' + since));
+      }
     }
     const tiles = el('div', null, 'display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px;');
     tiles.appendChild(tile('Items to reconcile', total.toLocaleString('en-GB'), 'across ' + accounts.length + (accounts.length === 1 ? ' bank account' : ' bank accounts'), total ? 'warn' : null));
@@ -156,17 +200,22 @@
     let data;
     const load = async () => { data = await getJson(base + '/api/bank-screen/latest/' + encodeURIComponent(tenantId)); renderReading(body, data); };
     try { await load(); } catch (error) { body.textContent = error.message; return; }
+    const failures = el('div');
+    body.parentNode.insertBefore(failures, body);
+    failures.style.cssText = 'padding:16px 16px 0;';
+    failures.hidden = true;
+    const showFailure = error => { failures.textContent = ''; failures.appendChild(failureBox(error)); failures.hidden = false; note.textContent = ''; };
     button.addEventListener('click', async () => {
-      note.style.color = '#5A6A85';
-      if (!data.shortCode) { note.textContent = 'This client has no Xero short code yet. Run a sync first.'; return; }
-      if (!(await extensionInstalled())) { note.textContent = 'The Akrio Verify browser extension is not installed in this browser (or this page needs a reload after installing it).'; return; }
-      button.disabled = true; button.textContent = 'Reading Xero…'; note.textContent = '';
+      failures.hidden = true; note.textContent = ''; note.style.color = '#5A6A85';
+      if (!data.shortCode) { showFailure({ code: 'no_short_code' }); return; }
+      if (!(await extensionInstalled())) { showFailure({ code: 'no_extension' }); return; }
+      button.disabled = true; button.textContent = 'Reading Xero…';
       try {
         await updateOne(base, card.dataset.csrf, tenantId, data.shortCode);
         await load();
         note.style.color = '#0B8F76'; note.textContent = 'Updated just now';
       } catch (error) {
-        note.style.color = '#B42318'; note.textContent = error.message;
+        showFailure(error);
       } finally { button.disabled = false; button.textContent = 'Update from Xero'; }
     });
   }
@@ -193,7 +242,7 @@
           catch (error) {
             failed++; failures.appendChild(el('div', org.name + ': ' + error.message));
             // Signed out of Xero or Verify: every further client would fail the same way.
-            if (/Sign in/.test(error.message)) { stopRequested = true; }
+            if (error.code === 'not_signed_in' || /Sign in/.test(error.message)) { stopRequested = true; failures.appendChild(el('div', 'Stopped: sign in to Xero in this browser, then start again.', 'font-weight:700;')); }
           }
         }
         note.textContent = (stopRequested ? 'Stopped. ' : 'Finished. ') + done + ' updated, ' + failed + ' failed, ' + (organisations.length - done - failed) + ' not attempted.';
