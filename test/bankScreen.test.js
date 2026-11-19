@@ -182,12 +182,13 @@ test('getLatestReading returns only the newest batch for that organisation', asy
   const calls = [];
   const pool = { query: async (sql, params) => {
     calls.push(params);
-    if (sql.includes('akrio_bank_screen_batches')) return [[{ id: 3, page_title: 'T', read_by_name: 'A', read_at: new Date('2026-11-19T10:00:00Z') }]];
+    if (sql.includes('akrio_bank_screen_batches')) return [[{ id: 3, page_title: 'T', read_by_name: 'A', read_at_unix: '1795082400' }]];
     return [[{ account_name: 'Main', account_number: null, items_to_reconcile: 4, reconciled: 0, balances_differ: 1,
       balance_in_xero: '-10.50', statement_balance: null, statement_date_label: 'Oct 12', feed_problem: 1, stopped_importing: 0, no_feed: 0 }]];
   } };
   const latest = await getLatestReading(5, { pool, ensure: async () => {} });
   assert.deepEqual(calls, [[5], [3, 5]]);
+  assert.equal(latest.readAt.toISOString(), '2026-11-19T10:00:00.000Z');
   assert.equal(latest.accounts[0].balanceInXero, -10.5);
   assert.equal(latest.accounts[0].statementBalance, null);
   assert.equal(latest.accounts[0].balancesDiffer, true);

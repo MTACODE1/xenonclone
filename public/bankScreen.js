@@ -53,42 +53,98 @@
   const el = (tag, text, style) => { const node = document.createElement(tag); if (text != null) node.textContent = text; if (style) node.style.cssText = style; return node; };
 
   function feedStatus(account) {
-    if (account.stoppedImporting) return 'Stopped importing';
-    if (account.feedProblem) return 'Problem with bank feed';
-    if (account.noFeed) return 'No bank feed';
-    return 'OK';
+    if (account.stoppedImporting) return { label: 'Stopped importing', tone: 'bad' };
+    if (account.feedProblem) return { label: 'Feed problem', tone: 'bad' };
+    if (account.noFeed) return { label: 'No bank feed', tone: 'muted' };
+    return { label: 'Connected', tone: 'good' };
+  }
+
+  const TONES = {
+    bad: 'background:#FDEDE8;color:#B42318;',
+    warn: 'background:#FEF5E5;color:#B25E09;',
+    good: 'background:#E6FFFA;color:#0B8F76;',
+    muted: 'background:#EEF1F6;color:#5A6A85;',
+  };
+  const badge = (label, tone) => el('span', label, 'display:inline-block;padding:2px 10px;border-radius:999px;font-size:0.72rem;font-weight:600;white-space:nowrap;' + TONES[tone]);
+  const NUM = 'text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;';
+
+  function timeAgo(date, now) {
+    const minutes = Math.round((now - date) / 60000);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return minutes + ' min ago';
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return hours + (hours === 1 ? ' hour ago' : ' hours ago');
+    const days = Math.round(hours / 24);
+    return days + (days === 1 ? ' day ago' : ' days ago');
+  }
+
+  function tile(label, value, sub, tone) {
+    const box = el('div', null, 'flex:1 1 170px;border:1px solid #E5EAF2;border-radius:10px;padding:12px 14px;background:#fff;');
+    box.appendChild(el('div', label, 'font-size:0.68rem;letter-spacing:0.06em;text-transform:uppercase;color:#7C8FAC;font-weight:600;'));
+    box.appendChild(el('div', value, 'font-size:1.35rem;font-weight:700;margin-top:2px;font-variant-numeric:tabular-nums;color:' + (tone === 'bad' ? '#B42318' : tone === 'warn' ? '#B25E09' : '#2A3547') + ';'));
+    if (sub) box.appendChild(el('div', sub, 'font-size:0.72rem;color:#7C8FAC;margin-top:2px;'));
+    return box;
   }
 
   function renderReading(body, data) {
     body.textContent = '';
     const reading = data.reading;
-    if (!reading) { body.appendChild(el('p', 'Nothing has been read from Xero for this client yet.', 'color:#7C8FAC;font-size:0.85rem;')); return; }
-    const when = new Date(reading.readAt);
-    const line = el('p', 'Read from Xero on ' + when.toLocaleString('en-GB') + (reading.readByName ? ' by ' + reading.readByName : '') + '.', 'font-size:0.8rem;color:#5A6A85;margin-bottom:8px;');
-    if (reading.freshness === 'stale') line.appendChild(el('strong', ' OUT OF DATE: older than ' + data.staleAfterDays + ' days. Update before relying on it.', 'color:#B42318;'));
-    body.appendChild(line);
-    if (!reading.accounts.length) { body.appendChild(el('p', 'Xero showed no bank accounts for this client.', 'font-size:0.85rem;')); return; }
-    const table = el('table'); table.className = 'table';
-    const head = el('tr');
-    ['Bank account', 'Items to reconcile', 'Balance in Xero', 'Statement balance', 'Statement date (as Xero shows it)', 'Bank feed'].forEach(title => head.appendChild(el('th', title)));
-    table.appendChild(head);
-    let total = 0;
-    for (const account of reading.accounts) {
-      const row = el('tr');
-      row.appendChild(el('td', account.accountName + (account.accountNumber ? ' · ' + account.accountNumber : '')));
-      const items = account.itemsToReconcile != null ? String(account.itemsToReconcile)
-        : account.reconciled ? '0 (reconciled)' : account.balancesDiffer ? '0, but balances differ' : 'Not shown';
-      total += account.itemsToReconcile || 0;
-      row.appendChild(el('td', items, account.itemsToReconcile ? 'font-weight:600;' : ''));
-      row.appendChild(el('td', money(account.balanceInXero)));
-      row.appendChild(el('td', money(account.statementBalance)));
-      row.appendChild(el('td', account.statementDateLabel || '—'));
-      const status = feedStatus(account);
-      row.appendChild(el('td', status, status === 'OK' ? '' : 'color:#B42318;font-weight:600;'));
-      table.appendChild(row);
+    if (!reading) {
+      body.appendChild(el('p', 'Nothing has been read from Xero for this client yet. Click "Update from Xero" to read it now.', 'color:#7C8FAC;font-size:0.85rem;margin:0;'));
+      return;
     }
-    body.appendChild(table);
-    body.appendChild(el('p', 'Total items to reconcile: ' + total + '. Xero shows the statement date without a year.', 'font-size:0.75rem;color:#7C8FAC;margin-top:6px;'));
+    const when = new Date(reading.readAt);
+    const stale = reading.freshness === 'stale';
+    const accounts = reading.accounts;
+    const total = accounts.reduce((sum, account) => sum + (account.itemsToReconcile || 0), 0);
+    const feedIssues = accounts.filter(account => account.stoppedImporting || account.feedProblem).length;
+    const differing = accounts.filter(account => account.balancesDiffer).length;
+
+    if (stale) {
+      body.appendChild(el('div', 'This reading is more than ' + data.staleAfterDays + ' days old. Update it before relying on these figures.',
+        'background:#FDEDE8;color:#B42318;border-radius:8px;padding:8px 12px;font-size:0.8rem;font-weight:600;margin-bottom:12px;'));
+    }
+    const tiles = el('div', null, 'display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px;');
+    tiles.appendChild(tile('Items to reconcile', total.toLocaleString('en-GB'), 'across ' + accounts.length + (accounts.length === 1 ? ' bank account' : ' bank accounts'), total ? 'warn' : null));
+    tiles.appendChild(tile('Bank feeds with a problem', String(feedIssues), feedIssues ? 'not importing new transactions' : 'all connected feeds are working', feedIssues ? 'bad' : null));
+    tiles.appendChild(tile('Balances that differ', String(differing), 'nothing to reconcile, but Xero and the statement disagree', differing ? 'warn' : null));
+    tiles.appendChild(tile('Last read from Xero', timeAgo(when, new Date()), when.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) + (reading.readByName ? ' · ' + reading.readByName : ''), stale ? 'bad' : null));
+    body.appendChild(tiles);
+
+    if (!accounts.length) { body.appendChild(el('p', 'Xero showed no bank accounts for this client.', 'font-size:0.85rem;margin:0;')); return; }
+    const wrap = el('div'); wrap.className = 'table-wrap'; wrap.style.overflowX = 'auto';
+    const table = el('table'); table.className = 'data-table'; table.style.width = '100%';
+    const thead = el('thead'); const head = el('tr');
+    [['Bank account', ''], ['To reconcile', NUM], ['Balance in Xero', NUM], ['Statement balance', NUM], ['Difference', NUM], ['Statement date', ''], ['Bank feed', '']]
+      .forEach(([title, style]) => head.appendChild(el('th', title, style)));
+    thead.appendChild(head); table.appendChild(thead);
+    const tbody = el('tbody');
+    for (const account of accounts) {
+      const row = el('tr');
+      const name = el('td');
+      name.appendChild(el('div', account.accountName, 'font-weight:600;color:#2A3547;'));
+      if (account.accountNumber) name.appendChild(el('div', account.accountNumber, 'font-size:0.72rem;color:#7C8FAC;'));
+      row.appendChild(name);
+
+      const items = el('td', null, NUM);
+      if (account.itemsToReconcile) items.appendChild(badge(account.itemsToReconcile.toLocaleString('en-GB'), 'warn'));
+      else if (account.itemsToReconcile === 0 || account.reconciled) items.appendChild(badge('Reconciled', 'good'));
+      else if (account.balancesDiffer) items.appendChild(badge('0 · balances differ', 'warn'));
+      else items.appendChild(el('span', 'Not shown', 'color:#7C8FAC;'));
+      row.appendChild(items);
+
+      row.appendChild(el('td', money(account.balanceInXero), NUM));
+      row.appendChild(el('td', money(account.statementBalance), NUM));
+      const both = account.balanceInXero != null && account.statementBalance != null;
+      const difference = both ? Math.round((account.statementBalance - account.balanceInXero) * 100) / 100 : null;
+      row.appendChild(el('td', difference == null ? '—' : difference === 0 ? '0.00' : money(difference), NUM + (difference ? 'color:#B25E09;font-weight:600;' : 'color:#7C8FAC;')));
+      row.appendChild(el('td', account.statementDateLabel || '—', 'white-space:nowrap;'));
+      const status = feedStatus(account);
+      const feed = el('td'); feed.appendChild(badge(status.label, status.tone)); row.appendChild(feed);
+      tbody.appendChild(row);
+    }
+    table.appendChild(tbody); wrap.appendChild(table); body.appendChild(wrap);
+    body.appendChild(el('p', 'Difference = statement balance less balance in Xero. Xero shows the statement date without a year, so it is shown here exactly as Xero shows it.', 'font-size:0.72rem;color:#7C8FAC;margin:8px 0 0;'));
   }
 
   async function setUpClientCard(card) {
@@ -104,14 +160,14 @@
       note.style.color = '#5A6A85';
       if (!data.shortCode) { note.textContent = 'This client has no Xero short code yet. Run a sync first.'; return; }
       if (!(await extensionInstalled())) { note.textContent = 'The Akrio Verify browser extension is not installed in this browser (or this page needs a reload after installing it).'; return; }
-      button.disabled = true; note.textContent = 'Reading Xero…';
+      button.disabled = true; button.textContent = 'Reading Xero…'; note.textContent = '';
       try {
         await updateOne(base, card.dataset.csrf, tenantId, data.shortCode);
         await load();
-        note.textContent = 'Updated.';
+        note.style.color = '#0B8F76'; note.textContent = 'Updated just now';
       } catch (error) {
         note.style.color = '#B42318'; note.textContent = error.message;
-      } finally { button.disabled = false; }
+      } finally { button.disabled = false; button.textContent = 'Update from Xero'; }
     });
   }
 

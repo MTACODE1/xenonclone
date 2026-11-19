@@ -86,7 +86,7 @@ const num = value => (value == null ? null : Number(value));
 async function getLatestReading(orgId, { pool = getPool(), ensure = ensureTables } = {}) {
   await ensure(pool);
   const [batches] = await pool.query(
-    `SELECT id, short_code, page_title, account_count, read_by_name, read_at
+    `SELECT id, short_code, page_title, account_count, read_by_name, UNIX_TIMESTAMP(read_at) AS read_at_unix
      FROM akrio_bank_screen_batches WHERE org_id = ? ORDER BY id DESC LIMIT 1`, [orgId]
   );
   if (!batches.length) return null;
@@ -95,7 +95,9 @@ async function getLatestReading(orgId, { pool = getPool(), ensure = ensureTables
     `SELECT * FROM akrio_bank_screen_accounts WHERE batch_id = ? AND org_id = ? ORDER BY position`, [batch.id, orgId]
   );
   return {
-    batchId: batch.id, pageTitle: batch.page_title, readByName: batch.read_by_name, readAt: batch.read_at,
+    batchId: batch.id, pageTitle: batch.page_title, readByName: batch.read_by_name,
+    // UNIX_TIMESTAMP gives the instant itself, so it does not depend on how the connection formats dates.
+    readAt: new Date(Number(batch.read_at_unix) * 1000),
     accounts: rows.map(row => ({
       accountName: row.account_name, accountNumber: row.account_number,
       itemsToReconcile: row.items_to_reconcile == null ? null : Number(row.items_to_reconcile),
