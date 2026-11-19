@@ -1,0 +1,128 @@
+// Readings of Xero's "Bank accounts" page taken by the Akrio Verify browser extension. One batch per
+// read of one organisation, one row per bank account in it. History is kept; the newest batch is shown.
+// Lives in MySQL so it survives deploys. Xero's API does not provide these figures.
+const zlib = require('zlib');
+const { getPool } = require('./mysqlPool');
+const { buildShortCodeIndex } = require('../services/bankScreenReading');
+
+let tableReady = null;
+function ensureTables(pool = getPool()) {
+  if (!tableReady) {
+    tableReady = (async () => {
+      await pool.query(`CREATE TABLE IF NOT EXISTS akrio_bank_screen_batches (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        org_id INT NOT NULL,
+        short_code VARCHAR(16) NOT NULL,
+        page_title VARCHAR(200) NULL,
+        account_count SMALLINT NOT NULL,
+        read_by_staff_id INT NULL,
+        read_by_name VARCHAR(255) NULL,
+        read_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_bank_screen_batches_org (org_id, id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS akrio_bank_screen_accounts (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        batch_id BIGINT NOT NULL,
+        org_id INT NOT NULL,
+        position SMALLINT NOT NULL,
+        account_name VARCHAR(255) NOT NULL,
+        account_number VARCHAR(64) NULL,
+        items_to_reconcile INT NULL,
+        reconciled TINYINT(1) NOT NULL DEFAULT 0,
+        balances_differ TINYINT(1) NOT NULL DEFAULT 0,
+        balance_in_xero DECIMAL(16,2) NULL,
+        statement_balance DECIMAL(16,2) NULL,
+        statement_date_label VARCHAR(20) NULL,
+        feed_problem TINYINT(1) NOT NULL DEFAULT 0,
+        stopped_importing TINYINT(1) NOT NULL DEFAULT 0,
+        no_feed TINYINT(1) NOT NULL DEFAULT 0,
+        UNIQUE KEY uq_bank_screen_account (batch_id, position),
+        KEY idx_bank_screen_accounts_org (org_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+    })().catch(err => { tableReady = null; throw err; });
+  }
+  return tableReady;
+}
+
+const bit = value => (value ? 1 : 0);
+
+// reading must already have been through validateReading. Batch and rows are written together or not at all.
+async function saveReading(orgId, reading, staff = {}, { pool = getPool(), ensure = ensureTables } = {}) {
+  if (!Number.isInteger(orgId)) throw new Error('saveReading needs the organisation id');
+  await ensure(pool);
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [result] = await connection.query(
+      `INSERT INTO akrio_bank_screen_batches (org_id, short_code, page_title, account_count, read_by_staff_id, read_by_name)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [orgId, reading.shortCode, reading.pageTitle, reading.accounts.length, staff.id ?? null, staff.name ?? null]
+    );
+    const batchId = result.insertId;
+    if (reading.accounts.length) {
+      await connection.query(
+        `INSERT INTO akrio_bank_screen_accounts (batch_id, org_id, position, account_name, account_number,
+           items_to_reconcile, reconciled, balances_differ, balance_in_xero, statement_balance,
+           statement_date_label, feed_problem, stopped_importing, no_feed) VALUES ?`,
+        [reading.accounts.map((account, index) => [
+          batchId, orgId, index, account.accountName, account.accountNumber, account.itemsToReconcile,
+          bit(account.reconciled), bit(account.balancesDiffer), account.balanceInXero, account.statementBalance,
+          account.statementDateLabel, bit(account.feedProblem), bit(account.stoppedImporting), bit(account.noFeed),
+        ])]
+      );
+    }
+    await connection.commit();
+    return batchId;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+const num = value => (value == null ? null : Number(value));
+
+async function getLatestReading(orgId, { pool = getPool(), ensure = ensureTables } = {}) {
+  await ensure(pool);
+  const [batches] = await pool.query(
+    `SELECT id, short_code, page_title, account_count, read_by_name, read_at
+     FROM akrio_bank_screen_batches WHERE org_id = ? ORDER BY id DESC LIMIT 1`, [orgId]
+  );
+  if (!batches.length) return null;
+  const batch = batches[0];
+  const [rows] = await pool.query(
+    `SELECT * FROM akrio_bank_screen_accounts WHERE batch_id = ? AND org_id = ? ORDER BY position`, [batch.id, orgId]
+  );
+  return {
+    batchId: batch.id, pageTitle: batch.page_title, readByName: batch.read_by_name, readAt: batch.read_at,
+    accounts: rows.map(row => ({
+      accountName: row.account_name, accountNumber: row.account_number,
+      itemsToReconcile: row.items_to_reconcile == null ? null : Number(row.items_to_reconcile),
+      reconciled: Boolean(row.reconciled), balancesDiffer: Boolean(row.balances_differ),
+      balanceInXero: num(row.balance_in_xero), statementBalance: num(row.statement_balance),
+      statementDateLabel: row.statement_date_label, feedProblem: Boolean(row.feed_problem),
+      stoppedImporting: Boolean(row.stopped_importing), noFeed: Boolean(row.no_feed),
+    })),
+  };
+}
+
+// Organisation -> Xero short code, from the organisation record each sync already caches. Kept in
+// memory for ten minutes; a newly connected client appears after its first sync.
+let indexCache = null;
+async function getShortCodeIndex({ pool = getPool(), now = Date.now() } = {}) {
+  if (indexCache && now - indexCache.at < 10 * 60 * 1000) return indexCache.index;
+  const [rows] = await pool.query(`SELECT org_id, payload FROM akrio_xero_cache WHERE entity_type = 'organisation'`);
+  const codes = [];
+  for (const row of rows) {
+    try {
+      const organisation = JSON.parse(zlib.gunzipSync(row.payload).toString());
+      codes.push({ orgId: Number(row.org_id), shortCode: organisation.shortCode });
+    } catch (error) { /* an unreadable record simply has no short code */ }
+  }
+  const index = buildShortCodeIndex(codes);
+  indexCache = { at: now, index };
+  return index;
+}
+
+module.exports = { ensureTables, saveReading, getLatestReading, getShortCodeIndex };

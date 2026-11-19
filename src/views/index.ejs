@@ -83,6 +83,14 @@
     <button type="button" class="quick-view" data-view="unsynced">Not synced <span><%= notSyncedCount %></span></button>
   </div>
 
+  <div data-bank-screen-all data-base-path="<%= basePath %>" data-csrf="<%= csrfToken %>" style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0; font-size: 0.8rem;">
+    <button type="button" class="btn btn-outlined btn-sm" data-bank-screen-all-start title="Reads each client's Bank accounts page in Xero through the Akrio Verify browser extension. You must be signed in to Xero in this browser.">Update bank feeds from Xero (all clients)</button>
+    <button type="button" class="btn btn-ghost-primary btn-sm" data-bank-screen-all-stop hidden>Stop</button>
+    <span data-bank-screen-all-note style="color: #5A6A85;"></span>
+    <div data-bank-screen-all-failures style="flex-basis: 100%; color: #B42318;"></div>
+  </div>
+  <script src="<%= basePath %>/bankScreen.js?v=1" defer></script>
+
   <div class="table-wrap">
     <table class="data-table" id="clientTable">
       <thead>

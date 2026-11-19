@@ -124,6 +124,7 @@ const settingsRoutes = require('./src/routes/settings');
 const validationRoutes = require('./src/routes/validation');
 const staffAuthRoutes = require('./src/routes/staffAuth');
 const staffRoutes = require('./src/routes/staff');
+const { createBankScreenRouter } = require('./src/routes/bankScreen');
 const { requireStaffLogin, requireStaffManager, requireSettingsAccess } = require('./src/middleware/staffAuth');
 
 app.use(BASE_PATH + '/login', staffAuthRoutes); // reachable pre-auth
@@ -142,6 +143,9 @@ app.use(BASE_PATH + '/client', clientRoutes);
 app.use(BASE_PATH + '/settings', requireSettingsAccess, settingsRoutes);
 app.use(BASE_PATH + '/staff', requireStaffManager, staffRoutes);
 app.use(BASE_PATH + '/validation', validationRoutes);
+app.use(BASE_PATH + '/api/bank-screen', createBankScreenRouter({
+  ...require('./src/db/queries'), ...require('./src/db/bankScreenReadings'),
+}));
 app.use(BASE_PATH, dashboardRoutes);
 
 // Nightly sync at 2am

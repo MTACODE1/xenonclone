@@ -413,6 +413,26 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
       <% }) %>
     </div>
 
+    <% if (org.xero_tenant_id) { %>
+    <div class="card" id="bank-screen" style="margin-top: 24px;" data-bank-screen-card
+         data-base-path="<%= basePath %>" data-tenant-id="<%= org.xero_tenant_id %>" data-csrf="<%= csrfToken %>">
+      <div class="card-header" style="background: var(--grey-100); display: flex; justify-content: space-between; align-items: center; gap: 12px;">
+        <div>
+          <h5>Bank feed read from Xero's screen</h5>
+          <p style="font-size: 0.75rem; color: #7C8FAC; margin-top: 4px;">
+            Items waiting to be reconciled and the bank balances exactly as Xero shows them. Xero does not provide these through its normal connection, so they are read by the Akrio Verify browser extension while you are signed in to Xero. They do not change the health score.
+          </p>
+        </div>
+        <div style="text-align: right; min-width: 180px;">
+          <button type="button" class="btn btn-outlined btn-sm" data-bank-screen-update>Update from Xero</button>
+          <div data-bank-screen-note style="font-size: 0.75rem; margin-top: 4px;"></div>
+        </div>
+      </div>
+      <div class="card-body" data-bank-screen-body style="padding: 16px;">Loading…</div>
+    </div>
+    <script src="<%= basePath %>/bankScreen.js?v=1" defer></script>
+    <% } %>
+
     <div class="card" id="statement-evidence" style="margin-top: 24px;">
       <div class="card-header" style="background: var(--grey-100);">
         <h5>Bank Statement Evidence</h5>
