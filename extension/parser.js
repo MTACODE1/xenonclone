@@ -44,7 +44,9 @@
       statementDateLabel: dateLabel ? dateLabel[1].trim() : null,
       feedProblem: Boolean(widget && widget.feedProblem) || /There is a problem with this bank feed/i.test(text),
       stoppedImporting: /stopped importing/i.test(text),
-      noFeed: Boolean(widget && widget.noFeed),
+      // Xero offers "Get bank feeds" on an account that has no automatic feed. The button does not always
+      // carry the same marker, so its text counts as well.
+      noFeed: Boolean(widget && widget.noFeed) || /(?:^|\n)\s*Get bank feeds\s*(?:\n|$)/.test(text),
     };
   }
 

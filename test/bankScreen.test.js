@@ -74,6 +74,13 @@ test('parseWidget: an account called "Reconciled Holdings" is not treated as rec
   assert.equal(empty.statementBalance, null);
 });
 
+test('parseWidget: "Get bank feeds" in the text means no feed even when the page marker is missing', () => {
+  const text = ['Second Account', '00-00-00', 'Why is this different?', 'Balance in Xero', 'Balance in Xero\t(332.02)',
+    'Statement balance (Sep 10)', 'Statement balance (Sep 10)\t39.20', 'Get bank feeds'].join('\n');
+  assert.equal(parseWidget({ headerText: 'Second Account', text, noFeed: false }).noFeed, true);
+  assert.equal(parseWidget({ headerText: 'Get bank feeds Ltd', text: 'Get bank feeds Ltd\n00\nReconciled' }).noFeed, false);
+});
+
 test('short codes and page paths', () => {
   assert.equal(shortCodeFromPath('/app/!AbC12/manage-bank-accounts'), '!AbC12');
   assert.equal(shortCodeFromPath('/app/%21AbC12/manage-bank-accounts/'), '!AbC12');

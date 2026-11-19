@@ -56,7 +56,8 @@
     if (account.stoppedImporting) return { label: 'Stopped importing', tone: 'bad' };
     if (account.feedProblem) return { label: 'Feed problem', tone: 'bad' };
     if (account.noFeed) return { label: 'No bank feed', tone: 'muted' };
-    return { label: 'Connected', tone: 'good' };
+    // Xero only tells us when something is wrong; an account with no warning is not proven to have a live feed.
+    return { label: 'No problem shown', tone: 'good' };
   }
 
   const TONES = {
@@ -150,7 +151,7 @@
     }
     const tiles = el('div', null, 'display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px;');
     tiles.appendChild(tile('Items to reconcile', total.toLocaleString('en-GB'), 'across ' + accounts.length + (accounts.length === 1 ? ' bank account' : ' bank accounts'), total ? 'warn' : null));
-    tiles.appendChild(tile('Bank feeds with a problem', String(feedIssues), feedIssues ? 'not importing new transactions' : 'all connected feeds are working', feedIssues ? 'bad' : null));
+    tiles.appendChild(tile('Bank feeds with a problem', String(feedIssues), feedIssues ? 'not importing new transactions' : 'Xero shows no bank feed problems', feedIssues ? 'bad' : null));
     tiles.appendChild(tile('Balances that differ', String(differing), 'nothing to reconcile, but Xero and the statement disagree', differing ? 'warn' : null));
     tiles.appendChild(tile('Last read from Xero', timeAgo(when, new Date()), when.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) + (reading.readByName ? ' · ' + reading.readByName : ''), stale ? 'bad' : null));
     body.appendChild(tiles);
