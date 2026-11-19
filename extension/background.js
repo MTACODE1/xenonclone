@@ -7,7 +7,7 @@ const ALLOWED_SENDERS = [
   'http://localhost:3000/',
   'https://localhost:3000/',
 ];
-const LOAD_TIMEOUT_MS = 45000;
+const LOAD_TIMEOUT_MS = 60000;
 const fail = (error, message) => ({ ok: false, error, message });
 
 function waitForLoad(tabId) {
@@ -46,7 +46,7 @@ async function readBankPage(shortCode, progress = () => {}) {
     if (page.host !== 'go.xero.com' || page.shortCode !== shortCode) {
       return fail('wrong_organisation', 'Xero did not open this client. Check that your Xero login has access to it.');
     }
-    if (!page.settled) return fail('not_settled', 'Xero\'s page was still loading. Try again.');
+    if (!page.settled) return fail('not_settled', 'Xero was too slow to show the bank accounts. Try again in a moment.');
     if (!page.accounts.length && !page.pageRendered) {
       return fail('not_readable', 'Xero\'s Bank accounts page did not load for this client.');
     }

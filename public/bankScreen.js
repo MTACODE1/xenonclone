@@ -53,7 +53,7 @@
   // Reads one client in Xero through the extension and saves it. Throws an Error with a plain message.
   async function updateOne(base, csrfToken, tenantId, shortCode, onStage = () => {}) {
     onStage('opening');
-    const answer = await askExtension({ type: 'READ_BANK_PAGE', shortCode }, 120000, onStage);
+    const answer = await askExtension({ type: 'READ_BANK_PAGE', shortCode }, 150000, onStage);
     if (!answer) throw new Error('The extension did not answer in time.');
     if (!answer.ok) { const error = new Error(answer.message || 'Xero could not be read.'); error.code = answer.error; throw error; }
     onStage('saving');
@@ -151,7 +151,7 @@
     switch (error.code) {
       case 'not_signed_in': return alertBox('bad', 'Xero is not signed in', 'Sign in to Xero in this browser, then click "Update from Xero" again.', XERO_LOGIN);
       case 'wrong_organisation': return alertBox('bad', 'Xero did not open this client', 'Your Xero login may not have access to this client. Check you are signed in to Xero with the practice login that can open it.', XERO_LOGIN);
-      case 'timeout': case 'not_settled': return alertBox('bad', 'Xero took too long to load', 'Nothing was saved. Check your connection and try again.');
+      case 'timeout': case 'not_settled': return alertBox('bad', 'Xero took too long to load', 'Nothing was saved. Xero is slow at the moment. Try again in a minute.');
       case 'not_readable': case 'unexpected_page': return alertBox('bad', 'Xero\'s Bank accounts page could not be read', 'Nothing was saved. Open the client in Xero to check the Bank accounts page loads, then try again.');
       case 'verify_signed_out': return alertBox('bad', 'Akrio Verify is signed out', 'Sign in to Akrio Verify again, then click "Update from Xero".');
       case 'verify_starting': return alertBox('bad', 'Akrio Verify is starting up', 'Nothing was saved. Try again in a minute.');
@@ -277,50 +277,107 @@
     });
   }
 
-  function setUpAllClients(bar) {
-    const base = bar.dataset.basePath || '';
-    const start = bar.querySelector('[data-bank-screen-all-start]');
-    const stop = bar.querySelector('[data-bank-screen-all-stop]');
-    const note = bar.querySelector('[data-bank-screen-all-note]');
-    const failures = bar.querySelector('[data-bank-screen-all-failures]');
-    const overall = el('div', null, 'flex-basis:100%;height:8px;border-radius:999px;background:#E5EAF2;overflow:hidden;');
-    const overallFill = el('div', null, 'height:100%;width:0%;background:#5D87FF;transition:width 0.4s ease;');
-    overall.appendChild(overallFill); overall.hidden = true; bar.insertBefore(overall, failures);
+  const duration = seconds => {
+    const minutes = Math.round(seconds / 60);
+    return minutes < 1 ? 'under a minute' : minutes + (minutes === 1 ? ' minute' : ' minutes');
+  };
+
+  // Dashboard panel: read every client the staff member can access, one after another.
+  function setUpAllClients(panel) {
+    const base = panel.dataset.basePath || '';
     const RECENT_MS = 60 * 60 * 1000;
+    const STOP_REASONS = {
+      not_signed_in: ['Xero is not signed in', 'Sign in to Xero in this browser, then start again. Clients already read are kept.'],
+      verify_signed_out: ['Akrio Verify is signed out', 'Sign in to Akrio Verify again, then start again.'],
+      verify_starting: ['Akrio Verify is starting up', 'Start again in a minute. Clients already read are kept.'],
+    };
+    const show = (node, visible) => { node.style.display = visible ? '' : 'none'; };
+
+    const head = el('div', null, 'display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;');
+    const titles = el('div', null, 'flex:1 1 320px;');
+    titles.appendChild(el('div', 'Bank feeds from Xero', 'font-weight:700;font-size:0.95rem;color:#2A3547;'));
+    titles.appendChild(el('div', 'Reads items to reconcile, bank balances and feed status for every client through the browser extension. Stay signed in to Xero and keep this tab open while it runs.', 'font-size:0.75rem;color:#7C8FAC;margin-top:2px;'));
+    const actions = el('div', null, 'display:flex;gap:8px;align-items:center;');
+    const start = el('button', 'Update all clients'); start.type = 'button'; start.className = 'btn btn-primary btn-sm';
+    const stop = el('button', 'Stop'); stop.type = 'button'; stop.className = 'btn btn-outlined btn-sm'; show(stop, false);
+    actions.appendChild(stop); actions.appendChild(start);
+    head.appendChild(titles); head.appendChild(actions); panel.appendChild(head);
+
+    const running = el('div', null, 'margin-top:12px;'); show(running, false);
+    const runningLine = el('div', null, 'display:flex;justify-content:space-between;gap:12px;font-size:0.78rem;color:#5A6A85;margin-bottom:6px;');
+    const current = el('span'); const eta = el('span', '', 'white-space:nowrap;font-variant-numeric:tabular-nums;');
+    runningLine.appendChild(current); runningLine.appendChild(eta);
+    const track = el('div', null, 'height:8px;border-radius:999px;background:#E5EAF2;overflow:hidden;');
+    const fill = el('div', null, 'height:100%;width:0%;border-radius:999px;background:#5D87FF;transition:width 0.4s ease;');
+    track.setAttribute('role', 'progressbar'); track.setAttribute('aria-valuemin', '0'); track.setAttribute('aria-valuemax', '100');
+    track.appendChild(fill); running.appendChild(runningLine); running.appendChild(track); panel.appendChild(running);
+
+    const stopBox = el('div', null, 'margin-top:12px;'); show(stopBox, false); panel.appendChild(stopBox);
+    const summary = el('div', null, 'display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px;font-size:0.8rem;'); show(summary, false); panel.appendChild(summary);
+    const failBox = el('details', null, 'margin-top:10px;border:1px solid #F7C6BB;border-radius:8px;background:#FFF8F6;'); show(failBox, false);
+    const failTitle = el('summary', '', 'cursor:pointer;padding:8px 12px;font-size:0.8rem;font-weight:600;color:#7A271A;');
+    const failList = el('div', null, 'padding:0 12px 8px;');
+    failBox.appendChild(failTitle); failBox.appendChild(failList); panel.appendChild(failBox);
+
+    const setFill = percent => { fill.style.width = percent + '%'; track.setAttribute('aria-valuenow', String(percent)); };
     let stopRequested = false;
-    stop.addEventListener('click', () => { stopRequested = true; note.textContent += ' Stopping after this client…'; });
+    stop.addEventListener('click', () => { stopRequested = true; stop.disabled = true; stop.textContent = 'Stopping…'; });
+
     start.addEventListener('click', async () => {
-      failures.textContent = '';
-      if (!(await extensionInstalled())) { note.textContent = 'The Akrio Verify browser extension is not installed in this browser.'; return; }
-      start.disabled = true; stop.hidden = false; stopRequested = false;
-      overall.hidden = false; overallFill.style.width = '0%'; overallFill.style.background = '#5D87FF';
-      let done = 0, failed = 0, skipped = 0;
+      show(stopBox, false); show(summary, false); show(failBox, false); failList.textContent = ''; stopBox.textContent = '';
+      if (!(await extensionInstalled())) {
+        stopBox.appendChild(failureBox({ code: 'no_extension' })); show(stopBox, true); return;
+      }
+      start.disabled = true; start.textContent = 'Updating…';
+      stop.disabled = false; stop.textContent = 'Stop'; show(stop, true);
+      stopRequested = false; fill.style.background = '#5D87FF'; setFill(0); show(running, true);
+      current.textContent = 'Getting the client list…'; eta.textContent = '';
+      let done = 0, failed = 0, skipped = 0, total = 0, stoppedBy = null;
       try {
         const { organisations } = await getJson(base + '/api/bank-screen/organisations');
+        total = organisations.length;
         // Clients read in the last hour are left alone, so a run that was interrupted carries on where it stopped.
         const recent = org => org.lastReadAt && Date.now() - Date.parse(org.lastReadAt) < RECENT_MS;
         skipped = organisations.filter(recent).length;
+        const startedAt = Date.now();
         for (const org of organisations) {
           if (stopRequested) break;
           if (recent(org)) continue;
-          note.textContent = 'Reading ' + (done + failed + skipped + 1) + ' of ' + organisations.length + ': ' + org.name;
-          overallFill.style.width = Math.round(((done + failed + skipped) / organisations.length) * 100) + '%';
-          try { await updateOne(base, bar.dataset.csrf, org.tenantId, org.shortCode); done++; }
+          const position = done + failed + skipped;
+          current.textContent = 'Reading ' + (position + 1) + ' of ' + total + ' · ' + org.name;
+          const read = done + failed;
+          eta.textContent = read >= 3 ? 'about ' + duration(((Date.now() - startedAt) / 1000 / read) * (total - position)) + ' left' : '';
+          setFill(Math.round((position / total) * 100));
+          try { await updateOne(base, panel.dataset.csrf, org.tenantId, org.shortCode); done++; }
           catch (error) {
-            failed++; failures.appendChild(el('div', org.name + ': ' + error.message));
+            failed++;
+            const row = el('div', null, 'display:flex;gap:10px;padding:6px 0;border-top:1px solid #F7DAD3;font-size:0.78rem;');
+            const link = el('a', org.name, 'flex:0 0 240px;font-weight:600;'); link.href = base + '/client/' + encodeURIComponent(org.tenantId);
+            row.appendChild(link); row.appendChild(el('span', error.message, 'color:#7A271A;'));
+            failList.appendChild(row);
             // Signed out of Xero or of Verify, or Verify restarting: every further client would fail the same way.
-            const STOP_REASONS = {
-              not_signed_in: 'Stopped: sign in to Xero in this browser, then start again.',
-              verify_signed_out: 'Stopped: sign in to Akrio Verify again, then start again.',
-              verify_starting: 'Stopped: Akrio Verify is starting up. Start again in a minute.',
-            };
-            if (STOP_REASONS[error.code]) { stopRequested = true; failures.appendChild(el('div', STOP_REASONS[error.code], 'font-weight:700;')); }
+            if (STOP_REASONS[error.code]) { stoppedBy = error.code; stopRequested = true; }
           }
         }
-        if (!stopRequested) overallFill.style.background = '#13B89A';
-        note.textContent = (stopRequested ? 'Stopped. ' : 'Finished. ') + done + ' updated, ' + failed + ' failed, ' + skipped + ' already read in the last hour, ' + (organisations.length - done - failed - skipped) + ' not attempted.';
-      } catch (error) { note.textContent = error.message; }
-      finally { start.disabled = false; stop.hidden = true; if (!stopRequested) overallFill.style.width = '100%'; }
+      } catch (error) {
+        stopBox.appendChild(alertBox('bad', 'The update could not start', error.message)); show(stopBox, true);
+      } finally {
+        const notAttempted = Math.max(0, total - done - failed - skipped);
+        const complete = total > 0 && notAttempted === 0;
+        show(running, false); show(stop, false);
+        start.disabled = false; start.textContent = complete ? 'Update all clients' : (total ? 'Carry on' : 'Update all clients');
+        if (stoppedBy) { stopBox.appendChild(alertBox('bad', STOP_REASONS[stoppedBy][0], STOP_REASONS[stoppedBy][1])); show(stopBox, true); }
+        if (total) {
+          summary.textContent = '';
+          summary.appendChild(el('strong', complete ? 'Finished' : 'Stopped before the end', 'color:' + (complete ? '#0B8F76' : '#B25E09') + ';margin-right:4px;'));
+          summary.appendChild(badge(done + ' updated', 'good'));
+          if (skipped) summary.appendChild(badge(skipped + ' already read in the last hour', 'muted'));
+          if (failed) summary.appendChild(badge(failed + ' failed', 'bad'));
+          if (notAttempted) summary.appendChild(badge(notAttempted + ' not attempted', 'warn'));
+          show(summary, true);
+        }
+        if (failed) { failTitle.textContent = failed + (failed === 1 ? ' client' : ' clients') + ' could not be read'; failBox.open = failed <= 5; show(failBox, true); }
+      }
     });
   }
 
