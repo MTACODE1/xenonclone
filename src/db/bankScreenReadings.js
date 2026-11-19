@@ -109,6 +109,16 @@ async function getLatestReading(orgId, { pool = getPool(), ensure = ensureTables
   };
 }
 
+// When each organisation was last read: Map(orgId -> Date). Used so an "update all" run can carry on where
+// an interrupted one stopped instead of reading every client again.
+async function getLastReadTimes({ pool = getPool(), ensure = ensureTables } = {}) {
+  await ensure(pool);
+  const [rows] = await pool.query(
+    `SELECT org_id, UNIX_TIMESTAMP(MAX(read_at)) AS read_at_unix FROM akrio_bank_screen_batches GROUP BY org_id`
+  );
+  return new Map(rows.map(row => [Number(row.org_id), new Date(Number(row.read_at_unix) * 1000)]));
+}
+
 // Organisation -> Xero short code, from the organisation record each sync already caches. Kept in
 // memory for ten minutes; a newly connected client appears after its first sync.
 let indexCache = null;
@@ -127,4 +137,4 @@ async function getShortCodeIndex({ pool = getPool(), now = Date.now() } = {}) {
   return index;
 }
 
-module.exports = { ensureTables, saveReading, getLatestReading, getShortCodeIndex };
+module.exports = { ensureTables, saveReading, getLatestReading, getLastReadTimes, getShortCodeIndex };

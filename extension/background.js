@@ -26,17 +26,20 @@ function waitForLoad(tabId) {
   });
 }
 
-async function readBankPage(shortCode) {
+async function readBankPage(shortCode, progress = () => {}) {
   if (!self.AkrioBankParser.isShortCode(shortCode)) return fail('bad_short_code', 'This client has no valid Xero short code.');
   let tab;
   try {
+    progress('opening');
     tab = await chrome.tabs.create({ url: self.AkrioBankParser.bankAccountsUrl(shortCode), active: false });
     await waitForLoad(tab.id);
+    progress('loaded');
     const loaded = await chrome.tabs.get(tab.id);
     let host = '';
     try { host = new URL(loaded.url || '').host; } catch (error) { host = ''; }
     if (host === 'login.xero.com') return fail('not_signed_in', 'Sign in to Xero in this browser, then try again.');
     if (host !== 'go.xero.com') return fail('unexpected_page', 'Xero opened a different page than expected.');
+    progress('reading');
     const [injected] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['parser.js', 'xero-read.js'] });
     const page = injected && injected.result;
     if (!page) return fail('not_readable', 'Xero\'s page could not be read.');
@@ -61,6 +64,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const fromVerify = sender.id === chrome.runtime.id && typeof sender.url === 'string'
     && ALLOWED_SENDERS.some(prefix => sender.url.startsWith(prefix));
   if (!fromVerify || !message || message.type !== 'READ_BANK_PAGE') return false;
-  queue = queue.then(() => readBankPage(message.shortCode)).then(sendResponse, () => sendResponse(fail('extension_error', 'Unexpected error.')));
+  // Stage updates go only to the Verify tab that asked; a closed tab simply misses them.
+  const progress = stage => {
+    if (sender.tab && sender.tab.id != null) chrome.tabs.sendMessage(sender.tab.id, { type: 'READ_PROGRESS', stage }).catch(() => {});
+  };
+  queue = queue.then(() => readBankPage(message.shortCode, progress)).then(sendResponse, () => sendResponse(fail('extension_error', 'Unexpected error.')));
   return true; // answer asynchronously
 });

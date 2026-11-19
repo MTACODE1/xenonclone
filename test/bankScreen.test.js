@@ -4,7 +4,7 @@ const http = require('node:http');
 const express = require('express');
 const { parseAmount, parseWidget, shortCodeFromPath, isShortCode, bankAccountsUrl } = require('../extension/parser');
 const { validateReading, buildShortCodeIndex, readingFreshness, ReadingError } = require('../src/services/bankScreenReading');
-const { saveReading, getLatestReading } = require('../src/db/bankScreenReadings');
+const { saveReading, getLatestReading, getLastReadTimes } = require('../src/db/bankScreenReadings');
 const { createBankScreenRouter } = require('../src/routes/bankScreen');
 
 // Widget text as Xero's page gives it (names and figures made up).
@@ -203,6 +203,14 @@ test('getLatestReading returns only the newest batch for that organisation', asy
   assert.equal(none, null);
 });
 
+test('getLastReadTimes maps each organisation to its newest read', async () => {
+  const pool = { query: async () => [[{ org_id: 5, read_at_unix: '1795082400' }, { org_id: '6', read_at_unix: 1795082460 }]] };
+  const times = await getLastReadTimes({ pool, ensure: async () => {} });
+  assert.equal(times.get(5).toISOString(), '2026-11-19T10:00:00.000Z');
+  assert.equal(times.get(6).toISOString(), '2026-11-19T10:01:00.000Z');
+  assert.equal(times.get(7), undefined);
+});
+
 // ---- routes, with fake data access and a fake session ----
 const ORGS = [
   { id: 1, name: 'Alpha Test Ltd', xero_tenant_id: 'tenant-1' },
@@ -219,6 +227,7 @@ function startApp(session, saved = []) {
     staffHasOrgAccess: async (staffId, orgId) => staffId === 9 && orgId === 1,
     getShortCodeIndex: async () => buildShortCodeIndex([{ orgId: 1, shortCode: '!alpha' }, { orgId: 2, shortCode: '!beta2' }]),
     saveReading: async (orgId, reading, staff) => { saved.push({ orgId, reading, staff }); return 41; },
+    getLastReadTimes: async () => new Map([[1, new Date('2026-11-19T10:00:00Z')]]),
     getLatestReading: async orgId => (orgId === 1 ? { batchId: 41, readAt: new Date(), readByName: 'T', accounts: [] } : null),
   }));
   return new Promise(resolve => { const server = http.createServer(app).listen(0, '127.0.0.1', () => resolve(server)); });
@@ -275,7 +284,7 @@ test('GET /organisations and /latest only cover clients the staff member can acc
   const server = await startApp(staff);
   try {
     const list = await call(server, 'GET', '/organisations');
-    assert.deepEqual(list.json.organisations, [{ tenantId: 'tenant-1', name: 'Alpha Test Ltd', shortCode: '!alpha' }]);
+    assert.deepEqual(list.json.organisations, [{ tenantId: 'tenant-1', name: 'Alpha Test Ltd', shortCode: '!alpha', lastReadAt: '2026-11-19T10:00:00.000Z' }]);
     const mine = await call(server, 'GET', '/latest/tenant-1');
     assert.equal(mine.status, 200);
     assert.equal(mine.json.shortCode, '!alpha');
@@ -287,6 +296,7 @@ test('GET /organisations and /latest only cover clients the staff member can acc
   try {
     const list = await call(adminServer, 'GET', '/organisations');
     assert.deepEqual(list.json.organisations.map(o => o.shortCode), ['!alpha', '!beta2']);
+    assert.equal(list.json.organisations[1].lastReadAt, null);
     assert.equal((await call(adminServer, 'GET', '/latest/tenant-2')).json.reading, null);
   } finally { adminServer.close(); }
 });

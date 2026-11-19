@@ -12,41 +12,90 @@
     if (event.source !== window || event.origin !== window.location.origin) return;
     const data = event.data;
     if (!data || data.source !== FROM_EXTENSION || !pending.has(data.requestId)) return;
-    const finish = pending.get(data.requestId);
+    const entry = pending.get(data.requestId);
+    if (data.type === 'READ_PROGRESS') { if (entry.onProgress) entry.onProgress(data.stage); return; }
     pending.delete(data.requestId);
-    finish(data);
+    entry.finish(data);
   });
 
-  function askExtension(message, timeoutMs) {
+  function askExtension(message, timeoutMs, onProgress) {
     return new Promise(resolve => {
       const requestId = 'r' + Date.now() + '-' + (++counter);
       const timer = setTimeout(() => { pending.delete(requestId); resolve(null); }, timeoutMs);
-      pending.set(requestId, data => { clearTimeout(timer); resolve(data); });
+      pending.set(requestId, { onProgress, finish: data => { clearTimeout(timer); resolve(data); } });
       window.postMessage({ source: FROM_PAGE, requestId, ...message }, window.location.origin);
     });
   }
 
   const extensionInstalled = async () => Boolean(await askExtension({ type: 'PING' }, 1500));
 
+  function problem(code, message) { const error = new Error(message); error.code = code; return error; }
+
   async function getJson(url, options) {
-    const response = await fetch(url, { credentials: 'same-origin', headers: { accept: 'application/json' }, ...options });
-    const type = response.headers.get('content-type') || '';
-    if (!type.includes('json')) throw new Error(response.status === 503 ? 'Akrio Verify is starting up. Try again in a minute.' : 'Your Akrio Verify session has ended. Sign in again.');
+    let response;
+    try {
+      response = await fetch(url, { credentials: 'same-origin', headers: { accept: 'application/json' }, ...options });
+    } catch (error) {
+      throw problem('verify_unreachable', 'Akrio Verify could not be reached. Check your connection.');
+    }
+    const isJson = (response.headers.get('content-type') || '').includes('json');
+    if (!isJson) {
+      // Only a bounce to the login page means the Verify session has ended; anything else is a server hiccup.
+      if (response.redirected && /\/login(\?|$)/.test(response.url)) throw problem('verify_signed_out', 'Your Akrio Verify session has ended. Sign in to Akrio Verify again.');
+      if (response.status === 503) throw problem('verify_starting', 'Akrio Verify is starting up. Try again in a minute.');
+      throw problem('verify_error', 'Akrio Verify gave an unexpected answer (status ' + response.status + '). Nothing was saved for this client.');
+    }
     const body = await response.json();
-    if (!response.ok) throw new Error(body.error || 'Akrio Verify could not save the reading.');
+    if (!response.ok) throw problem(response.status === 503 ? 'verify_starting' : 'verify_refused', body.error || 'Akrio Verify could not save the reading.');
     return body;
   }
 
   // Reads one client in Xero through the extension and saves it. Throws an Error with a plain message.
-  async function updateOne(base, csrfToken, tenantId, shortCode) {
-    const answer = await askExtension({ type: 'READ_BANK_PAGE', shortCode }, 120000);
+  async function updateOne(base, csrfToken, tenantId, shortCode, onStage = () => {}) {
+    onStage('opening');
+    const answer = await askExtension({ type: 'READ_BANK_PAGE', shortCode }, 120000, onStage);
     if (!answer) throw new Error('The extension did not answer in time.');
     if (!answer.ok) { const error = new Error(answer.message || 'Xero could not be read.'); error.code = answer.error; throw error; }
-    return getJson(base + '/api/bank-screen/readings', {
+    onStage('saving');
+    const save = () => getJson(base + '/api/bank-screen/readings', {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'application/json', 'x-csrf-token': csrfToken },
       body: JSON.stringify({ ...answer.reading, tenantId }),
     });
+    try { return await save(); } catch (error) {
+      // The figures are already read; a passing server hiccup should not lose them. Try the save once more.
+      if (error.code !== 'verify_error' && error.code !== 'verify_unreachable') throw error;
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      return save();
+    }
+  }
+
+  // A progress bar that follows the real stages of a read. Between stages it creeps forward slowly, so it keeps
+  // moving while Xero's page loads but never reaches the next stage's mark before that stage really starts.
+  const STAGES = {
+    opening: { at: 8, upTo: 35, label: 'Opening Xero…' },
+    loaded: { at: 40, upTo: 55, label: 'Xero is open. Waiting for the bank accounts to load…' },
+    reading: { at: 58, upTo: 88, label: 'Reading the bank accounts…' },
+    saving: { at: 92, upTo: 97, label: 'Saving to Akrio Verify…' },
+  };
+  function progressBar() {
+    const wrap = el('div', null, 'padding:14px 16px 0;');
+    const label = el('div', '', 'font-size:0.78rem;color:#5A6A85;margin-bottom:6px;');
+    const track = el('div', null, 'height:8px;border-radius:999px;background:#E5EAF2;overflow:hidden;');
+    const fill = el('div', null, 'height:100%;width:0%;border-radius:999px;background:#5D87FF;transition:width 0.4s ease;');
+    track.setAttribute('role', 'progressbar'); track.setAttribute('aria-valuemin', '0'); track.setAttribute('aria-valuemax', '100');
+    track.appendChild(fill); wrap.appendChild(label); wrap.appendChild(track); wrap.hidden = true;
+    let value = 0, ceiling = 0, timer = null;
+    const paint = () => { fill.style.width = value + '%'; track.setAttribute('aria-valuenow', String(Math.round(value))); };
+    const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
+    return {
+      element: wrap,
+      start() { stop(); value = 0; ceiling = 0; fill.style.background = '#5D87FF'; paint(); wrap.hidden = false;
+        timer = setInterval(() => { if (value < ceiling) { value = Math.min(ceiling, value + Math.max(0.3, (ceiling - value) * 0.06)); paint(); } }, 400); },
+      stage(name) { const stage = STAGES[name]; if (!stage) return; value = Math.max(value, stage.at); ceiling = stage.upTo; label.textContent = stage.label; paint(); },
+      done() { stop(); value = 100; label.textContent = 'Done.'; fill.style.background = '#13B89A'; paint(); setTimeout(() => { wrap.hidden = true; }, 1500); },
+      fail() { stop(); wrap.hidden = true; },
+    };
   }
 
   const money = value => (value == null ? '—' : (value < 0 ? '(' : '') + Math.abs(value).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + (value < 0 ? ')' : ''));
@@ -104,6 +153,8 @@
       case 'wrong_organisation': return alertBox('bad', 'Xero did not open this client', 'Your Xero login may not have access to this client. Check you are signed in to Xero with the practice login that can open it.', XERO_LOGIN);
       case 'timeout': case 'not_settled': return alertBox('bad', 'Xero took too long to load', 'Nothing was saved. Check your connection and try again.');
       case 'not_readable': case 'unexpected_page': return alertBox('bad', 'Xero\'s Bank accounts page could not be read', 'Nothing was saved. Open the client in Xero to check the Bank accounts page loads, then try again.');
+      case 'verify_signed_out': return alertBox('bad', 'Akrio Verify is signed out', 'Sign in to Akrio Verify again, then click "Update from Xero".');
+      case 'verify_starting': return alertBox('bad', 'Akrio Verify is starting up', 'Nothing was saved. Try again in a minute.');
       case 'no_extension': return alertBox('bad', 'Browser extension not found', 'Install the Akrio Verify extension in this browser, or reload this page if you have just installed it.');
       case 'no_short_code': return alertBox('bad', 'This client has not been synced yet', 'Run a sync for this client first, then try again.');
       default: return alertBox('bad', 'The bank feed could not be updated', error.message || 'Nothing was saved. Try again.');
@@ -201,6 +252,8 @@
     let data;
     const load = async () => { data = await getJson(base + '/api/bank-screen/latest/' + encodeURIComponent(tenantId)); renderReading(body, data); };
     try { await load(); } catch (error) { body.textContent = error.message; return; }
+    const progress = progressBar();
+    body.parentNode.insertBefore(progress.element, body);
     const failures = el('div');
     body.parentNode.insertBefore(failures, body);
     failures.style.cssText = 'padding:16px 16px 0;';
@@ -211,11 +264,14 @@
       if (!data.shortCode) { showFailure({ code: 'no_short_code' }); return; }
       if (!(await extensionInstalled())) { showFailure({ code: 'no_extension' }); return; }
       button.disabled = true; button.textContent = 'Reading Xero…';
+      progress.start();
       try {
-        await updateOne(base, card.dataset.csrf, tenantId, data.shortCode);
+        await updateOne(base, card.dataset.csrf, tenantId, data.shortCode, progress.stage);
         await load();
+        progress.done();
         note.style.color = '#0B8F76'; note.textContent = 'Updated just now';
       } catch (error) {
+        progress.fail();
         showFailure(error);
       } finally { button.disabled = false; button.textContent = 'Update from Xero'; }
     });
@@ -227,28 +283,44 @@
     const stop = bar.querySelector('[data-bank-screen-all-stop]');
     const note = bar.querySelector('[data-bank-screen-all-note]');
     const failures = bar.querySelector('[data-bank-screen-all-failures]');
+    const overall = el('div', null, 'flex-basis:100%;height:8px;border-radius:999px;background:#E5EAF2;overflow:hidden;');
+    const overallFill = el('div', null, 'height:100%;width:0%;background:#5D87FF;transition:width 0.4s ease;');
+    overall.appendChild(overallFill); overall.hidden = true; bar.insertBefore(overall, failures);
+    const RECENT_MS = 60 * 60 * 1000;
     let stopRequested = false;
     stop.addEventListener('click', () => { stopRequested = true; note.textContent += ' Stopping after this client…'; });
     start.addEventListener('click', async () => {
       failures.textContent = '';
       if (!(await extensionInstalled())) { note.textContent = 'The Akrio Verify browser extension is not installed in this browser.'; return; }
       start.disabled = true; stop.hidden = false; stopRequested = false;
-      let done = 0, failed = 0;
+      overall.hidden = false; overallFill.style.width = '0%'; overallFill.style.background = '#5D87FF';
+      let done = 0, failed = 0, skipped = 0;
       try {
         const { organisations } = await getJson(base + '/api/bank-screen/organisations');
+        // Clients read in the last hour are left alone, so a run that was interrupted carries on where it stopped.
+        const recent = org => org.lastReadAt && Date.now() - Date.parse(org.lastReadAt) < RECENT_MS;
+        skipped = organisations.filter(recent).length;
         for (const org of organisations) {
           if (stopRequested) break;
-          note.textContent = 'Reading ' + (done + failed + 1) + ' of ' + organisations.length + ': ' + org.name;
+          if (recent(org)) continue;
+          note.textContent = 'Reading ' + (done + failed + skipped + 1) + ' of ' + organisations.length + ': ' + org.name;
+          overallFill.style.width = Math.round(((done + failed + skipped) / organisations.length) * 100) + '%';
           try { await updateOne(base, bar.dataset.csrf, org.tenantId, org.shortCode); done++; }
           catch (error) {
             failed++; failures.appendChild(el('div', org.name + ': ' + error.message));
-            // Signed out of Xero or Verify: every further client would fail the same way.
-            if (error.code === 'not_signed_in' || /Sign in/.test(error.message)) { stopRequested = true; failures.appendChild(el('div', 'Stopped: sign in to Xero in this browser, then start again.', 'font-weight:700;')); }
+            // Signed out of Xero or of Verify, or Verify restarting: every further client would fail the same way.
+            const STOP_REASONS = {
+              not_signed_in: 'Stopped: sign in to Xero in this browser, then start again.',
+              verify_signed_out: 'Stopped: sign in to Akrio Verify again, then start again.',
+              verify_starting: 'Stopped: Akrio Verify is starting up. Start again in a minute.',
+            };
+            if (STOP_REASONS[error.code]) { stopRequested = true; failures.appendChild(el('div', STOP_REASONS[error.code], 'font-weight:700;')); }
           }
         }
-        note.textContent = (stopRequested ? 'Stopped. ' : 'Finished. ') + done + ' updated, ' + failed + ' failed, ' + (organisations.length - done - failed) + ' not attempted.';
+        if (!stopRequested) overallFill.style.background = '#13B89A';
+        note.textContent = (stopRequested ? 'Stopped. ' : 'Finished. ') + done + ' updated, ' + failed + ' failed, ' + skipped + ' already read in the last hour, ' + (organisations.length - done - failed - skipped) + ' not attempted.';
       } catch (error) { note.textContent = error.message; }
-      finally { start.disabled = false; stop.hidden = true; }
+      finally { start.disabled = false; stop.hidden = true; if (!stopRequested) overallFill.style.width = '100%'; }
     });
   }
 

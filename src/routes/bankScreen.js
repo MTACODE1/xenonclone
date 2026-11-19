@@ -9,7 +9,7 @@ const { validateReading, readingFreshness, ReadingError, STALE_AFTER_DAYS } = re
 function createBankScreenRouter(deps) {
   const {
     getAllOrganisations, getOrganisationById, getOrganisationByTenantId, staffHasOrgAccess,
-    getShortCodeIndex, saveReading, getLatestReading,
+    getShortCodeIndex, saveReading, getLatestReading, getLastReadTimes,
   } = deps;
   const router = express.Router();
 
@@ -27,11 +27,13 @@ function createBankScreenRouter(deps) {
   router.get('/organisations', async (req, res, next) => {
     try {
       const { byOrg } = await getShortCodeIndex();
+      const lastRead = await getLastReadTimes();
       const organisations = [];
       for (const org of await getAllOrganisations()) {
         const shortCode = byOrg.get(org.id);
         if (!shortCode || !(await canAccess(req, org.id))) continue;
-        organisations.push({ tenantId: org.xero_tenant_id, name: org.name, shortCode });
+        const readAt = lastRead.get(org.id);
+        organisations.push({ tenantId: org.xero_tenant_id, name: org.name, shortCode, lastReadAt: readAt ? readAt.toISOString() : null });
       }
       res.json({ organisations });
     } catch (error) { next(error); }
