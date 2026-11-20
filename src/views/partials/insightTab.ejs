@@ -316,6 +316,7 @@ const hasAnyData = !!(pnl || bs || ctax);
     style="border:1px solid var(--ins-border);border-radius:6px;padding:6px 8px;font-size:0.85rem;">
   <button type="button" id="insightToApply" class="btn-outline-teal">Show</button>
   <% if (shownDate) { %><a href="?panel=insight" style="color:var(--ins-teal);">Back to latest</a><% } %>
+  <% if (shownDate && hasAnyData) { %><button type="button" id="insightRefetch" class="btn-outline-teal" title="Fetch this date's figures from Xero again">Fetch again</button><% } %>
   <span id="insightToNote">
     <% if (shownDate && hasAnyData) { %>Figures as at <%= shownDate.split('-').reverse().join('/') %><% if (insight.meta && insight.meta.data && insight.meta.data.errors && insight.meta.data.errors.length) { %> (some reports could not be fetched)<% } %>
     <% } else if (!shownDate && hasAnyData) { %>Latest figures, from the last sync<% } %>
@@ -331,6 +332,27 @@ const hasAnyData = !!(pnl || bs || ctax);
   };
   document.getElementById('insightToApply').addEventListener('click', go);
   input.addEventListener('keydown', function (event) { if (event.key === 'Enter') go(); });
+  // Fetches the figures as at one date from Xero's reports (queued like a sync), then reloads the page.
+  window.akrioInsightFetch = async function (date, btn) {
+    var label = btn.textContent;
+    var fail = function (message) { btn.disabled = false; btn.textContent = label === 'Fetching from Xero…' ? 'Try again' : label; alert('The figures could not be fetched: ' + message); };
+    btn.disabled = true; btn.textContent = 'Fetching from Xero…';
+    try {
+      var resp = await fetch('<%= basePath %>/client/<%= org.xero_tenant_id %>/insight/fetch?date=' + encodeURIComponent(date), { method: 'POST', headers: { 'x-csrf-token': '<%= csrfToken %>' } });
+      var data = await resp.json();
+      if (!data.jobId) return fail(data.error || 'unknown error');
+      var stream = new EventSource('<%= basePath %>/sync-jobs/' + encodeURIComponent(data.jobId) + '/events');
+      stream.onmessage = function (event) {
+        var job = JSON.parse(event.data);
+        if (job.progress && job.progress.message) btn.textContent = job.progress.message;
+        if (job.status === 'succeeded') { stream.close(); window.location.reload(); }
+        else if (job.status === 'failed') { stream.close(); fail(job.error || 'Xero did not return the reports'); }
+      };
+      stream.onerror = function () { stream.close(); fail('the connection was lost; reload the page to check'); };
+    } catch (error) { fail(error.message); }
+  };
+  var again = document.getElementById('insightRefetch');
+  if (again) again.addEventListener('click', function () { window.akrioInsightFetch('<%= shownDate || '' %>', again); });
 })();
 </script>
 <% } %>
@@ -341,22 +363,10 @@ const hasAnyData = !!(pnl || bs || ctax);
   <button type="button" id="insightFetchBtn" class="btn-outline-teal" style="margin-top:12px;" disabled>Fetching from Xero…</button>
 </div>
 <script>
-window.addEventListener('load', async function () {
+window.addEventListener('load', function () {
   var btn = document.getElementById('insightFetchBtn');
-  var fail = function (message) { btn.disabled = false; btn.textContent = 'Try again'; btn.onclick = function () { window.location.reload(); }; alert('The figures could not be fetched: ' + message); };
-  try {
-    var resp = await fetch('<%= basePath %>/client/<%= org.xero_tenant_id %>/insight/fetch?date=<%= shownDate %>', { method: 'POST', headers: { 'x-csrf-token': '<%= csrfToken %>' } });
-    var data = await resp.json();
-    if (!data.jobId) return fail(data.error || 'unknown error');
-    var stream = new EventSource('<%= basePath %>/sync-jobs/' + encodeURIComponent(data.jobId) + '/events');
-    stream.onmessage = function (event) {
-      var job = JSON.parse(event.data);
-      if (job.progress && job.progress.message) btn.textContent = job.progress.message;
-      if (job.status === 'succeeded') { stream.close(); window.location.reload(); }
-      else if (job.status === 'failed') { stream.close(); fail(job.error || 'Xero did not return the reports'); }
-    };
-    stream.onerror = function () { stream.close(); fail('the connection was lost; reload the page to check'); };
-  } catch (error) { fail(error.message); }
+  btn.onclick = function () { window.akrioInsightFetch('<%= shownDate %>', btn); };
+  window.akrioInsightFetch('<%= shownDate %>', btn);
 });
 </script>
 <% } else if (!hasAnyData) { %>

@@ -55,3 +55,11 @@ test('Insight figures are among the results saved across deploys', () => {
   assert.ok(RESULT_TABLES.includes('insight_cache'));
   assert.ok(RESULT_TABLES.includes('transaction_daily') && RESULT_TABLES.includes('transaction_daily_meta'));
 });
+
+test('monthly P&L start date: none for the current month (as the sync always did), the 1st for an earlier month', () => {
+  const { monthlyPnlFromDate } = require('../src/services/insightSync');
+  assert.equal(monthlyPnlFromDate('2026-11-21', '2026-11-21'), undefined);
+  assert.equal(monthlyPnlFromDate('2026-11-03', '2026-11-21'), undefined);
+  assert.equal(monthlyPnlFromDate('2026-10-31', '2026-11-21'), '2026-10-01');
+  assert.equal(monthlyPnlFromDate('2025-02-14', '2026-11-21'), '2025-02-01');
+});

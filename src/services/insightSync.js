@@ -289,6 +289,10 @@ function parseBalanceSheet(report, ctx = {}) {
 }
 
 // ---- Main sync ----
+function monthlyPnlFromDate(toDate, realToday) {
+  return toDate.slice(0, 7) === realToday.slice(0, 7) ? undefined : `${toDate.slice(0, 7)}-01`;
+}
+
 async function syncInsight(tenantId, orgId, options = {}) {
   const today = options.toDate ? new Date(options.toDate) : new Date();
   const todayStr = today.toISOString().slice(0, 10);
@@ -321,10 +325,15 @@ async function syncInsight(tenantId, orgId, options = {}) {
   // too, so the chart looked like relentless growth and "this month" was really "this year so
   // far"). Confirmed against Xero directly — dropping fromDate reproduces the real per-month
   // numbers exactly.
+  // With no fromDate Xero starts the newest column at the first day of the REAL current month, so an end date in
+  // an earlier month ("show data up to 31 Oct") was refused ("fromDate must be before toDate"). For an end date
+  // outside the current month, start that column at the first day of the end date's own month: one calendar
+  // month per column, exactly as before. The normal sync (end date today) is left as it was.
+  const monthlyFromDate = monthlyPnlFromDate(todayStr, new Date().toISOString().slice(0, 10));
   let monthlyPnL = null;
   try {
     const resp = await apiCall(tenantId, async (xero, tid) =>
-      xero.accountingApi.getReportProfitAndLoss(tid, undefined, todayStr, 11, 'MONTH', undefined, undefined, undefined, undefined, true, false)
+      xero.accountingApi.getReportProfitAndLoss(tid, monthlyFromDate, todayStr, 11, 'MONTH', undefined, undefined, undefined, undefined, true, false)
     );
     const report = resp?.body?.reports?.[0];
     if (report) { monthlyPnL = parsePnL(report); saveInsightData(orgId, 'pnl', monthlyPnL); }
@@ -423,4 +432,4 @@ async function syncInsight(tenantId, orgId, options = {}) {
   return { ok: errors.length === 0, errors };
 }
 
-module.exports = { syncInsight, getFinancialYearPeriods, CASH_HEALTH_CATEGORIES };
+module.exports = { syncInsight, getFinancialYearPeriods, CASH_HEALTH_CATEGORIES, monthlyPnlFromDate };
