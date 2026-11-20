@@ -26,6 +26,7 @@ function waitForLoad(tabId) {
 async function readBankPage(shortCode, progress = () => {}) {
   if (!self.AkrioBankParser.isShortCode(shortCode)) return fail('bad_short_code', 'This client has no valid Xero short code.');
   let tab;
+  const closeLater = setTimeout(() => { if (tab && tab.id != null) chrome.tabs.remove(tab.id).catch(() => {}); }, READ_DEADLINE_MS + 1000);
   try {
     progress('opening');
     tab = await chrome.tabs.create({ url: self.AkrioBankParser.bankAccountsUrl(shortCode), active: false });
@@ -60,6 +61,7 @@ async function readBankPage(shortCode, progress = () => {}) {
     if (page.host !== 'go.xero.com' || page.shortCode !== shortCode) {
       return fail('wrong_organisation', 'Xero did not open this client. Check that your Xero login has access to it.');
     }
+    if (page.xeroError) return fail('xero_error', 'Xero says it cannot show this client\'s Bank accounts page right now. Try again later, or open it in Xero to check.');
     if (!page.settled) return fail('not_settled', 'Xero was too slow to show the bank accounts. Try again in a moment.');
     if (!page.accounts.length && !page.pageRendered) {
       return fail('not_readable', 'Xero\'s Bank accounts page did not load for this client.');
@@ -69,8 +71,21 @@ async function readBankPage(shortCode, progress = () => {}) {
     if (error && error.message === 'timeout') return fail('timeout', 'Xero took too long to load.');
     return fail('extension_error', 'The Xero page could not be read: ' + String((error && error.message) || error).slice(0, 200));
   } finally {
+    clearTimeout(closeLater);
     if (tab && tab.id != null) chrome.tabs.remove(tab.id).catch(() => {});
   }
+}
+
+// One read can never hold up the ones after it. Chrome may pause a background tab (for example while the
+// computer is busy or the window is hidden), and then the page script never finishes; without a deadline
+// every later client would wait behind it and the whole run would stall.
+const READ_DEADLINE_MS = 110000;
+function withDeadline(work) {
+  let timer;
+  const deadline = new Promise(resolve => {
+    timer = setTimeout(() => resolve(fail('timeout', 'Xero took too long to load.')), READ_DEADLINE_MS);
+  });
+  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
 }
 
 let queue = Promise.resolve();
@@ -82,6 +97,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const progress = stage => {
     if (sender.tab && sender.tab.id != null) chrome.tabs.sendMessage(sender.tab.id, { type: 'READ_PROGRESS', stage }).catch(() => {});
   };
-  queue = queue.then(() => readBankPage(message.shortCode, progress)).then(sendResponse, () => sendResponse(fail('extension_error', 'Unexpected error.')));
+  queue = queue.then(() => withDeadline(readBankPage(message.shortCode, progress))).then(sendResponse, () => sendResponse(fail('extension_error', 'Unexpected error.')));
   return true; // answer asynchronously
 });

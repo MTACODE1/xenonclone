@@ -27,7 +27,21 @@
     });
   }
 
-  const extensionInstalled = async () => Boolean(await askExtension({ type: 'PING' }, 1500));
+  // The extension's helper is only added once this page has finished loading, which on a busy page can take
+  // several seconds. Ask a few times before deciding it is missing, so the "Add the extension" banner never
+  // shows to someone who has it. The answer is remembered for the rest of the page's life.
+  let installedCheck = null;
+  const extensionInstalled = () => {
+    if (!installedCheck) {
+      installedCheck = (async () => {
+        for (let attempt = 0; attempt < 8; attempt++) {
+          if (await askExtension({ type: 'PING' }, 1000)) return true;
+        }
+        return false;
+      })().then(found => { if (!found) installedCheck = null; return found; });
+    }
+    return installedCheck;
+  };
 
   function problem(code, message) { const error = new Error(message); error.code = code; return error; }
 
@@ -152,6 +166,7 @@
       case 'not_signed_in': return alertBox('bad', 'Xero is not signed in', 'Sign in to Xero in this browser, then click "Update from Xero" again.', XERO_LOGIN);
       case 'wrong_organisation': return alertBox('bad', 'Xero did not open this client', 'Your Xero login may not have access to this client. Check you are signed in to Xero with the practice login that can open it.', XERO_LOGIN);
       case 'timeout': case 'not_settled': return alertBox('bad', 'Xero took too long to load', 'Nothing was saved. Xero is slow at the moment. Try again in a minute.');
+      case 'xero_error': return alertBox('bad', 'Xero cannot show this page right now', 'Xero itself is showing an error for this client\'s Bank accounts page. Nothing was saved. Try again later.');
       case 'not_readable': case 'unexpected_page': return alertBox('bad', 'Xero\'s Bank accounts page could not be read', 'Nothing was saved. Open the client in Xero to check the Bank accounts page loads, then try again.');
       case 'verify_signed_out': return alertBox('bad', 'Akrio Verify is signed out', 'Sign in to Akrio Verify again, then click "Update from Xero".');
       case 'verify_starting': return alertBox('bad', 'Akrio Verify is starting up', 'Nothing was saved. Try again in a minute.');
@@ -311,7 +326,7 @@
 
   const duration = seconds => {
     const minutes = Math.round(seconds / 60);
-    return minutes < 1 ? 'under a minute' : minutes + (minutes === 1 ? ' minute' : ' minutes');
+    return minutes < 1 ? 'less than a minute' : 'about ' + minutes + (minutes === 1 ? ' minute' : ' minutes');
   };
 
   // Dashboard panel: read every client the staff member can access, one after another.
@@ -370,8 +385,14 @@
         const { organisations } = await getJson(base + '/api/bank-screen/organisations');
         total = organisations.length;
         // Clients read in the last hour are left alone, so a run that was interrupted carries on where it stopped.
-        const recent = org => org.lastReadAt && Date.now() - Date.parse(org.lastReadAt) < RECENT_MS;
-        skipped = organisations.filter(recent).length;
+        // Decided once at the start: a client that passes the one-hour mark during the run must not be both
+        // skipped and read (that is how "116 of 115" appeared).
+        const runStartedAt = Date.now();
+        const recentIds = new Set(organisations
+          .filter(org => org.lastReadAt && runStartedAt - Date.parse(org.lastReadAt) < RECENT_MS)
+          .map(org => org.tenantId));
+        const recent = org => recentIds.has(org.tenantId);
+        skipped = recentIds.size;
         const startedAt = Date.now();
         for (const org of organisations) {
           if (stopRequested) break;
@@ -379,7 +400,7 @@
           const position = done + failed + skipped;
           current.textContent = 'Reading ' + (position + 1) + ' of ' + total + ' · ' + org.name;
           const read = done + failed;
-          eta.textContent = read >= 3 ? 'about ' + duration(((Date.now() - startedAt) / 1000 / read) * (total - position)) + ' left' : '';
+          eta.textContent = read >= 3 ? duration(((Date.now() - startedAt) / 1000 / read) * (total - position)) + ' left' : '';
           setFill(Math.round((position / total) * 100));
           try { await updateOne(base, panel.dataset.csrf, org.tenantId, org.shortCode); done++; }
           catch (error) {
