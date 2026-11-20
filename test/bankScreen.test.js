@@ -370,3 +370,47 @@ test('POST /readings never recalculates when nothing was saved', async () => {
     assert.deepEqual(recomputed, []);
   } finally { failingSave.close(); }
 });
+
+// ---- unreconciled statement lines (the "items to reconcile" list) ----
+const linesParser = require('../extension/parser.js');
+const COLUMNS = ['', 'Date', 'Type', 'Payee', 'Particulars', 'Code', 'Reference', 'Analysis Code', 'Spent', 'Received', 'Balance', 'Source', 'Status'];
+
+test('statement rows become lines: only Unreconciled rows with a date, amounts by column heading', () => {
+  const lines = linesParser.parseStatementRows(COLUMNS, [
+    ['', '12 Oct 2026', 'Debit', '', 'CARD PAYMENT SHOP', '', 'REF 1', '', '10.99', '', '(13,319.39)', 'Bank Feed', 'Unreconciled'],
+    ['', '15 Jun 2026', 'Credit', 'A Payer', 'TRANSFER IN', 'C1', '', '', '', '1,150.00', '', 'Bank Feed', 'Unreconciled'],
+    ['', '9 Oct 2026', 'Debit', '', 'ALREADY DONE', '', '', '', '5.00', '', '', 'Bank Feed', 'Reconciled'],
+    ['There are no statement lines to display'],
+    ['', 'not a date', 'Debit', '', 'X', '', '', '', '1.00', '', '', 'Bank Feed', 'Unreconciled'],
+  ]);
+  assert.deepEqual(lines, [
+    { date: '2026-10-12', type: 'Debit', payee: null, particulars: 'CARD PAYMENT SHOP', code: null, reference: 'REF 1', spent: 10.99, received: null, source: 'Bank Feed' },
+    { date: '2026-06-15', type: 'Credit', payee: 'A Payer', particulars: 'TRANSFER IN', code: 'C1', reference: null, spent: null, received: 1150, source: 'Bank Feed' },
+  ]);
+  // A moved column is still read by its heading.
+  const moved = linesParser.parseStatementRows(['Status', 'Received', 'Spent', 'Date'], [['Unreconciled', '', '7.50', '1 Jan 2026']]);
+  assert.equal(moved[0].spent, 7.5);
+  assert.equal(moved[0].date, '2026-01-01');
+  // A table without the columns we need is refused, not guessed at.
+  assert.equal(linesParser.parseStatementRows(['Date', 'Amount', 'Status'], [['1 Jan 2026', '5', 'Unreconciled']]), null);
+});
+
+test('Xero dates, account ids and the statement page address', () => {
+  assert.equal(linesParser.parseXeroDate('1 Feb 2026'), '2026-02-01');
+  assert.equal(linesParser.parseXeroDate('Feb 1'), null); // no year: never guessed
+  assert.equal(linesParser.parseXeroDate('32 Feb 2026'), null);
+  const id = 'dad3cde729bb42d1990cde6ee3f88d74';
+  assert.equal(linesParser.accountIdFromHref('/Bank/BankTransactions.aspx?accountId=DAD3CDE729BB42D1990CDE6EE3F88D74'), id);
+  assert.equal(linesParser.accountIdFromHref('/BankRec/BankRec.aspx?accountID=dad3cde7-29bb-42d1-990c-de6ee3f88d74&x=1'), id);
+  assert.equal(linesParser.accountIdFromHref('/Bank/BankTransactions.aspx?accountId=javascript:alert(1)'), null);
+  assert.equal(linesParser.accountIdFromHref('https://evil.example/?other=1'), null);
+  assert.equal(linesParser.isAccountId(id), true);
+  assert.equal(linesParser.isAccountId(id + '0'), false);
+  const url = new URL(linesParser.statementsUrl('!AbC12', id));
+  assert.equal(url.origin, 'https://go.xero.com');
+  assert.equal(url.pathname, '/organisationlogin/default.aspx');
+  assert.equal(url.searchParams.get('shortcode'), '!AbC12');
+  assert.equal(url.searchParams.get('redirecturl'), '/Bank/Statements.aspx?accountID=' + id);
+  assert.equal(linesParser.sameName('  Main   Account ', 'main account'), true);
+  assert.equal(linesParser.sameName('PayPal', 'PayPal 1'), false);
+});

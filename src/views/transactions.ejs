@@ -3,7 +3,7 @@
 <div class="page-header page-header-flex">
   <div>
     <h4>Transaction Counts</h4>
-    <p><%= (query.period || 'since_lock_date').replaceAll('_',' ') %> — data from the latest matching sync</p>
+    <p><%= (query.period || 'since_lock_date').replaceAll('_',' ') %>: worked out from each client's last sync. Changing the period needs no new sync; each client's own dates are shown under its name.</p>
   </div>
   <button onclick="exportCSV()" class="btn btn-outlined">
     <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -70,12 +70,13 @@
             <a href="<%= basePath %>/client/<%= row.xero_tenant_id %>" class="font-medium"><%= row.name %></a>
             <% if (row.client_ref) { %><div class="text-muted" style="font-size: 0.75rem;"><%= row.client_ref %></div><% } %>
             <% if (row.connection_status === 'disconnected') { %><div class="text-error" style="font-size: 0.75rem;">Disconnected</div><% } %>
+            <% if (row.period_start && row.period_end) { %><div class="text-muted" style="font-size: 0.7rem;"><%= row.period_start.split('-').reverse().join('/') %> to <%= row.period_end.split('-').reverse().join('/') %></div><% } %>
           </td>
           <td class="text-right">
             <% if (row.turnover != null) { %>
               <div class="font-medium"><%= fmtGbp(row.turnover) %></div>
               <div class="text-muted" style="font-size: 0.75rem;"><%= perMthGbp(row.turnover, mth) %></div>
-            <% } else { %><span class="text-muted">Not synced</span><% } %>
+            <% } else { %><span class="text-muted" title="This client has not been synced since per-day figures were introduced. It fills in at the next nightly sync.">Not synced yet</span><% } %>
           </td>
           <td class="text-right">
             <% if (row.total_transactions != null) { %>

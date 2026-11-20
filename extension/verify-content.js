@@ -21,9 +21,12 @@
     if (!data || data.source !== FROM_PAGE || typeof data.requestId !== 'string') return;
     if (data.type === 'PING') {
       reply({ type: 'PONG', requestId: data.requestId, version: chrome.runtime.getManifest().version });
-    } else if (data.type === 'READ_BANK_PAGE') {
+    } else if (data.type === 'READ_BANK_PAGE' || data.type === 'READ_BANK_LINES') {
       activeRequestId = data.requestId;
-      chrome.runtime.sendMessage({ type: 'READ_BANK_PAGE', shortCode: data.shortCode }, response => {
+      const request = data.type === 'READ_BANK_LINES'
+        ? { type: 'READ_BANK_LINES', shortCode: data.shortCode, accountName: data.accountName }
+        : { type: 'READ_BANK_PAGE', shortCode: data.shortCode };
+      chrome.runtime.sendMessage(request, response => {
         if (activeRequestId === data.requestId) activeRequestId = null;
         const failed = chrome.runtime.lastError || !response;
         reply({ type: 'READ_RESULT', requestId: data.requestId,

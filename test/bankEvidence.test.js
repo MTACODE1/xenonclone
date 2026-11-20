@@ -277,3 +277,33 @@ test('a recalculation with no period given uses the period the sync stored on Un
     queries.getOrganisationById = originalOrg;
   }
 });
+
+// Found comparing all clients on 20 Nov 2026: a fully reconciled account shows "Reconciled" and its statement balance
+// only, and a client with no bank accounts in Xero shows none. Both were reported "Not configured" instead of OK.
+test('a reconciled account with no "Balance in Xero" shown is compared as equal, so the check is OK', () => {
+  const result = buildBankEvidence({
+    reading: reading([screen('Monzo', { itemsToReconcile: null, reconciled: true, balanceInXero: null, statementBalance: 19443.71 })]), now: NOW,
+  });
+  assert.equal(result.bankBalance.count, 0);
+  assert.match(result.bankBalance.label, /^statement_comparison_as_of_/);
+  assert.equal(result.unprocessed.count, 0);
+  assert.equal(result.accounts[0].xeroBalance, 19443.71);
+  assert.equal(result.accounts[0].difference, 0);
+  // If Xero says the balances differ, a missing Xero balance stays unknown rather than equal.
+  const differs = buildBankEvidence({ reading: reading([screen('Monzo', { reconciled: true, balancesDiffer: true, balanceInXero: null, statementBalance: 5 })]), now: NOW });
+  assert.equal(differs.bankBalance.count, null);
+  // Not reconciled and no Xero balance: unknown too.
+  const unknown = buildBankEvidence({ reading: reading([screen('Monzo', { reconciled: false, balanceInXero: null, statementBalance: 5 })]), now: NOW });
+  assert.equal(unknown.bankBalance.count, null);
+});
+
+test('a fresh reading with no bank accounts at all is clean for both checks; a stale one still needs updating', () => {
+  const empty = buildBankEvidence({ reading: reading([]), now: NOW });
+  assert.equal(empty.bankBalance.count, 0);
+  assert.match(empty.bankBalance.label, /^statement_comparison_as_of_2026-11-20$/);
+  assert.equal(empty.unprocessed.count, 0);
+  assert.match(empty.unprocessed.label, /^bank_screen_2026-11-20$/);
+  const staleEmpty = buildBankEvidence({ reading: reading([], new Date('2026-10-01T00:00:00Z')), now: NOW });
+  assert.equal(staleEmpty.bankBalance.count, null);
+  assert.equal(staleEmpty.unprocessed.count, null);
+});

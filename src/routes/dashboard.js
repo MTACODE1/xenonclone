@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const {
-  getAllOrganisations, getOrganisationByTenantId, getSetting, getAllTransactionCounts,
+  getAllOrganisations, getOrganisationByTenantId, getSetting, getAllTransactionActivity,
   getPanoramaOrganisations, getOrgIdsForStaff, getStaffForOrg, getAllStaff, getReviewFrom,
 } = require('../db/queries');
 const { isStaffManager } = require('../services/staffPermissions');
@@ -194,16 +194,13 @@ router.get('/bank-lines.csv', async (req, res, next) => {
 router.get('/transactions', async (req, res, next) => {
   const selectedPeriod = PERIOD_TYPES.includes(req.query.period)
     ? req.query.period : (getSetting('default_sync_period') || 'since_lock_date');
-  let custom = null;
+  const input = periodInput(req.query, selectedPeriod);
   if (selectedPeriod === 'custom') {
-    try {
-      custom = resolvePeriod(periodInput(req.query, selectedPeriod));
-    } catch (error) {
-      return res.status(400).send(error.message);
-    }
+    // Fail early with a clear message; each client's own period is resolved in getAllTransactionActivity.
+    try { resolvePeriod(input); } catch (error) { return res.status(400).send(error.message); }
   }
   try {
-  let rows = await getAllTransactionCounts(selectedPeriod, custom?.start || null, custom?.end || null);
+  let rows = await getAllTransactionActivity(input);
   const { sort, search } = req.query;
   if (search) rows = rows.filter(r => r.name.toLowerCase().includes(search.toLowerCase()));
   if (sort === 'turnover') rows.sort((a, b) => (b.turnover || 0) - (a.turnover || 0));

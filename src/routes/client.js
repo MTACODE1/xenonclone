@@ -8,7 +8,7 @@ const {
   getOrganisationByTenantId, getIssuesForOrg, getIssueByCheckType, updateOrganisationMeta,
   updateOrganisationSupplierPatternLookback,
   updateOrganisationCheckConfig,
-  getTransactionCountsForOrg, getBankReconciliationForOrg, updateStatementBalance,
+  getTransactionCountsForOrg, getTransactionActivityForOrg, getBankReconciliationForOrg, updateStatementBalance,
   getExcludedBankAccountIds, setBankAccountExcluded, getLatestStatementImportsForOrg,
   getExpenseAccountsForOrg, getAccountCheckConfigurationForOrg,
   setAccountCheckConfiguration, ensureAccountCodes, getLiveScreenItemTotal, getIssueFindings, getIssueFindingSummary, setFindingReviewStates,
@@ -102,7 +102,9 @@ function clientViewData(org, query = {}) {
     org, issues, checkDefs, selectedPeriod, periodQuery,
     isStale: !org.last_successful_sync_at ||
       Date.now() - new Date(org.last_successful_sync_at).getTime() > 36 * 60 * 60 * 1000,
-    txCounts: getTransactionCountsForOrg(org.id, selectedPeriod.type, selectedPeriod.start, selectedPeriod.end),
+    // Any period, added up from the per-day figures; the last sync's stored totals only if there are none yet.
+    txCounts: getTransactionActivityForOrg(org.id, selectedPeriod)
+      || getTransactionCountsForOrg(org.id, selectedPeriod.type, selectedPeriod.start, selectedPeriod.end),
     bankReconciliation: getBankReconciliationForOrg(org.id),
     excludedBankAccountIds: getExcludedBankAccountIds(org.id),
     statementImports: getStatementImportsForOrg(org.id),

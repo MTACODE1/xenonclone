@@ -344,6 +344,26 @@ function initSchema() {
       synced_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
+    -- Counts and turnover per day, so any period can be added up without a sync (see transactionActivity.js).
+    CREATE TABLE IF NOT EXISTS transaction_daily (
+      org_id INTEGER NOT NULL,
+      day DATE NOT NULL,
+      customer_invoices INTEGER NOT NULL DEFAULT 0,
+      supplier_bills INTEGER NOT NULL DEFAULT 0,
+      credit_notes_sales INTEGER NOT NULL DEFAULT 0,
+      credit_notes_purchase INTEGER NOT NULL DEFAULT 0,
+      bank_processed INTEGER NOT NULL DEFAULT 0,
+      journals INTEGER NOT NULL DEFAULT 0,
+      turnover REAL NOT NULL DEFAULT 0,
+      PRIMARY KEY (org_id, day)
+    );
+    -- One row per client: when its daily figures were last rebuilt, and whether the journal count is known.
+    CREATE TABLE IF NOT EXISTS transaction_daily_meta (
+      org_id INTEGER PRIMARY KEY,
+      journals_known INTEGER NOT NULL DEFAULT 0,
+      built_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS sync_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       org_id INTEGER NOT NULL REFERENCES organisations(id) ON DELETE CASCADE,

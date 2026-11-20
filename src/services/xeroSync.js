@@ -1,9 +1,10 @@
 const { apiCall } = require('./xeroClient');
 const { syncInsight } = require('./insightSync');
+const { buildDailyActivity } = require('./transactionActivity');
 const {
   upsertOrganisation, upsertHealthScore,
   deleteIssuesForOrg, insertIssue: insertIssueDb, replaceIssueForCheck, getOrganisationByTenantId, getIssuesForOrg, getScoringObservations,
-  upsertTransactionCounts, getSetting, upsertBankReconciliationXeroBalance,
+  upsertTransactionCounts, replaceTransactionDaily, getSetting, upsertBankReconciliationXeroBalance,
   getBankReconciliationForOrg, upsertChartOfAccountsCache, getAccountCheckConfigurationForOrg,
   getExcludedBankAccountIds,
   getFiledAccountsForOrg, getLatestStatementImportsForOrg, getStatementLinesForOrg,
@@ -2772,6 +2773,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     // with a timeout so a client whose full journal history would take unreasonably long just
     // skips its journal count for this sync, instead of blocking the whole one-at-a-time queue.
     let journalCount = 0;
+    let journalsForDaily = null; // stays null when the journal download is skipped or times out
     try {
       const allJournals = await withTimeout(
         refreshCachedEntities(
@@ -2783,6 +2785,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
       );
       journalCount = allJournals
         .filter(item => isWithinPeriod(toDateString(item.journalDate), period)).length;
+      journalsForDaily = allJournals;
       // Reconciliation adjustments live only in the ledger; add them to the bank lines from the journals just
       // refreshed. Skipped when the journal refresh was skipped or timed out (the rows then stay as they were), and
       // a failure here must never fail the sync.
@@ -2808,6 +2811,19 @@ async function runSync(tenantId, progressCallback, options = {}) {
     // each client's journal volume. `journalCount`/`journals` stays its own separate stat (shown
     // independently on the client and transactions pages) — only the sum here was wrong.
     const totalTransactions = customerInvoices + supplierBills + creditNotesSales + creditNotesPurchase + bankProcessed;
+
+    // The same figures per day, for ALL dates, so the Transactions pages can show any other period without a
+    // new sync (transactionActivity.js). Never allowed to fail the sync.
+    try {
+      const daily = buildDailyActivity({
+        invoices: allInvoices, credits: [...salesCredits, ...purchaseCredits], bankTransactions: allBankTransactions,
+        manualJournals: allManualJournals, payments: matchingPayments, journals: journalsForDaily,
+        chartOfAccounts: Array.isArray(chartOfAccounts) ? chartOfAccounts : [],
+      });
+      replaceTransactionDaily(orgId, daily.rows, { journalsKnown: daily.journalsKnown });
+    } catch (dailyError) {
+      console.error(`[transaction-daily] could not save per-day figures for org ${orgId}: ${dailyError.message}`);
+    }
 
     upsertTransactionCounts(orgId, {
       period: period.type,

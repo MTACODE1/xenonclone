@@ -184,6 +184,125 @@
     return box;
   }
 
+  // ---- "items to reconcile" list: read live from Xero when someone clicks a count ----
+  // The lines are not saved anywhere; each click reads Xero's "Bank statements" tab for that account afresh.
+  const LINES_VERSION = [1, 3, 0]; // the first extension version that can read statement lines
+  async function extensionVersion() {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const answer = await askExtension({ type: 'PING' }, 1000);
+      if (answer) return String(answer.version || '0');
+    }
+    return null;
+  }
+  const versionAtLeast = (version, wanted) => {
+    const parts = String(version).split('.').map(Number);
+    for (let i = 0; i < wanted.length; i++) {
+      if ((parts[i] || 0) > wanted[i]) return true;
+      if ((parts[i] || 0) < wanted[i]) return false;
+    }
+    return true;
+  };
+  const ukDate = iso => { const [y, m, d] = iso.split('-'); return d + '/' + m + '/' + y; };
+  const ageDays = iso => Math.max(0, Math.round((Date.parse(new Date().toISOString().slice(0, 10)) - Date.parse(iso)) / 86400000));
+  let linesBusy = false;
+
+  function linesTable(lines) {
+    const wrap = el('div', null, 'overflow:auto;max-height:52vh;border:1px solid #E5EAF2;border-radius:8px;');
+    const table = el('table'); table.className = 'data-table'; table.style.width = '100%';
+    const head = el('tr');
+    [['Date', ''], ['Age', NUM], ['Particulars', ''], ['Reference', ''], ['Spent', NUM], ['Received', NUM]]
+      .forEach(([title, style]) => head.appendChild(el('th', title, style + 'position:sticky;top:0;background:#F2F6FA;')));
+    const thead = el('thead'); thead.appendChild(head); table.appendChild(thead);
+    const tbody = el('tbody');
+    for (const line of lines) {
+      const row = el('tr');
+      row.appendChild(el('td', ukDate(line.date), 'white-space:nowrap;'));
+      const days = ageDays(line.date);
+      row.appendChild(el('td', days + (days === 1 ? ' day' : ' days'), NUM + (days > 30 ? 'color:#B42318;font-weight:600;' : 'color:#5A6A85;')));
+      const what = el('td');
+      what.appendChild(el('div', line.particulars || line.payee || '—', 'color:#2A3547;'));
+      if (line.payee && line.particulars) what.appendChild(el('div', line.payee, 'font-size:0.72rem;color:#7C8FAC;'));
+      row.appendChild(what);
+      row.appendChild(el('td', [line.reference, line.code].filter(Boolean).join(' · ') || '—', 'color:#5A6A85;'));
+      row.appendChild(el('td', line.spent == null ? '' : money(line.spent), NUM));
+      row.appendChild(el('td', line.received == null ? '' : money(line.received), NUM));
+      tbody.appendChild(row);
+    }
+    table.appendChild(tbody); wrap.appendChild(table);
+    return wrap;
+  }
+
+  // accounts: the accounts whose lines to show (one when a row's count is clicked, all with items from the tile).
+  async function openLinesDialog(shortCode, accounts) {
+    const dialog = el('dialog', null, 'border:none;border-radius:12px;padding:0;width:min(980px,94vw);max-height:90vh;box-shadow:0 20px 60px rgba(20,30,50,0.35);');
+    const header = el('div', null, 'display:flex;justify-content:space-between;align-items:flex-start;gap:16px;padding:16px 20px;border-bottom:1px solid #E5EAF2;background:#F2F6FA;');
+    const titles = el('div');
+    titles.appendChild(el('div', 'Items to reconcile', 'font-weight:700;font-size:1rem;color:#2A3547;'));
+    titles.appendChild(el('div', 'Bank statement lines Xero lists as Unreconciled, read from Xero just now. Nothing is changed in Xero.', 'font-size:0.75rem;color:#7C8FAC;margin-top:2px;'));
+    const close = el('button', 'Close'); close.type = 'button'; close.className = 'btn btn-outlined btn-sm';
+    header.appendChild(titles); header.appendChild(close);
+    const content = el('div', null, 'padding:16px 20px;overflow:auto;max-height:calc(90vh - 80px);');
+    dialog.appendChild(header); dialog.appendChild(content);
+    document.body.appendChild(dialog);
+    let closed = false;
+    const shut = () => { closed = true; if (dialog.open) dialog.close(); dialog.remove(); };
+    close.addEventListener('click', shut);
+    dialog.addEventListener('close', () => { closed = true; dialog.remove(); });
+    dialog.addEventListener('click', event => { if (event.target === dialog) shut(); });
+    dialog.showModal();
+
+    const version = await extensionVersion();
+    if (!version) { content.appendChild(failureBox({ code: 'no_extension' })); return; }
+    if (!versionAtLeast(version, LINES_VERSION)) {
+      content.appendChild(alertBox('bad', 'The browser extension needs updating',
+        'Listing the items needs version ' + LINES_VERSION.join('.') + ' of the Akrio Verify extension; this browser has ' + version + '. Update or reload the extension (chrome://extensions), reload this page and try again.'));
+      return;
+    }
+    if (linesBusy) { content.appendChild(alertBox('muted', 'Another list is still being read', 'Wait for it to finish, then try again.')); return; }
+    linesBusy = true;
+    try {
+      for (const account of accounts) {
+        if (closed) return;
+        const section = el('div', null, 'margin-bottom:22px;');
+        const heading = el('div', null, 'display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:8px;');
+        heading.appendChild(el('div', account.accountName, 'font-weight:700;color:#2A3547;'));
+        const summary = el('div', 'Xero shows ' + account.itemsToReconcile.toLocaleString('en-GB') + ' to reconcile', 'font-size:0.78rem;color:#5A6A85;');
+        heading.appendChild(summary); section.appendChild(heading);
+        const progress = progressBar(); progress.element.style.padding = '0 0 8px';
+        section.appendChild(progress.element);
+        content.appendChild(section);
+        progress.start();
+        const answer = await askExtension({ type: 'READ_BANK_LINES', shortCode, accountName: account.accountName }, 150000, progress.stage);
+        if (closed) return;
+        if (!answer || !answer.ok) {
+          progress.fail();
+          const error = answer ? { code: answer.error, message: answer.message } : { message: 'The extension did not answer in time.' };
+          section.appendChild(['not_signed_in', 'wrong_organisation', 'timeout'].includes(error.code)
+            ? failureBox(error) : alertBox('bad', 'The items could not be listed', error.message || 'Try again.'));
+          if (error.code === 'not_signed_in') return; // every further account would fail the same way
+          continue;
+        }
+        progress.done();
+        const lines = answer.lines.lines;
+        const spent = lines.reduce((sum, line) => sum + (line.spent || 0), 0);
+        const received = lines.reduce((sum, line) => sum + (line.received || 0), 0);
+        const oldest = lines.reduce((min, line) => (min == null || line.date < min ? line.date : min), null);
+        summary.textContent = lines.length.toLocaleString('en-GB') + (lines.length === 1 ? ' line' : ' lines')
+          + ' · spent ' + money(spent) + ' · received ' + money(received)
+          + (oldest ? ' · oldest ' + ukDate(oldest) + ' (' + ageDays(oldest) + ' days)' : '');
+        if (answer.lines.truncated) {
+          section.appendChild(alertBox('muted', 'Only the first ' + lines.length.toLocaleString('en-GB') + ' lines are listed',
+            'Xero has ' + (answer.lines.totalShownByXero != null ? answer.lines.totalShownByXero.toLocaleString('en-GB') : 'more') + ' unreconciled lines on this account. Open the account in Xero to see them all.'));
+        } else if (lines.length !== account.itemsToReconcile) {
+          section.appendChild(alertBox('muted', 'The number has changed since the last update',
+            'The last "Update from Xero" showed ' + account.itemsToReconcile.toLocaleString('en-GB') + ' to reconcile; Xero lists ' + lines.length.toLocaleString('en-GB') + ' unreconciled statement lines now. Click "Update from Xero" to refresh the figures on this page.'));
+        }
+        if (lines.length) section.appendChild(linesTable(lines));
+        else section.appendChild(el('p', 'Xero lists no unreconciled statement lines for this account now.', 'font-size:0.85rem;color:#5A6A85;margin:0;'));
+      }
+    } finally { linesBusy = false; }
+  }
+
   function renderReading(body, data) {
     body.textContent = '';
     const reading = data.reading;
@@ -216,7 +335,15 @@
       }
     }
     const tiles = el('div', null, 'display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px;');
-    tiles.appendChild(tile('Items to reconcile', total.toLocaleString('en-GB'), 'across ' + accounts.length + (accounts.length === 1 ? ' bank account' : ' bank accounts'), total ? 'warn' : null));
+    const itemsTile = tile('Items to reconcile', total.toLocaleString('en-GB'), 'across ' + accounts.length + (accounts.length === 1 ? ' bank account' : ' bank accounts') + (total && data.shortCode ? ' · click to list them' : ''), total ? 'warn' : null);
+    if (total && data.shortCode) {
+      itemsTile.style.cursor = 'pointer'; itemsTile.tabIndex = 0; itemsTile.setAttribute('role', 'button');
+      itemsTile.title = 'List the items to reconcile (read from Xero now)';
+      const openAll = () => openLinesDialog(data.shortCode, accounts.filter(account => account.itemsToReconcile));
+      itemsTile.addEventListener('click', openAll);
+      itemsTile.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openAll(); } });
+    }
+    tiles.appendChild(itemsTile);
     tiles.appendChild(tile('Bank feeds with a problem', String(feedIssues), feedIssues ? 'not importing new transactions' : 'Xero shows no bank feed problems', feedIssues ? 'bad' : null));
     tiles.appendChild(tile('Balances that differ', String(differing), 'nothing to reconcile, but Xero and the statement disagree', differing ? 'warn' : null));
     tiles.appendChild(tile('Last read from Xero', timeAgo(when, new Date()), when.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) + (reading.readByName ? ' · ' + reading.readByName : ''), stale ? 'bad' : null));
@@ -238,7 +365,15 @@
       row.appendChild(name);
 
       const items = el('td', null, NUM);
-      if (account.itemsToReconcile) items.appendChild(badge(account.itemsToReconcile.toLocaleString('en-GB'), 'warn'));
+      if (account.itemsToReconcile && data.shortCode) {
+        const open = el('button', null, 'border:none;background:none;padding:0;cursor:pointer;');
+        open.type = 'button'; open.title = 'List these items (read from Xero now)';
+        open.setAttribute('aria-label', 'List the ' + account.itemsToReconcile + ' items to reconcile for ' + account.accountName);
+        const pill = badge(account.itemsToReconcile.toLocaleString('en-GB') + ' ›', 'warn'); pill.style.textDecoration = 'underline';
+        open.appendChild(pill);
+        open.addEventListener('click', () => openLinesDialog(data.shortCode, [account]));
+        items.appendChild(open);
+      } else if (account.itemsToReconcile) items.appendChild(badge(account.itemsToReconcile.toLocaleString('en-GB'), 'warn'));
       else if (account.itemsToReconcile === 0 || account.reconciled) items.appendChild(badge('Reconciled', 'good'));
       else if (account.balancesDiffer) items.appendChild(badge('0 · balances differ', 'warn'));
       else items.appendChild(el('span', 'Not shown', 'color:#7C8FAC;'));

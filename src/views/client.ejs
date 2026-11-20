@@ -437,7 +437,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
       </div>
       <div class="card-body" data-bank-screen-body style="padding: 16px;">Loading…</div>
     </div>
-    <script src="<%= basePath %>/bankScreen.js?v=11" defer></script>
+    <script src="<%= basePath %>/bankScreen.js?v=12" defer></script>
     <% } %>
 
     <div class="card" id="statement-evidence" style="margin-top: 24px;">
@@ -942,11 +942,17 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
   <%- include('partials/insightTab', { insight, org, checkDefs, score, scoreColor, insightKv, insightMappings, insightWidgetVisibility }) %>
 </div>
 
-<div id="panel-transactions" class="<%= periodStale ? 'period-stale' : '' %>" style="display: none;">
-  <div class="card period-data">
+<%
+  // Transaction counts are added up per day, so they are right for whichever period is selected; only the
+  // older stored totals (a client not synced since per-day figures were introduced) belong to the synced period.
+  const txAnyPeriod = !!(txCounts && txCounts.source === 'daily');
+  const txStale = periodStale && !txAnyPeriod;
+%>
+<div id="panel-transactions" class="<%= txStale ? 'period-stale' : '' %>" style="display: none;">
+  <div class="card <%= txAnyPeriod ? '' : 'period-data' %>">
     <div style="padding: 16px 20px; border-bottom: 1px solid #e5eaef; background: #F2F6FA;">
-      <h5 style="font-weight: 600; color: #2A3547;">Transaction Counts — <%= periodStale ? stalePeriodLabel : selectedPeriod.label %></h5>
-      <p style="font-size: 0.75rem; color: #7C8FAC; margin-top: 4px;">Data from last sync. <a href="<%= basePath %>/transactions" style="color: #5D87FF; text-decoration: none;">View all clients →</a></p>
+      <h5 style="font-weight: 600; color: #2A3547;">Transaction Counts — <%= txStale ? stalePeriodLabel : selectedPeriod.label %></h5>
+      <p style="font-size: 0.75rem; color: #7C8FAC; margin-top: 4px;"><%= txAnyPeriod ? 'From the data of the last sync, for the period selected above. Changing the period needs no new sync.' : 'Data from last sync.' %> <a href="<%= basePath %>/transactions" style="color: #5D87FF; text-decoration: none;">View all clients →</a></p>
     </div>
     <% if (txCounts) { %>
     <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: #e5eaef;">
@@ -960,7 +966,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
         { label: 'Sales Credit Notes', raw: txCounts.credit_notes_sales || 0, isCurrency: false },
         { label: 'Purchase Credit Notes', raw: txCounts.credit_notes_purchase || 0, isCurrency: false },
         { label: 'Bank Processed', raw: txCounts.bank_processed || 0, isCurrency: false },
-        { label: 'Journals', raw: txCounts.journals || 0, isCurrency: false },
+        { label: 'Journals', raw: txCounts.journals || 0, isCurrency: false, unknown: txCounts.journals == null },
       ];
       txItems.forEach(item => {
         const display = item.isCurrency ? formatTurnoverGbp(item.raw) : item.raw.toLocaleString('en-GB');
@@ -968,13 +974,13 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
       %>
       <div style="background: white; padding: 16px; text-align: center;">
         <div style="font-size: 0.75rem; color: #7C8FAC; margin-bottom: 4px;"><%= item.label %></div>
-        <div style="font-size: 1.25rem; font-weight: 700; color: #2A3547;"><%= display %></div>
-        <div style="font-size: 0.75rem; color: #7C8FAC; margin-top: 4px;"><%= perMthDisplay %></div>
+        <div style="font-size: 1.25rem; font-weight: 700; color: #2A3547;"><%= item.unknown ? '—' : display %></div>
+        <div style="font-size: 0.75rem; color: #7C8FAC; margin-top: 4px;"><%= item.unknown ? 'not available yet' : perMthDisplay %></div>
       </div>
       <% }) %>
     </div>
     <div style="padding: 8px 20px; font-size: 0.75rem; color: #7C8FAC; border-top: 1px solid #e5eaef; background: #F2F6FA;">
-      Period: <%= txCounts.period_start || '—' %> to <%= txCounts.period_end || '—' %> (<%= mth %> months)
+      Period: <%= txCounts.period_start || '—' %> to <%= txCounts.period_end || '—' %> (<%= Math.round(mth * 10) / 10 %> months)
     </div>
     <% } else { %>
     <div style="padding: 48px 20px; text-align: center; color: #7C8FAC;">No transaction data yet — sync this client first.</div>

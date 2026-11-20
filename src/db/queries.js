@@ -1929,6 +1929,49 @@ function upsertTransactionCounts(orgId, data) {
   });
 }
 
+// Replaces a client's per-day figures in one go. If the journal download was skipped this time, the journal
+// counts already stored are kept (they are still the best known figures) rather than wiped to zero.
+function replaceTransactionDaily(orgId, rows, { journalsKnown = true } = {}) {
+  const db = getDb();
+  db.transaction(() => {
+    const meta = db.prepare(`SELECT journals_known FROM transaction_daily_meta WHERE org_id = ?`).get(orgId);
+    const keepJournals = !journalsKnown && meta && meta.journals_known === 1;
+    const previousJournals = keepJournals
+      ? new Map(db.prepare(`SELECT day, journals FROM transaction_daily WHERE org_id = ? AND journals > 0`).all(orgId).map(r => [r.day, r.journals]))
+      : new Map();
+    db.prepare(`DELETE FROM transaction_daily WHERE org_id = ?`).run(orgId);
+    const insert = db.prepare(`
+      INSERT INTO transaction_daily (org_id, day, customer_invoices, supplier_bills, credit_notes_sales,
+        credit_notes_purchase, bank_processed, journals, turnover) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const seen = new Set();
+    for (const row of rows) {
+      seen.add(row.day);
+      insert.run(orgId, row.day, row.customer_invoices, row.supplier_bills, row.credit_notes_sales,
+        row.credit_notes_purchase, row.bank_processed, keepJournals ? (previousJournals.get(row.day) || 0) : row.journals, row.turnover);
+    }
+    for (const [day, journals] of previousJournals) {
+      if (!seen.has(day)) insert.run(orgId, day, 0, 0, 0, 0, 0, journals, 0);
+    }
+    db.prepare(`
+      INSERT INTO transaction_daily_meta (org_id, journals_known, built_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(org_id) DO UPDATE SET journals_known = excluded.journals_known, built_at = CURRENT_TIMESTAMP
+    `).run(orgId, journalsKnown || keepJournals ? 1 : 0);
+  })();
+}
+
+// A client's figures for any period, added up from its per-day rows. null when the client has no per-day
+// rows yet (not synced since this was introduced).
+function getTransactionActivityForOrg(orgId, period) {
+  const db = getDb();
+  const meta = db.prepare(`SELECT journals_known, built_at FROM transaction_daily_meta WHERE org_id = ?`).get(orgId);
+  if (!meta) return null;
+  // Rows a day either side of the period are enough for the boundary rule applied in sumActivity.
+  const rows = db.prepare(`SELECT * FROM transaction_daily WHERE org_id = ? AND day >= ? AND day <= ?`).all(orgId, period.start, period.end);
+  const { sumActivity } = require('../services/transactionActivity');
+  return { ...sumActivity(rows, period, { journalsKnown: meta.journals_known === 1 }), built_at: meta.built_at, source: 'daily' };
+}
+
 function getTransactionCountsForOrg(orgId, periodType = null, periodStart = null, periodEnd = null) {
   const db = getDb();
   return db.prepare(`
@@ -1967,6 +2010,41 @@ async function getAllTransactionCounts(periodType = null, periodStart = null, pe
       supplier_bills: tc.supplier_bills, credit_notes_sales: tc.credit_notes_sales,
       credit_notes_purchase: tc.credit_notes_purchase, bank_processed: tc.bank_processed,
       journals: tc.journals,
+    };
+  });
+}
+
+// Every client's figures for the requested period. Each client's period is resolved with its own review-from
+// (lock) date and financial year end, exactly as its client page does, then added up from the per-day rows,
+// so no sync is needed to look at a different period. A client with no per-day rows yet falls back to the
+// totals its last sync stored, when those are for this same period.
+async function getAllTransactionActivity(periodInputValue) {
+  const { resolvePeriod } = require('../services/periodResolver');
+  const orgs = await getAllOrganisations();
+  return orgs.map(o => {
+    const base = {
+      xero_tenant_id: o.xero_tenant_id || o.freeagent_company_id, name: o.name, client_ref: o.client_ref,
+      connection_status: o.connection_status, last_synced_at: o.last_synced_at,
+    };
+    let period;
+    try {
+      const reviewFrom = getReviewFrom(o);
+      period = resolvePeriod(periodInputValue, {
+        lockDate: reviewFrom.date, lockSource: reviewFrom.source,
+        financialYearEndDay: o.financial_year_end_day, financialYearEndMonth: o.financial_year_end_month,
+      });
+    } catch (error) {
+      return { ...base, period_error: error.message };
+    }
+    const tc = getTransactionActivityForOrg(o.id, period)
+      || getTransactionCountsForOrg(o.id, period.type, period.start, period.end) || {};
+    return {
+      ...base,
+      period: period.type, period_start: period.start, period_end: period.end, months_covered: period.monthsCovered,
+      turnover: tc.turnover, total_transactions: tc.total_transactions, customer_invoices: tc.customer_invoices,
+      supplier_bills: tc.supplier_bills, credit_notes_sales: tc.credit_notes_sales,
+      credit_notes_purchase: tc.credit_notes_purchase, bank_processed: tc.bank_processed, journals: tc.journals,
+      source: tc.source || (tc.turnover != null ? 'sync' : null),
     };
   });
 }
@@ -2333,6 +2411,7 @@ module.exports = {
   getFreeAgentToken, upsertFreeAgentToken, deleteFreeAgentToken, upsertFreeAgentOrganisation,
   getOrganisationByFreeAgentCompanyId, markOrganisationDisconnectedByFreeAgentCompany,
   upsertTransactionCounts, getTransactionCountsForOrg, getAllTransactionCounts, getPanoramaOrganisations,
+  replaceTransactionDaily, getTransactionActivityForOrg, getAllTransactionActivity,
   upsertBankReconciliationXeroBalance, updateStatementBalance, getBankReconciliationForOrg,
   getExcludedBankAccountIds, setBankAccountExcluded,
   getXeroBankItemsForOrg, replaceXeroBankItemsCache, createStatementImport,

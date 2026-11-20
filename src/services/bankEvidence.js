@@ -49,6 +49,15 @@ function screenItemCount(account) {
   return account.reconciled ? 0 : null;
 }
 
+// Xero leaves "Balance in Xero" off an account that is fully reconciled and whose balances agree (it shows
+// "Reconciled" and the statement balance only). There the balance in Xero is the statement balance. If the two
+// disagreed, Xero would show both figures and "Why is this different?" (balancesDiffer).
+function screenXeroBalance(account) {
+  if (finite(account.balanceInXero)) return Number(account.balanceInXero);
+  if (account.reconciled && !account.balancesDiffer && finite(account.statementBalance)) return Number(account.statementBalance);
+  return null;
+}
+
 function buildBankEvidence({
   reconciliation = [], imports = [], unmatchedLines = [], excludedBankAccountIds = new Set(),
   reading = null, now = new Date(),
@@ -104,13 +113,14 @@ function buildBankEvidence({
     for (const { account, matchedId, accountId } of screenAccounts) {
       if (matchedId && coveredByStatement.has(matchedId)) continue;
       // No bank feed (or a feed that has never sent a balance): nothing to compare, so no evidence.
-      if (!finite(account.statementBalance) || !finite(account.balanceInXero)) continue;
+      const xeroBalance = screenXeroBalance(account);
+      if (!finite(account.statementBalance) || xeroBalance == null) continue;
       evidence.push({
         accountId, name: account.accountName, matched: !!matchedId,
         statementBalance: Number(account.statementBalance), statementDate: isoDate(readAt),
         statementDateLabel: account.statementDateLabel || null,
         evidenceSource: SCREEN_SOURCE, evidenceFreshness: 'current',
-        xeroBalance: Number(account.balanceInXero), xeroBalanceAsOf: isoDate(readAt),
+        xeroBalance, xeroBalanceAsOf: isoDate(readAt),
         ...provenance,
       });
     }
@@ -124,12 +134,16 @@ function buildBankEvidence({
   // A difference of a penny is rounding; two pence or more is a real difference.
   const balanceFindings = compared.filter(item => item._pence > 1).map(({ _pence, ...item }) => item);
   const staleReading = !!reading && !screenUsable;
+  // A fresh reading in which Xero lists no bank accounts at all: nothing can be out, so the check is clean.
+  const emptyFreshReading = screenUsable && !reading.accounts.length;
   let balanceLabel;
-  if (!included.length) balanceLabel = staleReading && reading.accounts && reading.accounts.length ? NEEDS_BANK_UPDATE : 'not_configured';
+  if (!included.length && emptyFreshReading) balanceLabel = `statement_comparison_as_of_${isoDate(readAt)}`;
+  else if (!included.length) balanceLabel = staleReading && reading.accounts && reading.accounts.length ? NEEDS_BANK_UPDATE : 'not_configured';
   else if (comparable.length !== included.length) balanceLabel = 'needs_sync';
   else balanceLabel = `statement_comparison_as_of_${included.map(item => item.statementDate).filter(Boolean).sort().pop() || isoDate(now)}`;
   const bankBalance = {
-    count: !included.length || comparable.length !== included.length ? (balanceFindings.length || null) : balanceFindings.length,
+    count: !included.length && emptyFreshReading ? 0
+      : !included.length || comparable.length !== included.length ? (balanceFindings.length || null) : balanceFindings.length,
     value: balanceFindings.reduce((sum, item) => sum + item.discrepancy, 0),
     findings: balanceFindings,
     label: balanceLabel,
@@ -201,9 +215,9 @@ function buildBankEvidence({
   const csvValue = unmatchedLines.reduce((sum, line) => sum + Math.abs(Number(line.amount) || 0), 0);
   let unprocessedLabel;
   if (imports.length) unprocessedLabel = `imported_statements_${imports.map(item => item.statement_end_date).sort().pop()}`;
-  else if (knownScreenAccounts) unprocessedLabel = `bank_screen_${isoDate(readAt)}`;
+  else if (knownScreenAccounts || emptyFreshReading) unprocessedLabel = `bank_screen_${isoDate(readAt)}`;
   else unprocessedLabel = reading && (reading.accounts || []).length ? NEEDS_BANK_UPDATE : 'not_configured';
-  const unprocessedConfigured = !!imports.length || knownScreenAccounts > 0;
+  const unprocessedConfigured = !!imports.length || knownScreenAccounts > 0 || emptyFreshReading;
   const unprocessed = {
     count: unprocessedConfigured ? unmatchedLines.length + screenFindings.length : null,
     value: csvValue,
@@ -231,6 +245,6 @@ async function loadLatestBankScreenReading(orgId, options = {}) {
 }
 
 module.exports = {
-  buildBankEvidence, loadLatestBankScreenReading, syntheticAccountId, screenItemCount,
+  buildBankEvidence, loadLatestBankScreenReading, syntheticAccountId, screenItemCount, screenXeroBalance,
   SCREEN_SOURCE, NEEDS_BANK_UPDATE,
 };

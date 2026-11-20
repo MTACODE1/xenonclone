@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Akrio Verify - Xero bank feed reader",
-  "version": "1.2.3",
-  "description": "Reads the items to reconcile and bank balances shown on Xero's Bank accounts page, when asked from Akrio Verify. Read-only.",
+  "version": "1.3.0",
+  "description": "Reads the items to reconcile, bank balances and unreconciled statement lines shown on Xero's bank pages, when asked from Akrio Verify. Read-only.",
   "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
   "permissions": ["scripting"],
   "host_permissions": ["https://go.xero.com/*", "https://login.xero.com/*"],
