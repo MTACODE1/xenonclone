@@ -30,6 +30,8 @@ if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) {
 // (e.g. AKRIO_BASE_PATH=/akrio-verify for wf.morethanaccountants.co.uk/akrio-verify).
 // Left blank for local dev / a dedicated subdomain, where Akrio owns the whole origin.
 const BASE_PATH = (process.env.AKRIO_BASE_PATH || '').replace(/\/$/, '');
+const EXTENSION_STORE_URL = /^https:\/\/chromewebstore\.google\.com\/detail\/[A-Za-z0-9\-_/]+$/.test(process.env.AKRIO_EXTENSION_STORE_URL || '')
+  ? process.env.AKRIO_EXTENSION_STORE_URL : '';
 
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'src/views'));
@@ -89,6 +91,9 @@ app.use(async (req, res, next) => {
     // Every root-relative link/form/asset in the views is written as "<%= basePath %>/...",
     // so the whole app moves cleanly under a path prefix (e.g. /akrio-verify) with one change.
     res.locals.basePath = BASE_PATH;
+    // Where staff install the browser extension from. Only a Chrome Web Store address is accepted, so a
+    // mistyped setting can never send staff to another site; empty until the extension is published.
+    res.locals.extensionStoreUrl = EXTENSION_STORE_URL;
     next();
   } catch (error) {
     next(error);

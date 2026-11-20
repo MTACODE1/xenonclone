@@ -254,6 +254,11 @@
     try { await load(); } catch (error) { body.textContent = error.message; return; }
     const progress = progressBar();
     body.parentNode.insertBefore(progress.element, body);
+    extensionInstalled().then(installed => {
+      if (installed) return;
+      const holder = el('div', null, 'padding:16px 16px 0;'); holder.appendChild(installBanner(storeUrlOf(card)));
+      holder.firstChild.style.marginBottom = '0'; body.parentNode.insertBefore(holder, progress.element);
+    });
     const failures = el('div');
     body.parentNode.insertBefore(failures, body);
     failures.style.cssText = 'padding:16px 16px 0;';
@@ -276,6 +281,33 @@
       } finally { button.disabled = false; button.textContent = 'Update from Xero'; }
     });
   }
+
+  // Shown when the extension is not in this browser. The page cannot install it by itself (Chrome does not
+  // allow that), so the button opens the extension's Chrome Web Store page, where one click adds it.
+  function installBanner(storeUrl) {
+    const box = el('div', null, 'display:flex;gap:14px;align-items:center;flex-wrap:wrap;border:1px solid #C9D8FF;background:#F3F7FF;border-radius:10px;padding:12px 14px;margin-bottom:12px;');
+    box.setAttribute('role', 'note');
+    const words = el('div', null, 'flex:1 1 300px;font-size:0.8rem;color:#2A3547;line-height:1.45;');
+    words.appendChild(el('div', 'Add the Akrio Verify extension', 'font-weight:700;margin-bottom:2px;'));
+    const steps = el('div', storeUrl
+      ? 'Bank feeds are read from Xero by a small browser extension, and it is not in this browser yet. Click "Add extension", then "Add to Chrome" on the page that opens, and come back here.'
+      : 'Bank feeds are read from Xero by a small browser extension, and it is not in this browser yet. Ask your Akrio Verify administrator to install it for you.');
+    words.appendChild(steps); box.appendChild(words);
+    const buttons = el('div', null, 'display:flex;gap:8px;align-items:center;');
+    const reload = el('button', 'I have added it'); reload.type = 'button'; reload.className = 'btn btn-outlined btn-sm';
+    reload.title = 'Reloads this page so it can find the extension';
+    reload.addEventListener('click', () => window.location.reload());
+    if (storeUrl) {
+      const add = el('a', 'Add extension'); add.className = 'btn btn-primary btn-sm';
+      add.href = storeUrl; add.target = '_blank'; add.rel = 'noopener';
+      add.addEventListener('click', () => { steps.textContent = 'After clicking "Add to Chrome" on the store page, come back here and click "I have added it".'; });
+      buttons.appendChild(add);
+    }
+    buttons.appendChild(reload); box.appendChild(buttons);
+    return box;
+  }
+  // Chrome Web Store addresses only; anything else is ignored.
+  const storeUrlOf = node => (/^https:\/\/chromewebstore\.google\.com\/detail\//.test(node.dataset.storeUrl || '') ? node.dataset.storeUrl : '');
 
   const duration = seconds => {
     const minutes = Math.round(seconds / 60);
@@ -320,6 +352,7 @@
     failBox.appendChild(failTitle); failBox.appendChild(failList); panel.appendChild(failBox);
 
     const setFill = percent => { fill.style.width = percent + '%'; track.setAttribute('aria-valuenow', String(percent)); };
+    extensionInstalled().then(installed => { if (!installed) panel.insertBefore(installBanner(storeUrlOf(panel)), head); });
     let stopRequested = false;
     stop.addEventListener('click', () => { stopRequested = true; stop.disabled = true; stop.textContent = 'Stopping…'; });
 

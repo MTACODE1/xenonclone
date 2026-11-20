@@ -2,11 +2,7 @@
 // background tab, reads what the page shows, closes the tab and returns the reading. One at a time.
 importScripts('parser.js');
 
-const ALLOWED_SENDERS = [
-  'https://wf.morethanaccountants.co.uk/akrio-verify/',
-  'http://localhost:3000/',
-  'https://localhost:3000/',
-];
+const ALLOWED_SENDERS = ['https://wf.morethanaccountants.co.uk/akrio-verify/'];
 const LOAD_TIMEOUT_MS = 60000;
 const fail = (error, message) => ({ ok: false, error, message });
 
