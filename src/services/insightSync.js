@@ -1,6 +1,6 @@
 const { apiCall } = require('./xeroClient');
 const {
-  saveInsightData, getInsightAccountMappings, getInsightCategorySettings, getAccountCheckConfigurationForOrg,
+  saveInsightData: saveInsightDataRaw, getInsightAccountMappings, getInsightCategorySettings, getAccountCheckConfigurationForOrg,
   getInsightCorpTaxRateBands, getInsightCorpTaxAdjustments,
 } = require('../db/queries');
 
@@ -298,6 +298,11 @@ async function syncInsight(tenantId, orgId, options = {}) {
 
   const fyPeriods = getFinancialYearPeriods(fyEndMonth, fyEndDay, 3, today);
   const errors = [];
+  // "Show data up to <date>" on the Insight tab: the figures for a chosen date are stored next to the normal
+  // ones under "<report>@<date>", so looking at another date never replaces what the nightly sync stored.
+  const DATED_KEY = /^\d{4}-\d{2}-\d{2}$/;
+  const suffix = DATED_KEY.test(String(options.cacheKey || '')) ? `@${options.cacheKey}` : '';
+  const saveInsightData = (id, reportType, data) => saveInsightDataRaw(id, reportType + suffix, data);
 
   // Build the account-code -> account-name lookup, and load configured mappings, so
   // parseBalanceSheet can honour explicit account mappings instead of only guessing by label.
@@ -413,6 +418,7 @@ async function syncInsight(tenantId, orgId, options = {}) {
 
   if (bsData) saveInsightData(orgId, 'balance_sheet', bsData);
 
+  if (suffix) saveInsightData(orgId, 'meta', { toDate: todayStr, errors });
   if (errors.length) console.log(`[insightSync] ${tenantId} errors:`, errors);
   return { ok: errors.length === 0, errors };
 }

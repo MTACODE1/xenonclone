@@ -29,7 +29,7 @@ const { syncOrganisation, CHECK_DEFINITIONS } = require('../services/xeroSync');
 const { xeroLinks } = require('../services/xeroLinks');
 const { formatTurnoverGbp, groupSupplierTransactions } = require('../services/checkPresentation');
 const { syncFreeAgentOrganisation } = require('../services/freeagentSync');
-const { CASH_HEALTH_CATEGORIES } = require('../services/insightSync');
+const { CASH_HEALTH_CATEGORIES, syncInsight } = require('../services/insightSync');
 const { resolveCheckDisplayStatus, isCapitalDefaultAccount } = require('../services/checkRules');
 const { fetchCompanyProfile, normalizeCompanyNumber } = require('../services/companiesHouse');
 const {
@@ -83,8 +83,19 @@ function selectedPeriodFor(org, query = {}) {
   });
 }
 
+// "Show data up to" on the Insight tab: a real date, not in the future. Anything else means "latest".
+function insightDateFrom(value) {
+  const text = String(value || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  const date = new Date(`${text}T00:00:00Z`);
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== text) return null;
+  if (text < '2000-01-01' || text > new Date().toISOString().slice(0, 10)) return null;
+  return text;
+}
+
 function clientViewData(org, query = {}) {
   const selectedPeriod = selectedPeriodFor(org, query);
+  const insightDate = org.xero_tenant_id ? insightDateFrom(query.insight_to) : null;
   const periodQuery = new URLSearchParams({
     period: selectedPeriod.type,
     ...(selectedPeriod.type === 'custom' ? { from: selectedPeriod.start, to: selectedPeriod.end } : {}),
@@ -118,7 +129,8 @@ function clientViewData(org, query = {}) {
       ...account, capitalDefault: isCapitalDefaultAccount({ type: account.account_type, name: account.account_name }),
     })),
     scoreBreakdown: parseScoreBreakdown(org),
-    insight: getAllInsightData(org.id),
+    insight: getAllInsightData(org.id, insightDate),
+    insightDate,
     insightKv: getInsightSettingsKv(org.id),
     insightMappings: getInsightAccountMappings(org.id),
     insightWidgetVisibility: getInsightWidgetVisibility(org.id),
@@ -646,6 +658,37 @@ router.post(
     res.redirect(`/client/${encodeURIComponent(tenantId)}/check/${encodeURIComponent(checkType)}?status=${status}&page=${page}`);
   }
 );
+
+// Fetch the Insight figures as at another date. Read-only report calls to Xero (P&L, bank summary, balance
+// sheet), queued like a sync so it never runs alongside one; the health checks and the normal Insight figures
+// are not touched.
+router.post('/:tenantId/insight/fetch', verifyCsrf, async (req, res) => {
+  const org = await getOrganisationByTenantId(req.params.tenantId);
+  if (!org || !org.xero_tenant_id) return res.status(404).json({ error: 'Organisation not found' });
+  const date = insightDateFrom(req.query.date);
+  if (!date) return res.status(400).json({ error: 'Choose a valid date that is not in the future' });
+  try {
+    const started = await startJob(
+      `${org.xero_tenant_id}:insight:${date}`,
+      async progress => {
+        progress({ step: 'insight', message: 'Fetching Insight figures from Xero…' });
+        const outcome = await syncInsight(org.xero_tenant_id, org.id, {
+          toDate: date, cacheKey: date,
+          fyEndMonth: org.financial_year_end_month || 3, fyEndDay: org.financial_year_end_day || 31,
+        });
+        const fetched = getAllInsightData(org.id, date);
+        if (!fetched.pnl && !fetched.balance_sheet && !fetched.corp_tax) {
+          throw new Error('Xero did not return the reports for this date' + (outcome.errors[0] ? ` (${outcome.errors[0]})` : ''));
+        }
+        return outcome;
+      },
+      { tenantId: org.xero_tenant_id, orgId: org.id, mode: 'insight', priority: true, maxAttempts: 1, payload: { insightDate: date } }
+    );
+    return res.status(started.existing ? 200 : 202).json({ success: true, jobId: started.job.id, existing: started.existing });
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+});
 
 router.post('/:tenantId/insight/target', express.urlencoded({ extended: true }), verifyCsrf, async (req, res) => {
   const org = await getOrganisationByTenantId(req.params.tenantId);

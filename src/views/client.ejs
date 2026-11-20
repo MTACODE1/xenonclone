@@ -939,7 +939,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
 </div>
 
 <div id="panel-insight" style="display:none;">
-  <%- include('partials/insightTab', { insight, org, checkDefs, score, scoreColor, insightKv, insightMappings, insightWidgetVisibility }) %>
+  <%- include('partials/insightTab', { insight, org, checkDefs, score, scoreColor, insightKv, insightMappings, insightWidgetVisibility, insightDate: typeof insightDate === 'undefined' ? null : insightDate }) %>
 </div>
 
 <%

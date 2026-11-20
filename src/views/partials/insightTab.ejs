@@ -52,7 +52,10 @@ const otherCount = checkDefs.reduce((s, c) => {
 const healthPct = Math.round(Math.max(0, Math.min(100, score ?? 100)));
 
 /* ---- current month info ---- */
-const now = new Date();
+// With "show data up to" set, every "this month" figure and label refers to that date, not to today.
+const shownDate = typeof insightDate === 'undefined' ? null : insightDate;
+const now = shownDate ? new Date(shownDate + 'T12:00:00Z') : new Date();
+const todayIso = new Date().toISOString().slice(0, 10);
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 const curMonthName = MONTHS[now.getMonth()];
 const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
@@ -306,7 +309,57 @@ const hasAnyData = !!(pnl || bs || ctax);
 </style>
 
 <div class="insight-wrap">
-<% if (!hasAnyData) { %>
+<% if (org.xero_tenant_id) { %>
+<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end;margin-bottom:12px;font-size:0.85rem;color:var(--ins-text-muted);">
+  <label for="insightToDate" style="font-weight:600;color:var(--ins-text);">Show data up to:</label>
+  <input type="date" id="insightToDate" value="<%= shownDate || todayIso %>" max="<%= todayIso %>" min="2000-01-01"
+    style="border:1px solid var(--ins-border);border-radius:6px;padding:6px 8px;font-size:0.85rem;">
+  <button type="button" id="insightToApply" class="btn-outline-teal">Show</button>
+  <% if (shownDate) { %><a href="?panel=insight" style="color:var(--ins-teal);">Back to latest</a><% } %>
+  <span id="insightToNote">
+    <% if (shownDate && hasAnyData) { %>Figures as at <%= shownDate.split('-').reverse().join('/') %><% if (insight.meta && insight.meta.data && insight.meta.data.errors && insight.meta.data.errors.length) { %> (some reports could not be fetched)<% } %>
+    <% } else if (!shownDate && hasAnyData) { %>Latest figures, from the last sync<% } %>
+  </span>
+</div>
+<script>
+(function () {
+  var input = document.getElementById('insightToDate');
+  var go = function () {
+    if (!input.value) return;
+    if (input.value > input.max) { alert('The date cannot be in the future.'); return; }
+    window.location.search = '?panel=insight&insight_to=' + encodeURIComponent(input.value);
+  };
+  document.getElementById('insightToApply').addEventListener('click', go);
+  input.addEventListener('keydown', function (event) { if (event.key === 'Enter') go(); });
+})();
+</script>
+<% } %>
+<% if (shownDate && !hasAnyData) { %>
+<div class="insight-no-data">
+  <h3>Getting the figures as at <%= shownDate.split('-').reverse().join('/') %></h3>
+  <p>These are fetched from Xero's reports (Profit &amp; Loss, Bank Summary, Balance Sheet). It takes about half a minute and does not change the health checks or the latest Insight figures.</p>
+  <button type="button" id="insightFetchBtn" class="btn-outline-teal" style="margin-top:12px;" disabled>Fetching from Xero…</button>
+</div>
+<script>
+window.addEventListener('load', async function () {
+  var btn = document.getElementById('insightFetchBtn');
+  var fail = function (message) { btn.disabled = false; btn.textContent = 'Try again'; btn.onclick = function () { window.location.reload(); }; alert('The figures could not be fetched: ' + message); };
+  try {
+    var resp = await fetch('<%= basePath %>/client/<%= org.xero_tenant_id %>/insight/fetch?date=<%= shownDate %>', { method: 'POST', headers: { 'x-csrf-token': '<%= csrfToken %>' } });
+    var data = await resp.json();
+    if (!data.jobId) return fail(data.error || 'unknown error');
+    var stream = new EventSource('<%= basePath %>/sync-jobs/' + encodeURIComponent(data.jobId) + '/events');
+    stream.onmessage = function (event) {
+      var job = JSON.parse(event.data);
+      if (job.progress && job.progress.message) btn.textContent = job.progress.message;
+      if (job.status === 'succeeded') { stream.close(); window.location.reload(); }
+      else if (job.status === 'failed') { stream.close(); fail(job.error || 'Xero did not return the reports'); }
+    };
+    stream.onerror = function () { stream.close(); fail('the connection was lost; reload the page to check'); };
+  } catch (error) { fail(error.message); }
+});
+</script>
+<% } else if (!hasAnyData) { %>
 <div class="insight-no-data">
   <h3>No Insight data yet</h3>
   <p>Run a Sync to generate KPI data. This will fetch your Profit &amp; Loss and Balance Sheet from Xero.</p>

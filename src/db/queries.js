@@ -2265,12 +2265,22 @@ function getInsightData(orgId, reportType) {
   try { return { data: JSON.parse(row.data_json), fetchedAt: row.fetched_at }; } catch { return null; }
 }
 
-function getAllInsightData(orgId) {
+// The figures fetched from Xero's reports. Settings kept in the same table (sales target, tax overrides) are
+// not tied to a date.
+const INSIGHT_DATED_REPORTS = ['pnl', 'cash_movements', 'corp_tax', 'balance_sheet', 'meta'];
+// date = null: the figures of the last sync. date = 'YYYY-MM-DD': the figures fetched for "show data up to"
+// that date (none of the report keys present if they have not been fetched yet), with the same settings.
+function getAllInsightData(orgId, date = null) {
   const db = getDb();
   const rows = db.prepare(`SELECT report_type, data_json, fetched_at FROM insight_cache WHERE org_id=?`).all(orgId);
   const result = {};
   for (const row of rows) {
-    try { result[row.report_type] = { data: JSON.parse(row.data_json), fetchedAt: row.fetched_at }; } catch {}
+    const at = row.report_type.indexOf('@');
+    const name = at < 0 ? row.report_type : row.report_type.slice(0, at);
+    const rowDate = at < 0 ? null : row.report_type.slice(at + 1);
+    const dated = INSIGHT_DATED_REPORTS.includes(name);
+    if (rowDate !== (dated ? date : null)) continue;
+    try { result[name] = { data: JSON.parse(row.data_json), fetchedAt: row.fetched_at }; } catch {}
   }
   return result;
 }
