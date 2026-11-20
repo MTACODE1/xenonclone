@@ -435,7 +435,11 @@ async function recomputeEvidenceIssues(orgId, periodKey = null, onlyCheck = null
   // genuine period_checked below (e.g. bank_balance correctly stored as 'not_configured' could
   // otherwise leak into opening_balance_differences's real 'filed_accounts_2025-10-31' label the
   // next time this function is called without an explicit periodKey).
+  // Unreconciled Bank comes first: the sync always stores it with the real period key, whereas the two
+  // evidence checks below may carry their own dated labels (e.g. after a recalculation started by a reading
+  // of Xero's Bank accounts page, which has no period of its own).
   const effectivePeriodKey = periodKey || [
+    getIssueByCheckType(orgId, 'unreconciled_bank_items')?.period_checked,
     getIssueByCheckType(orgId, 'bank_balance')?.period_checked,
     getIssueByCheckType(orgId, 'unprocessed_bank')?.period_checked,
   ].find(value => value && !RESERVED_PERIOD_LABELS.has(value)) || null;

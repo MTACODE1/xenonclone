@@ -256,3 +256,24 @@ test('recalculating stores both checks from a fresh reading, and the item total 
     queries.getOrganisationById = originalOrg;
   }
 });
+
+test('a recalculation with no period given uses the period the sync stored on Unreconciled Bank', async () => {
+  const ORG = 78;
+  const PERIOD = 'since_lock_date:2025-10-31:2026-11-30';
+  getDb();
+  queries.upsertBankReconciliationXeroBalance(ORG, 'acc-1', 'Current Account', 500, '2026-11-30');
+  queries.insertIssue({ org_id: ORG, check_type: 'unreconciled_bank_items', importance: 'critical', count: 0, potential_value_gbp: 0, detail_json: '[]', period_checked: PERIOD });
+  const originalOrg = queries.getOrganisationById;
+  queries.getOrganisationById = async id => ({ id, name: 'Synthetic Ltd' });
+  const { recomputeEvidenceIssues } = require('../src/services/statementEvidence');
+  try {
+    await recomputeEvidenceIssues(ORG, null, null, {
+      deferScoreRefresh: true, now: NOW,
+      getLatestBankScreenReading: async () => reading([screen('Current Account', { statementBalance: 510, balanceInXero: 500, itemsToReconcile: 2 })]),
+    });
+    assert.equal(queries.getIssueByCheckType(ORG, 'bank_balance').period_checked, PERIOD);
+    assert.equal(queries.getIssueByCheckType(ORG, 'unprocessed_bank').period_checked, PERIOD);
+  } finally {
+    queries.getOrganisationById = originalOrg;
+  }
+});
