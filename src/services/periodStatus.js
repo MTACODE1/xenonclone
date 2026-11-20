@@ -27,7 +27,9 @@
 //                       "issues".
 //   - not_synced     : none of the above, but count is null — this sync attempt failed or never ran.
 const NOT_APPLICABLE_PERIODS = Object.freeze(new Set(['not_vat_registered', 'not_applicable_freeagent', 'not_a_company', 'no_filed_accounts_yet', 'flat_rate_scheme']));
-const NOT_CONFIGURED_PERIODS = Object.freeze(new Set(['not_configured', 'needs_sync']));
+// needs_bank_update: the only evidence is a reading of Xero's Bank accounts page that is too old to use;
+// someone has to click "Update from Xero" (browser extension) before the check can say anything.
+const NOT_CONFIGURED_PERIODS = Object.freeze(new Set(['not_configured', 'needs_sync', 'needs_bank_update']));
 const UNAVAILABLE_PERIODS = Object.freeze(new Set(['out_of_scope', 'unavailable']));
 const RESERVED_PERIOD_LABELS = Object.freeze(new Set([
   ...NOT_CONFIGURED_PERIODS, ...UNAVAILABLE_PERIODS, ...NOT_APPLICABLE_PERIODS,

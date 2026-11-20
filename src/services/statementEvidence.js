@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { RESERVED_PERIOD_LABELS, resolvePeriodChecked } = require('./checkRules');
 const { getSetting } = require('../db/queries');
+const { buildBankEvidence, loadLatestBankScreenReading } = require('./bankEvidence');
 
 const COLUMN_ALIASES = {
   date: ['date', 'transaction date', 'posted date', 'value date'],
@@ -457,57 +458,27 @@ async function recomputeEvidenceIssues(orgId, periodKey = null, onlyCheck = null
       is_active: options.isActive == null ? 1 : options.isActive,
     });
   };
+  // Bank Balance and Unprocessed Bank: imported statements first, then typed closing balances, then the
+  // latest fresh reading of Xero's Bank accounts page (see bankEvidence.js). Xenon supports excluding
+  // individual bank accounts; exclusions are organisation-scoped, so one client's never affect another's.
+  const reading = await loadLatestBankScreenReading(orgId, options);
+  const bank = buildBankEvidence({
+    reconciliation: getBankReconciliationForOrg(orgId), imports, unmatchedLines: unmatched,
+    excludedBankAccountIds, reading, now: options.now || new Date(),
+  });
   replace({
     org_id: orgId, check_type: 'unprocessed_bank', importance: 'critical',
-    count: imports.length ? unmatched.length : null,
-    potential_value_gbp: unmatched.reduce((sum, line) => sum + Math.abs(line.amount), 0),
-    detail_json: JSON.stringify(unmatched),
-    period_checked: imports.length
-      ? `imported_statements_${imports.map(item => item.statement_end_date).sort().pop()}`
-      : 'not_configured',
+    count: bank.unprocessed.count,
+    potential_value_gbp: bank.unprocessed.value,
+    detail_json: JSON.stringify(bank.unprocessed.findings),
+    period_checked: bank.unprocessed.label,
   });
-
-  const reconciliation = getBankReconciliationForOrg(orgId);
-  const byAccount = new Map(reconciliation.map(account => [account.bank_account_id, account]));
-  const importedAccounts = new Set(imports.map(item => item.bank_account_id));
-  const evidence = imports.map(item => {
-    const xero = byAccount.get(item.bank_account_id);
-    return {
-      accountId: item.bank_account_id, name: item.bank_account_name,
-      statementBalance: item.closing_balance, statementDate: item.statement_end_date,
-      evidenceSource: 'CSV statement', evidenceFreshness: evidenceFreshness(item.statement_end_date),
-      xeroBalance: xero?.xero_calculated_balance ?? null, xeroBalanceAsOf: xero?.xero_balance_as_of ?? null,
-    };
-  });
-  for (const account of reconciliation) {
-    if (importedAccounts.has(account.bank_account_id) || account.statement_balance == null) continue;
-    evidence.push({
-      accountId: account.bank_account_id, name: account.bank_account_name,
-      statementBalance: account.statement_balance,
-      statementDate: account.statement_balance_updated_at?.slice(0, 10) || null,
-      evidenceSource: 'Manual closing balance',
-      evidenceFreshness: evidenceFreshness(account.statement_balance_updated_at?.slice(0, 10)),
-      xeroBalance: account.xero_calculated_balance, xeroBalanceAsOf: account.xero_balance_as_of,
-    });
-  }
-  // Xenon supports excluding individual bank accounts from Bank Balance — e.g. a dormant account
-  // an accountant once entered a closing balance for but no longer wants flagged. Organisation-
-  // scoped, so excluding one client's account can never affect another's.
-  const includedEvidence = evidence.filter(item => !excludedBankAccountIds.has(item.accountId));
-  const comparable = includedEvidence.filter(item => Number.isFinite(Number(item.xeroBalance)));
-  const discrepancies = comparable.map(item => ({
-    ...item, discrepancy: balanceDiscrepancy(item.statementBalance, item.xeroBalance),
-  })).filter(item => item.discrepancy > 0.01);
   replace({
     org_id: orgId, check_type: 'bank_balance', importance: 'critical',
-    count: discrepancies.length
-      ? discrepancies.length
-      : includedEvidence.length && comparable.length === includedEvidence.length ? 0 : null,
-    potential_value_gbp: discrepancies.reduce((sum, item) => sum + item.discrepancy, 0),
-    detail_json: JSON.stringify(discrepancies),
-    period_checked: !includedEvidence.length ? 'not_configured'
-      : comparable.length !== includedEvidence.length ? 'needs_sync'
-        : `statement_comparison_as_of_${includedEvidence.map(item => item.statementDate).filter(Boolean).sort().pop()}`,
+    count: bank.bankBalance.count,
+    potential_value_gbp: bank.bankBalance.value,
+    detail_json: JSON.stringify(bank.bankBalance.findings),
+    period_checked: bank.bankBalance.label,
   });
 
   // Every eligible filed year-end is compared, not just the newest one — xeroSync.js already

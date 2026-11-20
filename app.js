@@ -150,6 +150,7 @@ app.use(BASE_PATH + '/staff', requireStaffManager, staffRoutes);
 app.use(BASE_PATH + '/validation', validationRoutes);
 app.use(BASE_PATH + '/api/bank-screen', createBankScreenRouter({
   ...require('./src/db/queries'), ...require('./src/db/bankScreenReadings'),
+  recomputeEvidenceIssues: require('./src/services/statementEvidence').recomputeEvidenceIssues,
 }));
 app.use(BASE_PATH, dashboardRoutes);
 

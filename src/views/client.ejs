@@ -179,7 +179,13 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
       const scoreTone = score >= 80 ? 'good' : score >= 60 ? 'warn' : 'bad';
       const scoreNote = score >= 80 ? 'In good shape' : score >= 60 ? 'Some attention needed' : 'Needs attention';
       const shortText = (text, max) => { const t = String(text || '').replace(/\s+/g, ' ').trim(); return t.length > max ? t.slice(0, max - 1).trimEnd() + '…' : t; };
-      const setupAnchor = check => check.type === 'opening_balance_differences' ? '#filed-accounts' : check.type === 'unprocessed_bank' ? '#statement-evidence' : '#bank-reconciliation';
+      // Bank Balance and Unprocessed Bank are filled from the "Bank feeds from Xero" card (browser extension);
+      // a statement CSV or a typed closing balance still works and takes priority.
+      // Only Xero clients have the "Bank feeds from Xero" card; anything else keeps the statement/typed-balance set-up.
+      const fromXeroScreen = check => !!org.xero_tenant_id && ['unprocessed_bank', 'bank_balance'].includes(check.type);
+      const setupAnchor = check => check.type === 'opening_balance_differences' ? '#filed-accounts' : fromXeroScreen(check) ? '#bank-screen' : check.type === 'unprocessed_bank' ? '#statement-evidence' : '#bank-reconciliation';
+      const setupPill = check => check.period_checked === 'needs_bank_update' ? 'Needs Xero update' : check.period_checked === 'needs_sync' ? 'Needs sync' : 'Not configured';
+      const setupLink = check => fromXeroScreen(check) ? 'Update from Xero →' : 'Configure evidence →';
     %>
     <section class="overview" aria-label="Overview">
       <div class="overview-tile overview-<%= scoreTone %> period-data">
@@ -362,12 +368,13 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
                   <span class="pill pill-muted">Not applicable</span>
                   <span class="check-sub"><%= notApplicableByPeriod || notApplicableReason %></span>
                 <% } else if (isNotConfigured) { %>
-                  <span class="pill pill-muted"><%= check.period_checked === 'needs_sync' ? 'Needs sync' : 'Not configured' %></span>
-                  <a class="check-sub check-sub-link" href="<%= setupAnchor(check) %>" onclick="event.stopPropagation()">Configure evidence →</a>
+                  <span class="pill pill-muted"><%= setupPill(check) %></span>
+                  <a class="check-sub check-sub-link" href="<%= setupAnchor(check) %>" onclick="event.stopPropagation()"><%= setupLink(check) %></a>
                 <% } else if (isNotSynced) { %>
                   <span class="pill pill-faint">Not synced</span>
                 <% } else if (hasIssues) { %>
                   <span class="pill pill-issue pill-<%= check.importance %>"><%= check.count.toLocaleString('en-GB') %> issue<%= check.count === 1 ? '' : 's' %></span>
+                  <% if (check.screenItems) { %><span class="check-value"><%= check.screenItems.toLocaleString('en-GB') %> item<%= check.screenItems === 1 ? '' : 's' %> to reconcile</span><% } %>
                   <% if (check.potential_value_gbp > 0) { %><span class="check-value">£<%= Math.round(check.potential_value_gbp).toLocaleString('en-GB') %></span><% } %>
                 <% } else { %>
                   <span class="pill pill-ok">OK</span>
@@ -420,7 +427,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
         <div style="flex: 1 1 320px;">
           <h5>Bank feed (read from Xero)</h5>
           <p style="font-size: 0.75rem; color: #7C8FAC; margin-top: 4px;">
-            Items waiting to be reconciled and bank balances, as shown on Xero's Bank accounts page. Read by the Akrio Verify browser extension while you are signed in to Xero. Information only: it does not change the health score.
+            Items waiting to be reconciled and bank balances, as shown on Xero's Bank accounts page. Read by the Akrio Verify browser extension while you are signed in to Xero. The latest reading (if under 7 days old) feeds the Bank Balance Check and Unprocessed Bank checks.
           </p>
         </div>
         <div style="text-align: right;">
@@ -430,7 +437,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
       </div>
       <div class="card-body" data-bank-screen-body style="padding: 16px;">Loading…</div>
     </div>
-    <script src="<%= basePath %>/bankScreen.js?v=10" defer></script>
+    <script src="<%= basePath %>/bankScreen.js?v=11" defer></script>
     <% } %>
 
     <div class="card" id="statement-evidence" style="margin-top: 24px;">

@@ -86,12 +86,10 @@ function fmtDisplayDate(val) {
 
 <% if (checkType === 'bank_balance') { %>
 <%
-  // Build a map of discrepancies keyed by accountId for quick lookup
-  const discrepancyByAccountId = {};
-  (items || []).forEach(item => { discrepancyByAccountId[item.accountId] = item; });
-  const allAccounts = bankReconciliation || [];
-  const excludedIds = excludedBankAccountIds || new Set();
-  // Close date: read from issue period_checked string like "statement_comparison_as_of_YYYY-MM-DD"
+  // One record per bank account, built by bankEvidence.js — the same function that calculated the check, so
+  // the figures and differences here always match the dashboard.
+  const allAccounts = typeof bankAccounts === 'undefined' ? [] : bankAccounts;
+  const reading = typeof bankReading === 'undefined' ? null : bankReading;
   let closingDateStr = null;
   if (issue && issue.period_checked) {
     const m = issue.period_checked.match(/(\d{4}-\d{2}-\d{2})$/);
@@ -103,19 +101,36 @@ function fmtDisplayDate(val) {
     const abs = Math.abs(n).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     return (n < 0 ? '-£' : '£') + abs;
   }
+  // The active finding for each account, so "Mark as OK" marks that account's difference OK for this period.
+  const findingKeyByAccount = {};
+  (items || []).forEach(item => { if (item.accountId && item.finding_key) findingKeyByAccount[item.accountId] = item.finding_key; });
+  const readText = reading && reading.readAt
+    ? new Date(reading.readAt).toLocaleString('en-GB', { timeZone: 'Europe/London', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) + (reading.readByName ? ' by ' + reading.readByName : '')
+    : null;
 %>
 
 <%# Issue/So What?/Solution boxes %>
 <div class="card bb-description-card">
-  <div class="desc-row"><span class="chip" style="flex-shrink:0;background:var(--mta-dark-blue);color:white;">Issue</span><p>Bank accounts where Xero's calculated balance doesn't match the bank's own closing balance.</p></div>
+  <div class="desc-row"><span class="chip" style="flex-shrink:0;background:var(--mta-dark-blue);color:white;">Issue</span><p>Bank accounts whose balance in Xero doesn't match the bank feed (or an external bank statement).</p></div>
   <div class="desc-row"><span class="chip" style="flex-shrink:0;background:var(--success);color:white;">So What?</span><p>Bookkeeping is incomplete and does not currently reflect all of the bank transactions going through the business bank accounts.</p></div>
   <div class="desc-row"><span class="chip" style="flex-shrink:0;background:var(--mta-dark-blue);color:white;">Solution</span><p>Review the bank feed in Xero and process outstanding items. If the difference is due to uncleared items, use the "Mark as OK" button.</p></div>
 </div>
 
-<%# Show-all toggle %>
+<div class="card" style="padding:12px 16px;margin-bottom:12px;font-size:0.82rem;color:#5A6A85;">
+  <% if (!reading) { %>
+    Xero's Bank accounts page has not been read for this client yet. <a href="<%= basePath %>/client/<%= orgIdentifier %>#bank-screen">Update from Xero</a> to fill in the bank feed balances.
+  <% } else if (!reading.usable) { %>
+    <strong style="color:#B42318;">The last reading of Xero's Bank accounts page is more than 7 days old</strong> (<%= readText %>), so it is not used. <a href="<%= basePath %>/client/<%= orgIdentifier %>#bank-screen">Update from Xero</a>.
+  <% } else { %>
+    "Per Xero Statement" and the Xero balance come from Xero's Bank accounts page, read <%= readText %>. <a href="<%= basePath %>/client/<%= orgIdentifier %>#bank-screen">Update from Xero</a>.
+  <% } %>
+  A closing balance from an imported statement or typed in below takes priority over the bank feed.
+</div>
+
+<%# Show-all toggle: like Xenon, accounts that agree are hidden until asked for %>
 <div class="bb-show-all-row">
   <label class="toggle-switch" style="gap:10px;">
-    <input type="checkbox" id="bbShowAll" checked onchange="toggleBbShowAll(this.checked)">
+    <input type="checkbox" id="bbShowAll" onchange="toggleBbShowAll(this.checked)">
     <span class="toggle-slider"></span>
     <span style="font-size:0.875rem;">Show all bank accounts (allows you to compare statement value for all bank accounts)</span>
   </label>
@@ -124,88 +139,90 @@ function fmtDisplayDate(val) {
 <%# Bank account cards grid %>
 <div class="bb-cards-grid" id="bbCardsGrid">
 <% allAccounts.forEach(acc => {
-  const disc = discrepancyByAccountId[acc.bank_account_id];
-  const hasDisc = !!disc || (acc.statement_balance != null && acc.xero_calculated_balance != null && Math.abs(acc.xero_calculated_balance - acc.statement_balance) > 0.01);
-  const isExcluded = excludedIds.has(acc.bank_account_id);
-  const diff = (acc.statement_balance != null && acc.xero_calculated_balance != null)
-    ? acc.xero_calculated_balance - acc.statement_balance : null;
-  const diffOk = diff !== null && Math.abs(diff) < 0.01;
+  const diffOk = acc.difference != null && !acc.hasDifference;
+  const known = acc.difference != null;
+  const hideByDefault = diffOk || acc.excluded;
 %>
-<div class="bb-account-card <%= !hasDisc ? 'bb-card-ok' : '' %>" data-has-disc="<%= hasDisc ? '1' : '0' %>" data-account-id="<%= acc.bank_account_id %>">
-  <%# Exclude button %>
+<div class="bb-account-card <%= diffOk ? 'bb-card-ok' : '' %>" data-has-disc="<%= hideByDefault ? '0' : '1' %>" data-account-id="<%= acc.accountId %>" <% if (hideByDefault) { %>style="display:none;"<% } %>>
+  <% if (acc.canEdit) { %>
   <form method="POST" action="<%= basePath %>/client/<%= orgIdentifier %>/bank-account-exclusion" style="position:absolute;top:10px;right:10px;">
     <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
-    <input type="hidden" name="bank_account_id" value="<%= acc.bank_account_id %>">
-    <input type="hidden" name="excluded" value="<%= isExcluded ? '0' : '1' %>">
-    <button type="submit" class="bb-exclude-btn" title="<%= isExcluded ? 'Include in checks' : 'Exclude from checks' %>">×</button>
+    <input type="hidden" name="bank_account_id" value="<%= acc.accountId %>">
+    <input type="hidden" name="excluded" value="<%= acc.excluded ? '0' : '1' %>">
+    <button type="submit" class="bb-exclude-btn" title="<%= acc.excluded ? 'Include in checks' : 'Exclude from checks' %>">×</button>
   </form>
+  <% } %>
 
-  <h5 class="bb-account-name"><%= acc.bank_account_name %></h5>
+  <h5 class="bb-account-name"><%= acc.name %></h5>
   <p class="bb-closing-label">Closing Balance<% if (closingDateStr) { %> at <%= closingDateStr %><% } %></p>
+  <% if (acc.stoppedImporting || acc.feedProblem) { %>
+    <p style="font-size:0.72rem;color:#B42318;margin:0 0 6px;font-weight:600;"><%= acc.stoppedImporting ? 'Bank feed has stopped importing' : 'Xero reports a problem with this bank feed' %></p>
+  <% } %>
 
   <div class="bb-balance-row">
-    <span class="bb-balance-label">Per Bank Statement <span class="bb-help" title="The closing balance on the actual bank statement or bank feed. Enter this manually — Xero's standard API does not provide the real bank statement balance.">?</span></span>
-    <% if (acc.statement_balance != null) { %>
-      <span class="bb-balance-value"><%= fmtBal(acc.statement_balance) %></span>
+    <span class="bb-balance-label">Per Bank Statement <span class="bb-help" title="A closing balance from an imported bank statement, or typed in here. Optional: when there is one it is used instead of the bank feed.">?</span></span>
+    <% if (acc.bankStatementBalance != null) { %>
+      <span class="bb-balance-value"><%= fmtBal(acc.bankStatementBalance) %></span>
+    <% } else if (acc.canEdit) { %>
+      <button type="button" class="bb-click-to-add" onclick="toggleBbAddForm('<%= acc.accountId %>')">Click to add balance</button>
     <% } else { %>
-      <button type="button" class="bb-click-to-add" onclick="toggleBbAddForm('<%= acc.bank_account_id %>')">Click to add balance</button>
+      <span class="bb-balance-value">—</span>
     <% } %>
   </div>
 
-  <%# Inline add-balance form (hidden until "Click to add balance" clicked) %>
-  <% if (acc.statement_balance == null) { %>
-  <div id="bb-add-form-<%= acc.bank_account_id %>" style="display:none;margin:4px 0 8px;">
+  <% if (acc.canEdit) { %>
+  <div id="bb-<%= acc.bankStatementBalance == null ? 'add' : 'edit' %>-form-<%= acc.accountId %>" style="display:none;margin:4px 0 8px;">
     <form method="POST" action="<%= basePath %>/client/<%= orgIdentifier %>/bank-reconciliation" style="display:flex;gap:6px;align-items:center;">
       <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
-      <input type="hidden" name="bank_account_id" value="<%= acc.bank_account_id %>">
-      <input type="number" step="0.01" name="statement_balance" class="form-input" style="flex:1;padding:5px 8px;font-size:0.82rem;" placeholder="Enter closing balance" autofocus>
+      <input type="hidden" name="bank_account_id" value="<%= acc.accountId %>">
+      <input type="number" step="0.01" name="statement_balance" value="<%= acc.bankStatementBalance != null ? acc.bankStatementBalance : '' %>" class="form-input" style="flex:1;padding:5px 8px;font-size:0.82rem;" placeholder="Enter closing balance">
       <button type="submit" class="btn btn-primary btn-sm">Save</button>
-      <button type="button" class="btn btn-outlined btn-sm" onclick="toggleBbAddForm('<%= acc.bank_account_id %>')">Cancel</button>
-    </form>
-  </div>
-  <% } else { %>
-  <div id="bb-edit-form-<%= acc.bank_account_id %>" style="display:none;margin:4px 0 8px;">
-    <form method="POST" action="<%= basePath %>/client/<%= orgIdentifier %>/bank-reconciliation" style="display:flex;gap:6px;align-items:center;">
-      <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
-      <input type="hidden" name="bank_account_id" value="<%= acc.bank_account_id %>">
-      <input type="number" step="0.01" name="statement_balance" value="<%= acc.statement_balance %>" class="form-input" style="flex:1;padding:5px 8px;font-size:0.82rem;">
-      <button type="submit" class="btn btn-primary btn-sm">Save</button>
-      <button type="button" class="btn btn-outlined btn-sm" onclick="toggleBbEditForm('<%= acc.bank_account_id %>')">Cancel</button>
+      <button type="button" class="btn btn-outlined btn-sm" onclick="toggleBb<%= acc.bankStatementBalance == null ? 'Add' : 'Edit' %>Form('<%= acc.accountId %>')">Cancel</button>
     </form>
   </div>
   <% } %>
 
   <div class="bb-balance-row">
-    <span class="bb-balance-label">Per Xero Statement</span>
-    <span class="bb-balance-value"><%= fmtBal(acc.xero_calculated_balance) || '—' %></span>
+    <span class="bb-balance-label">Per Xero Statement <span class="bb-help" title="The statement balance Xero's bank feed shows on its Bank accounts page<%= acc.xeroStatementDateLabel ? ' (' + acc.xeroStatementDateLabel + ', as Xero shows it, without a year)' : '' %>.">?</span></span>
+    <span class="bb-balance-value"><%= fmtBal(acc.xeroStatementBalance) || '—' %><% if (acc.xeroStatementBalance != null && acc.xeroStatementDateLabel) { %> <span style="font-size:0.7rem;color:var(--text-muted);">(<%= acc.xeroStatementDateLabel %>)</span><% } %></span>
   </div>
   <div class="bb-balance-row">
     <span class="bb-balance-label"><strong>Per Xero TB</strong></span>
-    <span class="bb-balance-value"><strong><%= fmtBal(acc.xero_calculated_balance) || '—' %></strong></span>
+    <span class="bb-balance-value"><strong><%= fmtBal(acc.xeroBalance) || '—' %></strong></span>
   </div>
   <div class="bb-balance-row">
-    <span class="bb-balance-label" style="color:<%= diffOk ? 'var(--success)' : (diff !== null ? 'var(--error)' : 'inherit') %>;font-weight:600;">Difference</span>
-    <span class="bb-balance-value" style="color:<%= diffOk ? 'var(--success)' : (diff !== null ? 'var(--error)' : 'inherit') %>;font-weight:600;"><%= diff !== null ? fmtBal(diff) : '—' %></span>
+    <span class="bb-balance-label" style="color:<%= diffOk ? 'var(--success)' : (known ? 'var(--error)' : 'inherit') %>;font-weight:600;">Difference</span>
+    <span class="bb-balance-value" style="color:<%= diffOk ? 'var(--success)' : (known ? 'var(--error)' : 'inherit') %>;font-weight:600;"><%= known ? fmtBal(acc.difference) : '—' %></span>
   </div>
 
-  <% if (acc.xero_balance_as_of) { %><p style="font-size:0.7rem;color:var(--text-muted);margin:6px 0 10px;">Xero balance as of <%= acc.xero_balance_as_of %></p><% } %>
+  <p style="font-size:0.7rem;color:var(--text-muted);margin:6px 0 10px;">
+    <% if (acc.evidenceSource) { %>Compared using: <%= acc.evidenceSource %><% if (acc.xeroBalanceSource !== 'Xero Bank accounts screen' && acc.xeroBalanceAsOf) { %>; Xero balance as of <%= fmtDisplayDate(acc.xeroBalanceAsOf) %><% } %><% } else { %>No closing balance to compare yet<% } %>
+  </p>
 
   <a href="<%= basePath %>/client/<%= orgIdentifier %>#statement-evidence" class="bb-upload-link">Upload Supporting Documents</a>
 
   <div class="bb-action-row">
-    <a href="<%= basePath %>/client/<%= orgIdentifier %>#bank-reconciliation" class="btn btn-primary btn-sm" style="background:#16a34a;border-color:#16a34a;min-width:90px;">Process</a>
-    <% if (acc.statement_balance != null) { %>
-      <button type="button" class="btn btn-outlined btn-sm" onclick="toggleBbEditForm('<%= acc.bank_account_id %>')">Edit Balance</button>
+    <a href="<%= basePath %>/client/<%= orgIdentifier %>#bank-screen" class="btn btn-primary btn-sm" style="background:#16a34a;border-color:#16a34a;min-width:90px;">Process</a>
+    <% if (acc.canEdit && acc.bankStatementBalance != null) { %>
+      <button type="button" class="btn btn-outlined btn-sm" onclick="toggleBbEditForm('<%= acc.accountId %>')">Edit Balance</button>
     <% } %>
   </div>
-  <div style="margin-top:8px;">
-    <a href="<%= basePath %>/client/<%= orgIdentifier %>#bank-reconciliation" class="btn btn-outlined btn-sm" style="width:100%;text-align:center;border-color:#16a34a;color:#16a34a;">Mark as "OK"</a>
-  </div>
-  <% if (isExcluded) { %><div style="margin-top:6px;font-size:0.75rem;color:var(--text-muted);text-align:center;">Excluded from checks</div><% } %>
+  <% if (findingKeyByAccount[acc.accountId]) { %>
+  <form method="POST" action="<%= basePath %>/client/<%= orgIdentifier %>/check/bank_balance/review" style="margin-top:8px;">
+    <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+    <input type="hidden" name="finding_key" value="<%= findingKeyByAccount[acc.accountId] %>">
+    <input type="hidden" name="action" value="ok">
+    <input type="hidden" name="return_status" value="active">
+    <button type="submit" class="btn btn-outlined btn-sm" style="width:100%;text-align:center;border-color:#16a34a;color:#16a34a;">Mark as "OK"</button>
+  </form>
+  <% } %>
+  <% if (acc.excluded) { %><div style="margin-top:6px;font-size:0.75rem;color:var(--text-muted);text-align:center;">Excluded from checks</div><% } %>
 </div>
 <% }) %>
 <% if (!allAccounts.length) { %>
-  <div class="empty-state" style="grid-column:1/-1;"><p>No bank accounts found — sync this client first.</p></div>
+  <div class="empty-state" style="grid-column:1/-1;"><p>No bank accounts found — sync this client, or update it from Xero.</p></div>
+<% } else if (!allAccounts.some(acc => !(acc.difference != null && !acc.hasDifference) && !acc.excluded)) { %>
+  <div class="empty-state" id="bbAllAgree" style="grid-column:1/-1;"><p>Every bank account agrees with its bank feed. Tick "Show all bank accounts" to see them.</p></div>
 <% } %>
 </div>
 
@@ -337,6 +354,8 @@ function toggleBbEditForm(id) {
         'accountCode', 'accountName', 'source',
         'ageDays', // rendered as a dedicated "Age" column instead of the generic "age Days" label
         'standaloneNote', // rendered inline under the Review actions, not as its own column
+        // Unprocessed Bank rows from Xero's Bank accounts page: ids and raw provenance; "lastRead" shows it readably.
+        'bankAccountId', 'batchId', 'readAt', 'readByName',
       ]);
       // Per-transaction column set for the drill-down (multi_account_suppliers/multi_tax_suppliers)
       // — same hidden-ID-field rule as the main table, applied to each transaction sub-object.
@@ -370,7 +389,14 @@ function toggleBbEditForm(id) {
         credit_note: { label: 'Credit note', color: '#4a4a4a' },
       };
     %>
-    <% const columns = Object.keys(tableRows[0]).filter(key => !hiddenColumns.has(key)); %>
+    <%
+      // Unprocessed Bank can mix imported-statement lines and per-account rows from Xero's Bank accounts page,
+      // which carry different fields, so its columns are every field any row has (not just the first row's).
+      const columnSource = checkType === 'unprocessed_bank'
+        ? [...new Set(tableRows.flatMap(row => Object.keys(row)))]
+        : Object.keys(tableRows[0]);
+      const columns = columnSource.filter(key => !hiddenColumns.has(key));
+    %>
     <% const mainHasAccountColumn = tableRows.some(item => item.accountCode); %>
     <% const mainHasSourceColumn = tableRows.some(item => item.source); %>
     <% const mainHasAge = tableRows.some(item => item.ageDays != null); %>

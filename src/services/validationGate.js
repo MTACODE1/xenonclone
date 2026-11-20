@@ -12,6 +12,9 @@ const MANUAL_CHECKS = new Set([
   //   not about the ledger. Needs a statement CSV or an accountant-entered closing balance.
   // unprocessed_bank: Xero documents that unreconciled bank statement data is deliberately not
   //   exposed by any public API, so the unprocessed pool is reconstructed from imported statements.
+  // Both also accept a reading of Xero's own Bank accounts page taken by the Akrio Verify browser
+  //   extension (statement balance, balance in Xero, items to reconcile; see bankEvidence.js). That still
+  //   needs a person signed in to Xero to take the reading, so both stay classified manual.
   // opening_balance_differences: the Xero side is automatic (Reports/BalanceSheet net assets) and
   //   the filed side is now read automatically from Companies House iXBRL accounts where the
   //   filing is machine-readable. It stays classified manual because that extraction is not

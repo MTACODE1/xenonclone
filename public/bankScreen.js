@@ -286,10 +286,16 @@
       button.disabled = true; button.textContent = 'Reading Xero…';
       progress.start();
       try {
-        await updateOne(base, card.dataset.csrf, tenantId, data.shortCode, progress.stage);
+        const saved = await updateOne(base, card.dataset.csrf, tenantId, data.shortCode, progress.stage);
         await load();
         progress.done();
         note.style.color = '#0B8F76'; note.textContent = 'Updated just now';
+        // The Bank Balance and Unprocessed Bank checks on this page were recalculated from the new reading;
+        // reload so their results and the health score show it, keeping this card in view.
+        if (saved && saved.checksUpdated) {
+          note.textContent = 'Updated just now. Refreshing the checks…';
+          setTimeout(() => { window.location.hash = 'bank-screen'; window.location.reload(); }, 800);
+        }
       } catch (error) {
         progress.fail();
         showFailure(error);

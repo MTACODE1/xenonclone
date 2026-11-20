@@ -402,7 +402,7 @@ test('with no active period key, a non-reserved label falls back to itself rathe
   assert.equal(resolvePeriodChecked(undefined, null), undefined);
 });
 
-test('RESERVED_PERIOD_LABELS contains exactly the eight semantic states, nothing else', () => {
+test('RESERVED_PERIOD_LABELS contains exactly the ten semantic states, nothing else', () => {
   // 'not_vat_registered' and 'not_applicable_freeagent' (both the not_applicable category) joined
   // the other four across sessions — see periodStatus.js for the full model. This test exists
   // specifically to catch a future label being added without updating resolveCheckDisplayStatus to
@@ -410,8 +410,10 @@ test('RESERVED_PERIOD_LABELS contains exactly the eight semantic states, nothing
   // 'not_a_company' and 'no_filed_accounts_yet' (Historical Changes) were added 12 Oct 2026; both are
   // resolved to not_applicable by resolveCheckDisplayStatus (tested below).
   // 'flat_rate_scheme' (Purchase Tax Missing on a Flat Rate Scheme client) was added 17 Oct 2026, same category.
+  // 'needs_bank_update' (Bank Balance / Unprocessed Bank whose only evidence is a reading of Xero's Bank accounts
+  // page more than 7 days old) was added 20 Nov 2026; resolved to not_configured (tested in bankEvidence.test.js).
   assert.deepEqual([...RESERVED_PERIOD_LABELS].sort(), [
-    'flat_rate_scheme', 'needs_sync', 'no_filed_accounts_yet', 'not_a_company', 'not_applicable_freeagent',
+    'flat_rate_scheme', 'needs_bank_update', 'needs_sync', 'no_filed_accounts_yet', 'not_a_company', 'not_applicable_freeagent',
     'not_configured', 'not_vat_registered', 'out_of_scope', 'unavailable',
   ]);
 });

@@ -9,9 +9,9 @@ const {
   updateOrganisationSupplierPatternLookback,
   updateOrganisationCheckConfig,
   getTransactionCountsForOrg, getBankReconciliationForOrg, updateStatementBalance,
-  getExcludedBankAccountIds, setBankAccountExcluded,
+  getExcludedBankAccountIds, setBankAccountExcluded, getLatestStatementImportsForOrg,
   getExpenseAccountsForOrg, getAccountCheckConfigurationForOrg,
-  setAccountCheckConfiguration, ensureAccountCodes, getIssueFindings, getIssueFindingSummary, setFindingReviewStates,
+  setAccountCheckConfiguration, ensureAccountCodes, getLiveScreenItemTotal, getIssueFindings, getIssueFindingSummary, setFindingReviewStates,
   setLineReviewState, getLineReviewStates, setFindingNote, getFindingNotes, getAllFindingKeysForIssue,
   addContactExclusion,
   createStatementImport, deleteStatementImport, getStatementImportByHash, getStatementImportsForOrg,
@@ -39,6 +39,7 @@ const { startJob } = require('../services/syncJobs');
 const { accessChanges } = require('../services/staffAccess');
 const { hydrateOrgIfEmpty } = require('../db/xeroCacheStore');
 const checkDescriptions = require('../data/checkDescriptions');
+const { buildBankEvidence, loadLatestBankScreenReading } = require('../services/bankEvidence');
 const {
   matchStatementLines, normalizeStatementLines, recomputeEvidenceIssues, sha256
 } = require('../services/statementEvidence');
@@ -92,6 +93,7 @@ function clientViewData(org, query = {}) {
   const checkDefs = CHECK_DEFINITIONS.map(def => {
     const issue = issues.find(i => i.check_type === def.type);
     const merged = { ...def, ...(issue || { count: null, potential_value_gbp: 0 }) };
+    if (issue && def.type === 'unprocessed_bank') merged.screenItems = getLiveScreenItemTotal(issue.id);
     // Single source of truth for what this check's state means — the template must never re-derive
     // this from its own period_checked string comparisons (see checkRules.js/periodStatus.js).
     return { ...merged, displayStatus: resolveCheckDisplayStatus(merged) };
@@ -493,8 +495,15 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
   const previousItems = previousPagination.items.map(decorate);
   const extraData = {};
   if (checkType === 'bank_balance') {
-    extraData.bankReconciliation = getBankReconciliationForOrg(org.id);
-    extraData.excludedBankAccountIds = getExcludedBankAccountIds(org.id);
+    // Same evidence builder the check itself uses, so the cards always show the figures it compared.
+    const bank = buildBankEvidence({
+      reconciliation: getBankReconciliationForOrg(org.id),
+      imports: getLatestStatementImportsForOrg(org.id),
+      excludedBankAccountIds: getExcludedBankAccountIds(org.id),
+      reading: await loadLatestBankScreenReading(org.id),
+    });
+    extraData.bankAccounts = bank.accounts;
+    extraData.bankReading = bank.reading;
   }
   res.render('checkDetail', {
     org, issue, def, items, pagination, previousItems, previousPagination, summary, status, contact, checkType, checkDescriptions, groupSupplierTransactions,

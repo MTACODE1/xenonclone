@@ -433,6 +433,23 @@ function refreshIssueAggregations(orgId, issueId = null) {
   `).run(orgId, issueId, issueId);
 }
 
+// Unprocessed Bank from Xero's Bank accounts page has one finding per bank account, each carrying how many
+// items are waiting. The check's count is accounts (so dismiss / mark OK work per account, like every other
+// finding); this is the total number of items across the live ones, for display next to that count.
+function getLiveScreenItemTotal(issueId) {
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT COALESCE(SUM(CAST(json_extract(f.detail_json, '$.itemsToReconcile') AS INTEGER)), 0) AS total,
+      COUNT(json_extract(f.detail_json, '$.itemsToReconcile')) AS accounts
+    FROM issue_findings f
+    JOIN issues ON issues.id = f.issue_id
+    LEFT JOIN finding_review_states r
+      ON r.org_id = f.org_id AND r.check_type = f.check_type AND r.finding_key = f.finding_key
+    WHERE f.issue_id = ? AND ${LIVE_FINDING_FILTER_SQL}
+  `).get(issueId);
+  return row && row.accounts ? Number(row.total) : null;
+}
+
 function getIssuesForOrg(orgId) {
   const db = getDb();
   refreshIssueAggregations(orgId);
@@ -2306,7 +2323,7 @@ module.exports = {
   updateOrganisationMultiAccountPatternLookback, updateOrganisationCheckConfig,
   markOrganisationDisconnected,
   upsertHealthScore, deleteIssuesForOrg, insertIssue, replaceIssueForCheck, refreshLatestHealthScore,
-  getIssuesForOrg, getScoringObservations, getIssueByCheckType,
+  getIssuesForOrg, getScoringObservations, getIssueByCheckType, getLiveScreenItemTotal,
   getIssuesForRun, getScoringObservationsForRun, activateSqliteResults, getSignedAccountsDate, getReviewFrom,
   getIssueFindings, getIssueFindingSummary, getReportFindings, setFindingReviewStates,
   setLineReviewState, getLineReviewStates, setFindingNote, getFindingNotes, getAllFindingKeysForIssue,

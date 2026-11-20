@@ -213,11 +213,11 @@ test('getLastReadTimes maps each organisation to its newest read', async () => {
 
 // ---- routes, with fake data access and a fake session ----
 const ORGS = [
-  { id: 1, name: 'Alpha Test Ltd', xero_tenant_id: 'tenant-1' },
+  { id: 1, name: 'Alpha Test Ltd', xero_tenant_id: 'tenant-1', period_key: 'since_lock_date:2025-10-31:2026-11-30' },
   { id: 2, name: 'Beta Test Ltd', xero_tenant_id: 'tenant-2' },
   { id: 3, name: 'No Code Ltd', xero_tenant_id: 'tenant-3' },
 ];
-function startApp(session, saved = []) {
+function startApp(session, saved = [], extraDeps = {}) {
   const app = express();
   app.use((req, res, next) => { req.session = session; next(); });
   app.use('/api/bank-screen', createBankScreenRouter({
@@ -230,6 +230,7 @@ function startApp(session, saved = []) {
     getLastReadTimes: async () => new Map([[1, new Date('2026-11-19T10:00:00Z')]]),
     getActiveBankAccountCount: async orgId => (orgId === 1 ? 4 : 0),
     getLatestReading: async orgId => (orgId === 1 ? { batchId: 41, readAt: new Date(), readByName: 'T', accounts: [] } : null),
+    ...extraDeps,
   }));
   return new Promise(resolve => { const server = http.createServer(app).listen(0, '127.0.0.1', () => resolve(server)); });
 }
@@ -251,7 +252,7 @@ test('POST /readings saves for the organisation the short code belongs to', asyn
   try {
     const ok = await call(server, 'POST', '/readings', { body: good({ tenantId: 'tenant-1' }), csrf: 'tok' });
     assert.equal(ok.status, 200);
-    assert.deepEqual(ok.json, { ok: true, batchId: 41, name: 'Alpha Test Ltd', accounts: 1 });
+    assert.deepEqual(ok.json, { ok: true, batchId: 41, name: 'Alpha Test Ltd', accounts: 1, checksUpdated: false });
     assert.equal(saved.length, 1);
     assert.equal(saved[0].orgId, 1);
     assert.deepEqual(saved[0].staff, { id: 9, name: 'Tester' });
@@ -319,4 +320,53 @@ test('GET /organisations and /latest only cover clients the staff member can acc
     assert.equal(list.json.organisations[1].lastReadAt, null);
     assert.equal((await call(adminServer, 'GET', '/latest/tenant-2')).json.reading, null);
   } finally { adminServer.close(); }
+});
+
+// ---- the bank checks are recalculated from a newly saved reading ----
+test('POST /readings recalculates the bank checks once, after the reading is saved', async () => {
+  const events = [];
+  const saved = { push: entry => events.push(['save', entry.orgId]) };
+  const server = await startApp(staff, saved, { recomputeEvidenceIssues: async (orgId, periodKey) => { events.push(['recompute', orgId, periodKey]); } });
+  try {
+    const ok = await call(server, 'POST', '/readings', { body: good({ tenantId: 'tenant-1' }), csrf: 'tok' });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.json.checksUpdated, true);
+    assert.deepEqual(events, [['save', 1], ['recompute', 1, 'since_lock_date:2025-10-31:2026-11-30']]);
+  } finally { server.close(); }
+});
+
+test('POST /readings still reports the saved reading when the recalculation fails', async () => {
+  const saved = [];
+  const errors = [];
+  const original = console.error;
+  console.error = (...args) => errors.push(args.join(' '));
+  const server = await startApp(staff, saved, { recomputeEvidenceIssues: async () => { throw new Error('sqlite busy'); } });
+  try {
+    const ok = await call(server, 'POST', '/readings', { body: good({ tenantId: 'tenant-1' }), csrf: 'tok' });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.json.ok, true);
+    assert.equal(ok.json.checksUpdated, false);
+    assert.equal(saved.length, 1);
+    assert.ok(errors.some(line => /could not be recalculated/.test(line) && /sqlite busy/.test(line)));
+  } finally { server.close(); console.error = original; }
+});
+
+test('POST /readings never recalculates when nothing was saved', async () => {
+  const recomputed = [];
+  const server = await startApp(staff, [], { recomputeEvidenceIssues: async orgId => { recomputed.push(orgId); } });
+  try {
+    assert.equal((await call(server, 'POST', '/readings', { body: good(), csrf: 'nope' })).status, 403);
+    assert.equal((await call(server, 'POST', '/readings', { body: good({ shortCode: '!beta2' }), csrf: 'tok' })).status, 403);
+    assert.equal((await call(server, 'POST', '/readings', { body: good({ tenantId: 'tenant-2' }), csrf: 'tok' })).status, 409);
+    assert.equal((await call(server, 'POST', '/readings', { body: good({ accounts: [] }), csrf: 'tok' })).status, 409);
+    assert.deepEqual(recomputed, []);
+  } finally { server.close(); }
+  const failingSave = await startApp(staff, { push: () => { throw new Error('mysql down'); } }, { recomputeEvidenceIssues: async orgId => { recomputed.push(orgId); } });
+  try {
+    const original = console.error; console.error = () => {};
+    const failed = await call(failingSave, 'POST', '/readings', { body: good(), csrf: 'tok' });
+    console.error = original;
+    assert.equal(failed.status, 500);
+    assert.deepEqual(recomputed, []);
+  } finally { failingSave.close(); }
 });

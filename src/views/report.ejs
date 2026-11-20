@@ -69,7 +69,7 @@
       <tr>
         <td><%= check.label %></td>
         <td><span class="badge <%= check.importance %>"><%= check.importance %></span></td>
-        <td class="<%= !isReviewable ? 'muted' : hasIssues ? 'issue' : 'ok' %>"><%= isReviewable ? (hasIssues ? 'Review' : 'OK') : statusLabel[status] %></td>
+        <td class="<%= !isReviewable ? 'muted' : hasIssues ? 'issue' : 'ok' %>"><%= isReviewable ? (hasIssues ? 'Review' : 'OK') : (check.period_checked === 'needs_bank_update' ? 'Needs Xero update' : statusLabel[status]) %></td>
         <td><%= isReviewable ? Number(check.count).toLocaleString('en-GB') : '—' %></td>
         <td><%= check.potential_value_gbp ? `£${Number(check.potential_value_gbp).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2})}` : '—' %></td>
       </tr>

@@ -10,6 +10,7 @@ function createBankScreenRouter(deps) {
   const {
     getAllOrganisations, getOrganisationById, getOrganisationByTenantId, staffHasOrgAccess,
     getShortCodeIndex, saveReading, getLatestReading, getLastReadTimes, getActiveBankAccountCount,
+    recomputeEvidenceIssues,
   } = deps;
   const router = express.Router();
 
@@ -81,7 +82,19 @@ function createBankScreenRouter(deps) {
         }
       }
       const batchId = await saveReading(org.id, reading, { id: req.session.staffId ?? null, name: req.session.staffName ?? null });
-      res.json({ ok: true, batchId, name: org.name, accounts: reading.accounts.length });
+      // The Bank Balance and Unprocessed Bank checks use this reading, so work them out again now. The reading
+      // is already saved; if the recalculation fails it is logged and the nightly sync will pick it up.
+      let checksUpdated = false;
+      if (typeof recomputeEvidenceIssues === 'function') {
+        try {
+          // Same period as the client's last sync, so labels and "Mark as OK" states line up with the nightly run.
+          await recomputeEvidenceIssues(org.id, org.period_key || null);
+          checksUpdated = true;
+        } catch (error) {
+          console.error(`[bank-screen] reading ${batchId} saved but the bank checks could not be recalculated for org ${org.id}:`, error && error.message);
+        }
+      }
+      res.json({ ok: true, batchId, name: org.name, accounts: reading.accounts.length, checksUpdated });
     } catch (error) { next(error); }
   });
 
