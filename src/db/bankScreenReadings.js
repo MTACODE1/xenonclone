@@ -119,6 +119,20 @@ async function getLastReadTimes({ pool = getPool(), ensure = ensureTables } = {}
   return new Map(rows.map(row => [Number(row.org_id), new Date(Number(row.read_at_unix) * 1000)]));
 }
 
+// How many active bank accounts the organisation has according to the data the nightly sync caches from
+// Xero's API. Used to refuse a screen reading that shows none when Xero clearly has some.
+async function getActiveBankAccountCount(orgId, { pool = getPool() } = {}) {
+  const [rows] = await pool.query(`SELECT payload FROM akrio_xero_cache WHERE org_id = ? AND entity_type = 'account'`, [orgId]);
+  let count = 0;
+  for (const row of rows) {
+    try {
+      const account = JSON.parse(zlib.gunzipSync(row.payload).toString());
+      if (account.type === 'BANK' && account.status === 'ACTIVE') count++;
+    } catch (error) { /* unreadable record: not counted */ }
+  }
+  return count;
+}
+
 // Organisation -> Xero short code, from the organisation record each sync already caches. Kept in
 // memory for ten minutes; a newly connected client appears after its first sync.
 let indexCache = null;
@@ -137,4 +151,4 @@ async function getShortCodeIndex({ pool = getPool(), now = Date.now() } = {}) {
   return index;
 }
 
-module.exports = { ensureTables, saveReading, getLatestReading, getLastReadTimes, getShortCodeIndex };
+module.exports = { ensureTables, saveReading, getLatestReading, getLastReadTimes, getActiveBankAccountCount, getShortCodeIndex };

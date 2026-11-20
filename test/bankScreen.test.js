@@ -228,6 +228,7 @@ function startApp(session, saved = []) {
     getShortCodeIndex: async () => buildShortCodeIndex([{ orgId: 1, shortCode: '!alpha' }, { orgId: 2, shortCode: '!beta2' }]),
     saveReading: async (orgId, reading, staff) => { saved.push({ orgId, reading, staff }); return 41; },
     getLastReadTimes: async () => new Map([[1, new Date('2026-11-19T10:00:00Z')]]),
+    getActiveBankAccountCount: async orgId => (orgId === 1 ? 4 : 0),
     getLatestReading: async orgId => (orgId === 1 ? { batchId: 41, readAt: new Date(), readByName: 'T', accounts: [] } : null),
   }));
   return new Promise(resolve => { const server = http.createServer(app).listen(0, '127.0.0.1', () => resolve(server)); });
@@ -271,6 +272,25 @@ test('POST /readings refuses: no token, wrong token, bad body, unknown code, no 
     assert.equal((await call(server, 'POST', '/readings', { body: good({ tenantId: 'tenant-2' }), csrf: 'tok' })).status, 409);
     assert.equal(saved.length, 0);
   } finally { server.close(); }
+});
+
+test('POST /readings refuses an empty reading when Xero has bank accounts for the client', async () => {
+  const saved = [];
+  const server = await startApp(staff, saved);
+  try {
+    const empty = await call(server, 'POST', '/readings', { body: good({ accounts: [] }), csrf: 'tok' });
+    assert.equal(empty.status, 409);
+    assert.match(empty.json.error, /has 4 in Xero/);
+    assert.equal(saved.length, 0);
+  } finally { server.close(); }
+  const adminSaved = [];
+  const adminServer = await startApp({ staffId: 1, staffRole: 'admin', csrfToken: 'tok' }, adminSaved);
+  try {
+    // A client with no bank accounts in Xero can still record "none".
+    const none = await call(adminServer, 'POST', '/readings', { body: good({ shortCode: '!beta2', accounts: [] }), csrf: 'tok' });
+    assert.equal(none.status, 200);
+    assert.equal(adminSaved.length, 1);
+  } finally { adminServer.close(); }
 });
 
 test('a session without a form token cannot post even with an empty header', async () => {

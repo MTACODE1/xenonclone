@@ -9,7 +9,7 @@ const { validateReading, readingFreshness, ReadingError, STALE_AFTER_DAYS } = re
 function createBankScreenRouter(deps) {
   const {
     getAllOrganisations, getOrganisationById, getOrganisationByTenantId, staffHasOrgAccess,
-    getShortCodeIndex, saveReading, getLatestReading, getLastReadTimes,
+    getShortCodeIndex, saveReading, getLatestReading, getLastReadTimes, getActiveBankAccountCount,
   } = deps;
   const router = express.Router();
 
@@ -71,6 +71,14 @@ function createBankScreenRouter(deps) {
       // The page says which client it was updating; if Xero's short code points at a different client, refuse.
       if (req.body.tenantId != null && req.body.tenantId !== org.xero_tenant_id) {
         return res.status(409).json({ error: 'The Xero page read does not belong to this client' });
+      }
+      // A page that had not finished loading can look like "no bank accounts". Refuse that when Xero's own
+      // data says the client has bank accounts, so an empty reading never replaces a real one.
+      if (!reading.accounts.length) {
+        const known = await getActiveBankAccountCount(org.id);
+        if (known > 0) {
+          return res.status(409).json({ error: `Xero's page showed no bank accounts, but this client has ${known} in Xero. Nothing was saved. Try again.` });
+        }
       }
       const batchId = await saveReading(org.id, reading, { id: req.session.staffId ?? null, name: req.session.staffName ?? null });
       res.json({ ok: true, batchId, name: org.name, accounts: reading.accounts.length });

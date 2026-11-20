@@ -5,6 +5,7 @@ importScripts('parser.js');
 const ALLOWED_SENDERS = ['https://wf.morethanaccountants.co.uk/akrio-verify/'];
 const LOAD_TIMEOUT_MS = 60000;
 const fail = (error, message) => ({ ok: false, error, message });
+const NOT_SIGNED_IN = 'Sign in to Xero in this browser, then try again.';
 
 function waitForLoad(tabId) {
   return new Promise((resolve, reject) => {
@@ -33,12 +34,29 @@ async function readBankPage(shortCode, progress = () => {}) {
     const loaded = await chrome.tabs.get(tab.id);
     let host = '';
     try { host = new URL(loaded.url || '').host; } catch (error) { host = ''; }
-    if (host === 'login.xero.com') return fail('not_signed_in', 'Sign in to Xero in this browser, then try again.');
+    if (host === 'login.xero.com') return fail('not_signed_in', NOT_SIGNED_IN);
     if (host !== 'go.xero.com') return fail('unexpected_page', 'Xero opened a different page than expected.');
     progress('reading');
-    const [injected] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['parser.js', 'xero-read.js'] });
-    const page = injected && injected.result;
-    if (!page) return fail('not_readable', 'Xero\'s page could not be read.');
+    // When Xero's session has expired, go.xero.com loads first and then sends the tab to its sign-in page. That
+    // can happen while the page is being read, so the tab's address is checked again afterwards.
+    const signedOut = async () => {
+      try { return new URL((await chrome.tabs.get(tab.id)).url || '').host === 'login.xero.com'; } catch (error) { return false; }
+    };
+    let page = null;
+    try {
+      const [injected] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['parser.js', 'xero-read.js'] });
+      page = injected && injected.result;
+    } catch (error) {
+      if (await signedOut()) return fail('not_signed_in', NOT_SIGNED_IN);
+      throw error;
+    }
+    if (await signedOut()) return fail('not_signed_in', NOT_SIGNED_IN);
+    if (!page) {
+      // The read was cut off, usually because the tab was being sent somewhere else. Give that a moment to land.
+      await new Promise(resolve => setTimeout(resolve, 2500));
+      if (await signedOut()) return fail('not_signed_in', NOT_SIGNED_IN);
+      return fail('not_readable', 'Xero\'s page could not be read.');
+    }
     if (page.host !== 'go.xero.com' || page.shortCode !== shortCode) {
       return fail('wrong_organisation', 'Xero did not open this client. Check that your Xero login has access to it.');
     }
