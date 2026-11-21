@@ -135,5 +135,12 @@ test('a mapped client keeps its own categories', () => {
 test('depreciation accounts are the default corporation tax add-back', () => {
   const accounts = [{ account_code: '416', account_name: 'Depreciation', account_type: 'DEPRECIATN' }, { account_code: '400', account_name: 'Advertising', account_type: 'EXPENSE' }, { account_code: null, account_type: 'DEPRECIATN' }];
   assert.deepEqual(defaultDepreciationAddbacks(accounts), [{ account_code: '416', pct: 100, treatment: 'default' }]);
+  // The UK chart: "Depreciation Expense" is an ordinary overhead; accumulated depreciation is a fixed asset.
+  const uk = [
+    { account_code: '416', account_name: 'Depreciation Expense', account_type: 'OVERHEADS', account_class: 'EXPENSE' },
+    { account_code: '711', account_name: 'Less Accumulated Depreciation on Fixtures and Fittings', account_type: 'FIXED', account_class: 'ASSET' },
+    { account_code: '417', account_name: 'Amortisation Expenses', account_type: 'EXPENSE', account_class: 'EXPENSE' },
+  ];
+  assert.deepEqual(defaultDepreciationAddbacks(uk).map(a => a.account_code), ['416']);
   assert.deepEqual(defaultDepreciationAddbacks([]), []);
 });

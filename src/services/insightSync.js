@@ -170,10 +170,17 @@ function sumPnL(report) {
 
 // Resolve a mapping category's configured account codes to the account *names* that appear on
 // balance sheet rows (Xero's Reports API labels rows by name, not code).
-// Xero's account type for depreciation is DEPRECIATN.
+// A depreciation EXPENSE account: Xero's own type for it is DEPRECIATN, but in the UK chart "Depreciation Expense"
+// is an ordinary overhead (seen live, 21 Nov 2026), so it is found by name as well. The "Less Accumulated
+// Depreciation" accounts are fixed assets on the balance sheet and are never added back.
 function defaultDepreciationAddbacks(accounts) {
-  return (accounts || []).filter(account => String(account.account_type || '').toUpperCase() === 'DEPRECIATN' && account.account_code)
-    .map(account => ({ account_code: account.account_code, pct: 100, treatment: 'default' }));
+  return (accounts || []).filter(account => {
+    if (!account.account_code) return false;
+    const type = String(account.account_type || '').toUpperCase();
+    if (type === 'DEPRECIATN') return true;
+    const isExpense = String(account.account_class || '').toUpperCase() === 'EXPENSE' || ['EXPENSE', 'OVERHEADS', 'DIRECTCOSTS'].includes(type);
+    return isExpense && /depreciation/i.test(account.account_name || '') && !/accumulated/i.test(account.account_name || '');
+  }).map(account => ({ account_code: account.account_code, pct: 100, treatment: 'default' }));
 }
 
 // "Enough cash to pay?" with nothing mapped: Xenon puts EVERY liability on the balance sheet (current and
