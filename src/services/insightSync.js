@@ -289,8 +289,77 @@ function parseBalanceSheet(report, ctx = {}) {
 }
 
 // ---- Main sync ----
-function monthlyPnlFromDate(toDate, realToday) {
-  return toDate.slice(0, 7) === realToday.slice(0, 7) ? undefined : `${toDate.slice(0, 7)}-01`;
+// ---- Monthly P&L: twelve true calendar months ----
+// Xero's "periods + timeframe=MONTH" comparison repeats the DAY RANGE of the newest column in every earlier
+// month. Asked for 1-15 Nov it returns 1-15 Oct, 1-15 Sep...; asked for 1-30 Sep it returns 1-30 Aug and
+// 1-30 Jul, silently dropping the 31st (seen live, 21 Nov 2026: July income 8,857 as at 15 Nov and 36,844 as at
+// 30 Sep, against a true 37,529). Only a range that ends on the 31st gives whole months, because Xero then
+// clamps shorter months to their own last day. So the months are fetched as:
+//   - the month of the "as at" date on its own, from the 1st to that date;
+//   - if the month before it has fewer than 31 days, that month on its own too;
+//   - every earlier month in one comparison request anchored on a 31-day month.
+// Each column the anchored request returns is checked to end on its month's last day; one that does not is
+// fetched on its own, so a change in Xero's behaviour can never bring the cut-off months back unnoticed.
+const SHORT_MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const pad2 = n => String(n).padStart(2, '0');
+function monthInfo(year, monthIndex) { // monthIndex may be negative or > 11
+  const first = new Date(Date.UTC(year, monthIndex, 1));
+  const y = first.getUTCFullYear(), m = first.getUTCMonth();
+  const days = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  return { key: `${y}-${pad2(m + 1)}`, start: `${y}-${pad2(m + 1)}-01`, end: `${y}-${pad2(m + 1)}-${pad2(days)}`, days, year: y, month: m };
+}
+const monthHeader = (info, day) => `${day} ${SHORT_MONTH_NAMES[info.month]} ${String(info.year).slice(2)}`;
+
+// asAt: 'YYYY-MM-DD'. Returns the twelve months (newest first) and the requests that fetch them.
+function monthlyPnlPlan(asAt, count = 12) {
+  const year = Number(asAt.slice(0, 4)), month = Number(asAt.slice(5, 7)) - 1;
+  const months = Array.from({ length: count }, (_, i) => monthInfo(year, month - i));
+  const current = { ...months[0], end: asAt };
+  months[0] = current;
+  const singles = [{ from: current.start, to: asAt, key: current.key }];
+  let anchorIndex = 1;
+  if (count > 2 && months[1].days !== 31) { singles.push({ from: months[1].start, to: months[1].end, key: months[1].key }); anchorIndex = 2; }
+  const anchor = months[anchorIndex];
+  const comparison = anchor
+    ? { from: anchor.start, to: anchor.end, periods: count - anchorIndex - 1, keys: months.slice(anchorIndex).map(m => m.key) }
+    : null;
+  return { months, singles, comparison };
+}
+
+// "31 Oct 26" -> { key: '2026-10', day: 31 }; anything else -> null.
+function parseMonthHeader(header) {
+  const match = String(header || '').trim().match(/^(\d{1,2}) ([A-Za-z]{3}) (\d{2})$/);
+  if (!match) return null;
+  const month = SHORT_MONTH_NAMES.findIndex(name => name.toLowerCase() === match[2].toLowerCase());
+  if (month < 0) return null;
+  return { key: `20${match[3]}-${pad2(month + 1)}`, day: Number(match[1]) };
+}
+
+// Which of the comparison request's months came back as a whole month (keyed by month), and which did not.
+function wholeMonthsFrom(parsed, plan) {
+  const whole = new Map(), missing = [];
+  const wanted = new Map(plan.months.map(m => [m.key, m]));
+  (parsed.headers || []).forEach((header, i) => {
+    const info = parseMonthHeader(header);
+    const month = info && wanted.get(info.key);
+    if (month && info.day === month.days) {
+      whole.set(month.key, { totalIncome: parsed.totalIncome[i] || 0, grossProfit: parsed.grossProfit[i] || 0, netProfit: parsed.netProfit[i] || 0 });
+    }
+  });
+  for (const key of plan.comparison ? plan.comparison.keys : []) if (!whole.has(key)) missing.push(key);
+  return { whole, missing };
+}
+
+// figuresByKey: Map(month key -> { totalIncome, grossProfit, netProfit }). Oldest month first, as the tab expects.
+function assembleMonthlyPnl(plan, figuresByKey) {
+  const months = [...plan.months].reverse().filter(m => figuresByKey.has(m.key));
+  return {
+    headers: months.map(m => monthHeader(m, Number(m.end.slice(8, 10)))),
+    totalIncome: months.map(m => figuresByKey.get(m.key).totalIncome),
+    grossProfit: months.map(m => figuresByKey.get(m.key).grossProfit),
+    netProfit: months.map(m => figuresByKey.get(m.key).netProfit),
+    wholeMonths: true,
+  };
 }
 
 async function syncInsight(tenantId, orgId, options = {}) {
@@ -318,25 +387,36 @@ async function syncInsight(tenantId, orgId, options = {}) {
     categorySettings: getInsightCategorySettings(orgId),
   };
 
-  // ---- 1. Monthly P&L (trailing 12m) ----
-  // Deliberately omit fromDate: Xero's Reports API anchors periods+timeframe off toDate alone,
-  // and passing a fromDate alongside them makes it return CUMULATIVE year-to-date totals per
-  // column instead of discrete monthly figures (each "month" quietly includes every prior month
-  // too, so the chart looked like relentless growth and "this month" was really "this year so
-  // far"). Confirmed against Xero directly — dropping fromDate reproduces the real per-month
-  // numbers exactly.
-  // With no fromDate Xero starts the newest column at the first day of the REAL current month, so an end date in
-  // an earlier month ("show data up to 31 Oct") was refused ("fromDate must be before toDate"). For an end date
-  // outside the current month, start that column at the first day of the end date's own month: one calendar
-  // month per column, exactly as before. The normal sync (end date today) is left as it was.
-  const monthlyFromDate = monthlyPnlFromDate(todayStr, new Date().toISOString().slice(0, 10));
+  // ---- 1. Monthly P&L (twelve whole calendar months; see monthlyPnlPlan) ----
   let monthlyPnL = null;
   try {
-    const resp = await apiCall(tenantId, async (xero, tid) =>
-      xero.accountingApi.getReportProfitAndLoss(tid, monthlyFromDate, todayStr, 11, 'MONTH', undefined, undefined, undefined, undefined, true, false)
-    );
-    const report = resp?.body?.reports?.[0];
-    if (report) { monthlyPnL = parsePnL(report); saveInsightData(orgId, 'pnl', monthlyPnL); }
+    const plan = monthlyPnlPlan(todayStr);
+    const figures = new Map();
+    const single = async request => {
+      const resp = await apiCall(tenantId, async (xero, tid) =>
+        xero.accountingApi.getReportProfitAndLoss(tid, request.from, request.to, undefined, undefined, undefined, undefined, undefined, undefined, true, false)
+      );
+      const report = resp?.body?.reports?.[0];
+      if (!report) throw new Error(`no report for ${request.key}`);
+      const parsed = parsePnL(report);
+      figures.set(request.key, { totalIncome: parsed.totalIncome[0] || 0, grossProfit: parsed.grossProfit[0] || 0, netProfit: parsed.netProfit[0] || 0 });
+    };
+    for (const request of plan.singles) await single(request);
+    if (plan.comparison) {
+      const resp = await apiCall(tenantId, async (xero, tid) =>
+        xero.accountingApi.getReportProfitAndLoss(tid, plan.comparison.from, plan.comparison.to, plan.comparison.periods, 'MONTH', undefined, undefined, undefined, undefined, true, false)
+      );
+      const report = resp?.body?.reports?.[0];
+      const { whole, missing } = report ? wholeMonthsFrom(parsePnL(report), plan) : { whole: new Map(), missing: plan.comparison.keys };
+      for (const [key, value] of whole) figures.set(key, value);
+      if (missing.length) console.warn(`[insightSync] ${tenantId}: ${missing.length} month(s) not returned as whole months, fetching each on its own`);
+      for (const key of missing) {
+        const month = plan.months.find(m => m.key === key);
+        await single({ from: month.start, to: month.end, key });
+      }
+    }
+    monthlyPnL = assembleMonthlyPnl(plan, figures);
+    saveInsightData(orgId, 'pnl', monthlyPnL);
   } catch (e) { errors.push(`P&L monthly: ${errDetail(e)}`); }
 
   // ---- 1b. Cash movements (last 4 calendar months) — "Recent Cash Movements" needs actual net
@@ -346,7 +426,8 @@ async function syncInsight(tenantId, orgId, options = {}) {
   const cashMovements = [];
   for (let i = 3; i >= 0; i--) {
     const monthDate = new Date(today.getFullYear(), today.getMonth() - i, 1);
-    const monthEnd = new Date(today.getFullYear(), today.getMonth() - i + 1, 0);
+    // The newest month stops at the "as at" date, so a date in the past never includes days after it.
+    const monthEnd = i === 0 ? today : new Date(today.getFullYear(), today.getMonth() - i + 1, 0);
     const label = monthDate.toLocaleDateString('en-GB', { month: 'long' });
     try {
       const resp = await apiCall(tenantId, async (xero, tid) =>
@@ -432,4 +513,4 @@ async function syncInsight(tenantId, orgId, options = {}) {
   return { ok: errors.length === 0, errors };
 }
 
-module.exports = { syncInsight, getFinancialYearPeriods, CASH_HEALTH_CATEGORIES, monthlyPnlFromDate };
+module.exports = { syncInsight, getFinancialYearPeriods, CASH_HEALTH_CATEGORIES, monthlyPnlPlan, parseMonthHeader, wholeMonthsFrom, assembleMonthlyPnl };
