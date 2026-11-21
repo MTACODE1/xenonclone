@@ -1328,3 +1328,28 @@ test('duplicate contacts: Xenon-style spelling similarity and no pairing of tran
   assert.equal(pairs([c(1, 'Deliveroo'), c(2, 'Deliveroo London')]).length, 1);
   assert.equal(pairs([c(1, 'Tesco'), c(2, 'Shell')]).length, 0);
 });
+
+test('duplicate invoices: same customer, day and amount but different supplies are not duplicates (Perendale Gazel)', () => {
+  const { findDuplicates } = require('../src/services/checkRules');
+  const doc = (id, description, extra = {}) => ({
+    invoiceID: id, contact: { contactID: 'gazel' }, total: 500, amountDue: 500, date: '2026-03-03',
+    lineItems: [{ description }], ...extra,
+  });
+  assert.equal(findDuplicates([
+    doc('a', 'MILLING and GRAIN (English) March 2026 Full Page', { amountDue: 0 }),
+    doc('b', 'MILLING and GRAIN (English) April 2026 Full Page'),
+  ], 0, { requireUnpaidPair: true }).length, 0);
+  assert.equal(findDuplicates([doc('a', 'Advert March 2026'), doc('b', 'Advert March 2026')], 0, { requireUnpaidPair: true }).length, 1,
+    'the same supply entered twice is still a duplicate');
+  assert.equal(findDuplicates([doc('a', '.'), doc('b', 'Advert')], 0, { requireUnpaidPair: true }).length, 1,
+    'a blank description does not hide a duplicate');
+});
+
+test('purchase tax missing: bank charge accounts written with a dash are left out (Perendale)', () => {
+  const { dropTaxMissingNoise, PURCHASE_TAX_NOISE_ACCOUNT_NAME } = require('../src/services/checkRules');
+  const nameByCode = new Map([['7901', 'Bank - Charges'], ['10000', 'Bank - PayPal fees'], ['7405', 'Travel - Overseas']]);
+  const kept = dropTaxMissingNoise([
+    { accountCode: '7901', amount: 5 }, { accountCode: '10000', amount: 5 }, { accountCode: '7405', amount: 5 },
+  ], { nameByCode, skipName: PURCHASE_TAX_NOISE_ACCOUNT_NAME });
+  assert.deepEqual(kept.map(line => line.accountCode), ['7405']);
+});

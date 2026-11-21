@@ -535,6 +535,17 @@ function purchaseOnlyTaxTypes(taxRates) {
 // consistent with Xenon's phrasing that reference/total are "further narrowing" on a base match).
 // Never flip the fallback to false without that per-client evidence — see the master completion
 // prompt's rule against tuning a universal default from a single observation.
+// The line descriptions of a document, normalised. Empty when it has none worth comparing (blank or ".").
+function documentContentKey(item) {
+  return (item.lineItems || []).map(line => String(line.description || '').toLowerCase().replace(/[^a-z0-9]/g, ''))
+    .filter(text => text.length >= 3).sort().join('|');
+}
+function describeDifferentSupplies(a, b) {
+  const keyA = documentContentKey(a);
+  const keyB = documentContentKey(b);
+  return Boolean(keyA && keyB && keyA !== keyB);
+}
+
 function findDuplicates(items, windowDays = CHECK_DEFAULTS.duplicateWindowDays, options = {}) {
   const requireUnpaidPair = Boolean(options.requireUnpaidPair);
   const requireExactReference = Boolean(options.requireExactReference);
@@ -577,6 +588,9 @@ function findDuplicates(items, windowDays = CHECK_DEFAULTS.duplicateWindowDays, 
         // document at the same contact/amount/date silently satisfy this filter regardless of the
         // setting's intent, which is to REQUIRE a genuinely shared reference, not the absence of one.
         if (requireExactReference && (!anchorReference || referenceOf(remaining[index]) !== anchorReference)) continue;
+        // Two documents that describe different things are two sales, not one entered twice (Perendale, 22 Nov 2026:
+        // Gazel's "March 2026 Full Page" and "April 2026 Full Page" adverts, same customer, day and $500).
+        if (!matchOnReference && describeDifferentSupplies(anchor, remaining[index])) continue;
         group.push(remaining[index]);
         remaining.splice(index, 1);
       }
@@ -1150,7 +1164,9 @@ function isVagueAccountName(name) {
   return words.some(word => VAGUE_WORDS.has(word)) && words.every(word => VAGUE_WORDS.has(word) || GENERIC_NOUNS.has(word));
 }
 // Purchase Tax Missing ignores these by name: bank fees (no VAT), rent (generally exempt) and mileage claims.
-const PURCHASE_TAX_NOISE_ACCOUNT_NAME = /\bbank\s*(fees?|charges?)\b|\brent\b|mileage/i;
+// "Bank Fees", "Bank Charges", and the same names written "Bank - Charges" or "Bank - PayPal fees" (Perendale, 22 Nov
+// 2026: 279 bank-charge lines were flagged because the dash hid the name).
+const PURCHASE_TAX_NOISE_ACCOUNT_NAME = /\bbank\b[\s\-\u2013:]*(?:[a-z]+\s+)?(fees?|charges?)\b|\brent\b|mileage/i;
 
 // The review period starts from the later of the Xero lock date and the last signed accounts date. The accountants
 // review a client from its last signed accounts (Flyhighdigital 31 Jul 2025, Cinch 31 Aug 2025) even where Xero's lock
