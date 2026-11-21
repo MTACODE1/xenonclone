@@ -226,7 +226,8 @@ async function readBankLines(shortCode, accountName, progress = () => {}) {
     const lines = parser.parseStatementRows(page.columns, page.rows);
     const problems = parser.statementProblems(page.columns, page.rows, lines, page.totalShownByXero, Boolean(page.truncated));
     if (problems.length) return pageChanged('Bank statements', problems);
-    return { ok: true, lines: { shortCode, accountName, lines, truncated: Boolean(page.truncated), totalShownByXero: page.totalShownByXero } };
+    // accountId lets Akrio Verify link each line to this account's Reconcile tab in Xero.
+    return { ok: true, lines: { shortCode, accountName, accountId, lines, truncated: Boolean(page.truncated), totalShownByXero: page.totalShownByXero } };
   } catch (error) {
     if (error && error.message === 'timeout') return fail('timeout', 'Xero took too long to load.');
     return fail('extension_error', 'The Xero page could not be read: ' + String((error && error.message) || error).slice(0, 200));

@@ -207,7 +207,25 @@
   const ageDays = iso => Math.max(0, Math.round((Date.parse(new Date().toISOString().slice(0, 10)) - Date.parse(iso)) / 86400000));
   let linesBusy = false;
 
-  function linesTable(lines) {
+  // Xero has no page of its own for a statement line that is not reconciled yet (its Bank statements page only links
+  // reconciled lines, and the Reconcile tab ignores a line id in its address; checked live 21 Nov 2026). So a line
+  // opens its account's Reconcile tab, through Xero's organisation switch so the right client is open, and the
+  // line's amount is copied for Xero's search box.
+  const XERO_ACCOUNT_ID = /^[0-9a-f]{32}$/;
+  function reconcileUrl(shortCode, accountId) {
+    if (!/^![A-Za-z0-9!-]{2,12}$/.test(String(shortCode || '')) || !XERO_ACCOUNT_ID.test(String(accountId || ''))) return null;
+    return 'https://go.xero.com/organisationlogin/default.aspx?shortcode=' + encodeURIComponent(shortCode)
+      + '&redirecturl=' + encodeURIComponent('/Bank/BankRec.aspx?accountID=' + accountId);
+  }
+  const plainAmount = line => {
+    const value = line.spent != null ? line.spent : line.received;
+    return value == null ? '' : Math.abs(value).toFixed(2);
+  };
+  function copyText(value) {
+    try { if (value && navigator.clipboard) navigator.clipboard.writeText(value).catch(() => {}); } catch (error) { /* copying is a convenience only */ }
+  }
+
+  function linesTable(lines, link) {
     const wrap = el('div', null, 'overflow:auto;max-height:52vh;border:1px solid #E5EAF2;border-radius:8px;');
     const table = el('table'); table.className = 'data-table'; table.style.width = '100%';
     const head = el('tr');
@@ -221,7 +239,20 @@
       const days = ageDays(line.date);
       row.appendChild(el('td', days + (days === 1 ? ' day' : ' days'), NUM + (days > 30 ? 'color:#B42318;font-weight:600;' : 'color:#5A6A85;')));
       const what = el('td');
-      what.appendChild(el('div', line.particulars || line.payee || '—', 'color:#2A3547;'));
+      const label = line.particulars || line.payee || '—';
+      if (link) {
+        const anchor = el('a', label + ' ↗', 'color:#1E5FD9;text-decoration:none;font-weight:500;');
+        anchor.href = link; anchor.target = '_blank'; anchor.rel = 'noopener noreferrer';
+        anchor.title = 'Open this account\'s Reconcile tab in Xero. The amount ' + plainAmount(line) + ' is copied: paste it into Xero\'s search to find this line.';
+        anchor.addEventListener('click', () => copyText(plainAmount(line)));
+        what.appendChild(anchor);
+        row.style.cursor = 'pointer';
+        row.addEventListener('mouseenter', () => { row.style.background = '#F5F8FF'; });
+        row.addEventListener('mouseleave', () => { row.style.background = ''; });
+        row.addEventListener('click', event => { if (!event.target.closest('a')) anchor.click(); });
+      } else {
+        what.appendChild(el('div', label, 'color:#2A3547;'));
+      }
       if (line.payee && line.particulars) what.appendChild(el('div', line.payee, 'font-size:0.72rem;color:#7C8FAC;'));
       row.appendChild(what);
       row.appendChild(el('td', [line.reference, line.code].filter(Boolean).join(' · ') || '—', 'color:#5A6A85;'));
@@ -254,7 +285,8 @@
 
   // context: { base, csrf, tenantId } of the client card, used to save the list to Akrio Verify.
   async function openLinesDialog(shortCode, accounts, context = {}) {
-    const dialog = el('dialog', null, 'border:none;border-radius:12px;padding:0;width:min(980px,94vw);max-height:90vh;box-shadow:0 20px 60px rgba(20,30,50,0.35);');
+    // Centred explicitly: the site's stylesheet resets the margins that normally centre a dialog.
+    const dialog = el('dialog', null, 'position:fixed;inset:0;margin:auto;border:none;border-radius:12px;padding:0;width:min(980px,94vw);height:fit-content;max-height:90vh;box-shadow:0 20px 60px rgba(20,30,50,0.35);');
     const header = el('div', null, 'display:flex;justify-content:space-between;align-items:flex-start;gap:16px;padding:16px 20px;border-bottom:1px solid #E5EAF2;background:#F2F6FA;');
     const titles = el('div');
     titles.appendChild(el('div', 'Items to reconcile', 'font-weight:700;font-size:1rem;color:#2A3547;'));
@@ -323,7 +355,12 @@
           const saved = el('span', '', 'font-size:0.75rem;color:#7C8FAC;');
           tools.appendChild(saved); tools.appendChild(downloadButton(account.accountName, lines));
           section.appendChild(tools);
-          section.appendChild(linesTable(lines));
+          const link = reconcileUrl(shortCode, answer.lines.accountId);
+          if (link) {
+            section.appendChild(el('div', 'Click a line to open this account\'s Reconcile tab in Xero. The line\'s amount is copied, so you can paste it into Xero\'s search box to go straight to it.',
+              'font-size:0.75rem;color:#5A6A85;margin:0 0 8px;'));
+          }
+          section.appendChild(linesTable(lines, link));
           // Keep the list in Akrio Verify: it gives the Unprocessed Bank check its value and the age of the oldest item.
           if (context.tenantId) {
             getJson((context.base || '') + '/api/bank-screen/lines', {
