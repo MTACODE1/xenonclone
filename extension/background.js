@@ -104,6 +104,16 @@ async function readBankPage(shortCode, progress = () => {}) {
       return fail('wrong_organisation', 'Xero did not open this client. Check that your Xero login has access to it.');
     }
     if (page.xeroError) return fail('xero_error', 'Xero says it cannot show this client\'s Bank accounts page right now. Try again later, or open it in Xero to check.');
+    // Never save a card that is still loading: its missing count would be read as 0 to reconcile.
+    if (Array.isArray(page.loadingCards) && page.loadingCards.length) {
+      return fail('not_settled', 'Xero is still loading the bank transactions for ' + page.loadingCards.slice(0, 3).join(', ')
+        + '. Nothing was saved. Try again in a minute.');
+    }
+    // A problem that stayed for the whole wait with the cards no longer changing is a real change to Xero's page.
+    if (Array.isArray(page.problems) && page.problems.length && (page.settled || page.stableWithProblems)) {
+      return pageChanged('Bank accounts', page.problems);
+    }
+    // Anything else unsettled (cards still changing at the end) is Xero being slow: amber, nothing saved.
     if (!page.settled) return fail('not_settled', 'Xero was too slow to show the bank accounts. Try again in a moment.');
     if (Array.isArray(page.problems) && page.problems.length) return pageChanged('Bank accounts', page.problems);
     if (!page.accounts.length && !page.pageRendered) {

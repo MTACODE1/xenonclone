@@ -101,3 +101,10 @@ test('the signed accounts date comes from Companies House or an explicit made-up
   assert.deepEqual(getReviewFrom({ id: 1 }, '2025-09-30', db), { date: '2025-09-30', source: 'lock_date' }, 'an explicit lock date overrides the org row');
   assert.deepEqual(getReviewFrom({ id: 3, lock_date: '2025-01-31' }, undefined, db), { date: '2025-01-31', source: 'lock_date' });
 });
+
+test('periodKeyLabel turns a stored period key into words', () => {
+  const { periodKeyLabel } = require('../src/services/periodResolver');
+  assert.equal(periodKeyLabel('since_lock_date:2025-09-30:2026-11-21'), '30/09/2025 to 21/11/2026');
+  assert.equal(periodKeyLabel('previous_fy:2024-04-01:2025-03-31'), 'Previous financial year (01/04/2024 to 31/03/2025)');
+  assert.equal(periodKeyLabel('odd_value'), 'odd value');
+});

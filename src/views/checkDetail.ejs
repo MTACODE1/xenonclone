@@ -16,6 +16,18 @@ function fmtDisplayDate(val) {
   const [y, m, d] = val.split('-');
   return `${d}/${m}/${y}`;
 }
+// Money is shown as £ with pence whatever its value: a whole-pound amount is stored as a plain integer (22, 1188),
+// which used to be shown bare. Decided by the column name, so counts (items to reconcile, days) stay plain numbers.
+const MONEY_KEY_RE = /(amount|total|value|balance|gross|net|spent|received|difference|outstanding|due)(gbp)?$/i;
+const NOT_MONEY_KEY_RE = /(date|days|count|items|lines|age|code|number|rate|percent)/i;
+function isMoneyCell(key, val) {
+  if (typeof val !== 'number' || !Number.isFinite(val)) return false;
+  if (!Number.isInteger(val)) return true;
+  return MONEY_KEY_RE.test(String(key)) && !NOT_MONEY_KEY_RE.test(String(key));
+}
+function fmtMoney(val) {
+  return (val < 0 ? '-£' : '£') + Math.abs(val).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
 %>
 
 <% if (viewInfo) { %>
@@ -60,7 +72,7 @@ function fmtDisplayDate(val) {
           <div class="check-stat"><strong class="text-error">£<%= Number(issue.potential_value_gbp).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}) %></strong><span>potential value</span></div>
         <% } %>
         <% if (issue.period_checked) { %>
-          <div class="check-stat"><strong><%= issue.period_checked.replace(/_/g, ' ') %></strong><span>period checked</span></div>
+          <div class="check-stat"><strong><%= (typeof periodCheckedLabel !== 'undefined' && periodCheckedLabel) || issue.period_checked.replace(/_/g, ' ') %></strong><span>period checked</span></div>
         <% } %>
       </div>
       <% if (issue.potential_value_gbp > 0 && (checkType === 'multi_account_suppliers' || checkType === 'multi_tax_suppliers')) { %>
@@ -470,8 +482,8 @@ function toggleBbEditForm(id) {
               <% } %>
               <% columns.forEach(key => { const val = item[key]; %>
                 <td>
-                  <% if (typeof val === 'number' && !Number.isInteger(val)) { %>
-                    £<%= Number(val).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}) %>
+                  <% if (isMoneyCell(key, val)) { %>
+                    <%= fmtMoney(val) %>
                   <% } else if (Array.isArray(val)) { %>
                     <%# A group of bills/invoices is listed as "reference · amount · status · date", never as [object Object] %>
                     <%= val.length && val[0] !== null && typeof val[0] === 'object'
@@ -589,10 +601,8 @@ function toggleBbEditForm(id) {
                               <% } %>
                               <% transactionColumns.forEach(key => { const val = tx[key]; %>
                                 <td>
-                                  <% if (typeof val === 'number' && !Number.isInteger(val)) { %>
-                                    £<%= Number(val).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}) %>
-                                  <% } else if (key === 'amount' && typeof val === 'number') { %>
-                                    £<%= Number(val).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}) %>
+                                  <% if (isMoneyCell(key, val)) { %>
+                                    <%= fmtMoney(val) %>
                                   <% } else { %>
                                     <%= val != null ? fmtDisplayDate(val) : '—' %>
                                   <% } %>

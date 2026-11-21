@@ -46,8 +46,8 @@ test('a purchase credit note in a supplier drill-down gets a credit note link an
 test('a bank, payment or journal identifier never turns into an invoice link', () => {
   assert.deepEqual(urls(xeroLinks('bill_or_direct', { source: 'bank', id: 'b9' })), [BANK('b9')]);
   assert.deepEqual(urls(xeroLinks('bill_or_direct', { source: 'bank_spend', id: 'b9' })), [BANK('b9')]);
-  assert.deepEqual(urls(xeroLinks('duplicate_invoices_like_bill', { source: 'payment', id: 'p9' })), ['https://go.xero.com/Search/Default.aspx?searchTerm=p9']);
-  assert.deepEqual(urls(xeroLinks('undocumented_bills', { source: 'manual_journal', id: 'j9', number: '5447' })), ['https://go.xero.com/Search/Default.aspx?searchTerm=5447']);
+  assert.deepEqual(urls(xeroLinks('duplicate_invoices_like_bill', { source: 'payment', id: 'p9' })), []);
+  assert.deepEqual(urls(xeroLinks('undocumented_bills', { source: 'manual_journal', id: 'j9', number: '5447' })), []);
 });
 
 test('invoice and bill checks keep working from a plain id, duplicates open both documents', () => {
@@ -57,21 +57,21 @@ test('invoice and bill checks keep working from a plain id, duplicates open both
   assert.deepEqual(urls(xeroLinks('duplicate_invoices', { id1: 'd1', id2: 'd2' })), [RECEIVABLE('d1'), RECEIVABLE('d2')]);
 });
 
-test('unreconciled items, contacts, encoding, de-duplication and the search fallback', () => {
+test('unreconciled items, contacts, encoding and de-duplication; no link to the retired Xero search page', () => {
   assert.deepEqual(urls(xeroLinks('unreconciled_bank_items', { source: 'bank', bankTransactionID: 'bt1' })), [BANK('bt1')]);
-  assert.deepEqual(urls(xeroLinks('unreconciled_bank_items', { source: 'payment', paymentID: 'pay1' })), ['https://go.xero.com/Search/Default.aspx?searchTerm=pay1']);
+  assert.deepEqual(urls(xeroLinks('unreconciled_bank_items', { source: 'payment', paymentID: 'pay1' })), []);
   assert.deepEqual(urls(xeroLinks('multi_tax_suppliers', { contactId: 'k1' })), ['https://go.xero.com/Contacts/View/k1']);
   assert.deepEqual(urls(xeroLinks('duplicate_contacts', { id1: 'k1', id2: 'k2' })), ['https://go.xero.com/Contacts/View/k1', 'https://go.xero.com/Contacts/View/k2']);
   assert.deepEqual(urls(xeroLinks('misallocated_items', { source: 'bill', invoiceId: 'a b/c?d' })), [PAYABLE('a%20b%2Fc%3Fd')]);
   assert.deepEqual(urls(xeroLinks('multi_tax_suppliers', { contactId: 'k1', contactID: 'k1' })), ['https://go.xero.com/Contacts/View/k1']);
-  assert.deepEqual(urls(xeroLinks('tax_review_by_code', { name: 'Some Item' })), ['https://go.xero.com/Search/Default.aspx?searchTerm=Some%20Item']);
+  assert.deepEqual(urls(xeroLinks('tax_review_by_code', { name: 'Some Item' })), []);
 });
 
 test('REGRESSION: a generic id is read by what the item says it is (source, type) and never overrides an explicit other id', () => {
   // the real Motor Vehicle finding shape: source 'bill' with a generic id
   assert.deepEqual(urls(xeroLinks('motor_vehicle_expenses', { source: 'bill', id: 'bill-1', number: 'B001' })), [PAYABLE('bill-1')]);
   assert.deepEqual(urls(xeroLinks('motor_vehicle_expenses', { source: 'invoice', id: 'inv-1' })), [RECEIVABLE('inv-1')]);
-  assert.deepEqual(urls(xeroLinks('unapproved_bills', { id: 'p1', paymentId: 'p1' })), ['https://go.xero.com/Search/Default.aspx?searchTerm=p1'], 'a payment id is not an invoice');
+  assert.deepEqual(urls(xeroLinks('unapproved_bills', { id: 'p1', paymentId: 'p1' })), [], 'a payment id is not an invoice');
   assert.deepEqual(urls(xeroLinks('unapproved_bills', { id: 'b1', bankTransactionId: 'b1' })), [BANK('b1')], 'a bank transaction id is not an invoice');
   assert.deepEqual(urls(xeroLinks('unapproved_bills', { id: 'c1', creditNoteId: 'c1' })), ['https://go.xero.com/AccountsReceivable/ViewCreditNote.aspx?creditNoteID=c1'], 'an explicit credit note id');
   assert.deepEqual(urls(xeroLinks('unapproved_bills', { id: 'c1', type: 'ACCPAYCREDIT' })), ['https://go.xero.com/AccountsPayable/ViewCreditNote.aspx?creditNoteID=c1'], 'a credit type on a generic id');
@@ -88,6 +88,30 @@ test('REGRESSION: a bare id is a document when its Xero type says so, a credit n
   assert.deepEqual(xeroLinks('misallocated_items', {}), []);
   assert.deepEqual(xeroLinks('misallocated_items', { description: 'x' }), []);
   // explicit other ids still win over a document type
-  assert.deepEqual(urls(xeroLinks('misallocated_items', { id: 'x', type: 'ACCPAY', paymentId: 'x' })), ['https://go.xero.com/Search/Default.aspx?searchTerm=x']);
+  assert.deepEqual(urls(xeroLinks('misallocated_items', { id: 'x', type: 'ACCPAY', paymentId: 'x' })), []);
   assert.deepEqual(urls(xeroLinks('misallocated_items', { id: 'x', type: 'ACCPAY', source: 'bank_spend' })), [BANK('x')]);
+});
+
+// Xero's search page (Search/Default.aspx) answers 404 since Nov 2026 and its new search has no address.
+const CLIENT = code => 'https://go.xero.com/organisationlogin/default.aspx?shortcode=' + encodeURIComponent(code);
+test('nothing links to Xero\'s retired search page; the client opens in Xero instead, through its organisation switch', () => {
+  const ctx = { shortCode: '!5ymJv' };
+  for (const [check, item] of [['tax_review_by_code', { name: 'Some Item' }], ['unreconciled_bank_items', { source: 'payment', paymentID: 'pay1' }], ['undocumented_bills', { source: 'manual_journal', id: 'j9', number: '5447' }]]) {
+    const all = xeroLinks(check, item, ctx);
+    assert.ok(all.every(link => !/Search\/Default\.aspx/.test(link.url)), check);
+    assert.deepEqual(all, [{ label: 'Open client in Xero', url: CLIENT('!5ymJv') }], check);
+  }
+  // no short code known: no link rather than a broken one
+  assert.deepEqual(xeroLinks('tax_review_by_code', { name: 'Some Item' }, {}), []);
+  assert.deepEqual(xeroLinks('tax_review_by_code', { name: 'Some Item' }, { shortCode: 'not a code' }), []);
+});
+
+test('a bank account finding opens that account\'s Reconcile tab in the right client', () => {
+  const guid = 'dad3cde7-29bb-42d1-990c-de6ee3f88d74';
+  const reconcile = CLIENT('!HbV9W') + '&redirecturl=' + encodeURIComponent('/Bank/BankRec.aspx?accountID=' + guid);
+  assert.deepEqual(xeroLinks('unprocessed_bank', { id: 'bank-screen:' + guid, bankAccountId: guid, account: 'Novahomes Plymouth City Ltd' }, { shortCode: '!HbV9W' }),
+    [{ label: 'Open account in Xero', url: reconcile }]);
+  assert.deepEqual(urls(xeroLinks('bank_balance', { accountId: guid, name: 'Novahomes Plymouth City Ltd' }, { shortCode: '!HbV9W' })), [reconcile]);
+  // an account Verify only knows from the screen (no Xero id): the client itself, never a guessed account page
+  assert.deepEqual(urls(xeroLinks('unprocessed_bank', { id: 'bank-screen:screen:ab12', bankAccountId: 'screen:ab12' }, { shortCode: '!HbV9W' })), [CLIENT('!HbV9W')]);
 });

@@ -160,3 +160,28 @@ test('check page in a period view: links, filter form, review and note forms all
   assert.doesNotMatch(normal, /name="period"/);
   assert.doesNotMatch(normal, /Viewing /);
 });
+
+test('money shows as £ with pence even for whole pounds; counts stay plain numbers', async () => {
+  const ejs = require('ejs');
+  const { groupSupplierTransactions } = require('../src/services/checkPresentation');
+  // Shapes from Manchesterhub's Old Unpaid Bills (21 Nov 2026): whole-pound amounts used to show as "22", "1188".
+  const items = [
+    { finding_key: 'w1', number: 'ECUK1', contact: 'PERCEIVER', date: '2026-06-11', dueDate: '2026-07-11', amountDue: 22, review_state: 'active', xero_links: [], standaloneNote: null },
+    { finding_key: 'w2', number: '18134', contact: 'LYDC LONDON', date: '2025-10-02', dueDate: '2025-11-02', amountDue: 1188, review_state: 'active', xero_links: [], standaloneNote: null },
+    { finding_key: 'p3', number: 'ECUK2', contact: 'PERCEIVER', date: '2026-06-16', dueDate: '2026-07-16', amountDue: 23.2, itemsToReconcile: 28, review_state: 'active', xero_links: [], standaloneNote: null },
+  ];
+  const locals = {
+    basePath: '/akrio-verify', csrfToken: 'token', org: { name: 'Synthetic Ltd', id: 1, xero_tenant_id: 'synthetic-org' },
+    issue: { count: 3, potential_value_gbp: 1233.2, period_checked: OCTOBER }, def: { type: 'old_unpaid_bills', label: 'Old Unpaid Bills', importance: 'high' },
+    items, pagination: { page: 1, totalPages: 1, total: 3, items }, summary: { active: 3, dismissed: 0, ignored: 0, ok: 0 },
+    status: 'active', contact: '', checkType: 'old_unpaid_bills', checkDescriptions: {}, groupSupplierTransactions,
+    practiceName: 'P', cssVersion: 't', staffName: null, staffRole: null, isStaffManager: false, canAccessSettings: false,
+  };
+  const html = await ejs.renderFile(path.join(__dirname, '../src/views/checkDetail.ejs'), locals);
+  const cells = [...html.matchAll(/<td>\s*([^<]*?)\s*<\/td>/g)].map(m => m[1]);
+  assert.ok(cells.includes('£22.00'), 'whole pounds get £ and pence');
+  assert.ok(cells.includes('£1,188.00'));
+  assert.ok(cells.includes('£23.20'));
+  assert.ok(!cells.includes('22') && !cells.includes('1188'), 'no bare whole-pound amounts');
+  assert.ok(!cells.some(c => c === '£28.00'), 'a count is never shown as money');
+});

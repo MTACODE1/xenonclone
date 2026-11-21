@@ -1300,3 +1300,31 @@ test('creditFromOverpayment shapes Xero overpayments and prepayments as credit n
   assert.deepEqual(before.map(item => item.total), [68, 1]);
   assert.deepEqual(beforePeriodUnreconciled([{ date: '2023-09-30', total: 68 }], {}), []);
 });
+
+// Xenon's own similarity scores for Manchesterhub (21 Nov 2026), reproduced by xenonNameSimilarity.
+test('duplicate contacts: Xenon-style spelling similarity and no pairing of transaction-reference contacts', () => {
+  const { findDuplicateContacts, xenonNameSimilarity } = require('../src/services/checkRules');
+  const pct = (a, b) => Math.round(xenonNameSimilarity(a, b) * 100);
+  assert.equal(pct('Harvey Nichols', 'Harvey Nicoles'), 93);
+  assert.equal(pct('LYDC LONDON', 'LYD LONDON'), 95);
+  assert.equal(pct('LYDC LONDON', 'YDC ONDON'), 90);
+  assert.equal(pct('Ebay UK Limited', 'EBAYUK'), 92);
+  assert.equal(pct('Waste Managed', 'W Waste Managed'), 93);
+  assert.equal(pct('InXpress', 'Inexpress'), 94);
+  assert.equal(pct('Withdrawal', 'Withdrawa'), 95);
+  assert.equal(pct('Xero UK Ltd', 'XERO UK'), 100);
+  const c = (id, name, extra = {}) => ({ contactID: id, name, isSupplier: true, ...extra });
+  const pairs = list => findDuplicateContacts(list).map(d => [d.name1, d.name2].sort().join(' | '));
+  assert.deepEqual(pairs([c(1, 'Harvey Nichols'), c(2, 'Harvey Nicoles')]), ['Harvey Nichols | Harvey Nicoles']);
+  assert.equal(pairs([c(1, 'LYDC LONDON'), c(2, 'YDC LONDON')]).length, 1, 'a missing first letter is still caught');
+  assert.equal(pairs([c(1, 'Ebay UK Limited'), c(2, 'EBAYUK')]).length, 1);
+  // PayPal's per-transaction contacts are not duplicates of PAYPAL / PayPal UK Ltd (3,346 false pairs before).
+  assert.deepEqual(pairs([
+    c(1, 'PayPal (Related to 9SD90761GB8809231)'), c(2, 'PAYPAL'), c(3, 'PayPal UK Ltd'),
+    c(4, 'PayPal (Related to 4AB12345CD6789012)'),
+  ]), ['PAYPAL | PayPal UK Ltd']);
+  assert.equal(pairs([c(1, 'Wise Charges for: TRANSFER-749783032'), c(2, 'Wise')]).length, 0);
+  // The accountants' rules stay: one name extending another, legal endings, spacing.
+  assert.equal(pairs([c(1, 'Deliveroo'), c(2, 'Deliveroo London')]).length, 1);
+  assert.equal(pairs([c(1, 'Tesco'), c(2, 'Shell')]).length, 0);
+});

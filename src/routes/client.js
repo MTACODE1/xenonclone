@@ -36,7 +36,7 @@ const { calculateScoreBreakdown } = require('../services/scoreProfile');
 const { fetchCompanyProfile, normalizeCompanyNumber } = require('../services/companiesHouse');
 const {
   periodInput, resolvePeriod, shouldUseCacheOnlyForReanalysis,
-  isNormalPeriod,
+  isNormalPeriod, periodKeyLabel,
 } = require('../services/periodResolver');
 const { startJob } = require('../services/syncJobs');
 const { accessChanges } = require('../services/staffAccess');
@@ -532,13 +532,20 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
   // this column for. Computed at render time against the real current date, same as a user reading
   // "how old is this right now" would expect, not the sync's own as-of date used to DECIDE it's old.
   const showAge = checkType.startsWith('old_');
+  // The client's Xero short code, so links open the right client through Xero's organisation switch. A page must
+  // never fail because it cannot be found; links then fall back to the document's own page or none.
+  let linkContext = {};
+  try {
+    const { getShortCodeIndex } = require('../db/bankScreenReadings');
+    linkContext = { shortCode: (await getShortCodeIndex()).byOrg.get(org.id) };
+  } catch (error) { console.error('[check] Xero short code unavailable:', error.message); }
   const decorate = item => {
     const lineReviews = Array.isArray(item.transactions) && item.transactions.length
       ? getLineReviewStates(org.id, checkType, item.finding_key)
       : {};
     return {
       ...item,
-      xero_links: xeroLinks(checkType, item),
+      xero_links: xeroLinks(checkType, item, linkContext),
       standaloneNote: findingNotes[item.finding_key] || null,
       ageDays: (showAge && item.date) ? Math.floor((Date.now() - new Date(item.date).getTime()) / 86400000) : undefined,
       accountName: item.accountCode ? (item.accountName || accountNameByCode[item.accountCode] || null) : item.accountName,
@@ -548,7 +555,7 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
             return {
               ...tx,
               accountName: tx.accountCode ? (tx.accountName || accountNameByCode[tx.accountCode] || null) : tx.accountName,
-              xero_links: xeroLinks(checkType, tx), lineKey, ...(lineKey ? lineReviews[lineKey] : {}),
+              xero_links: xeroLinks(checkType, tx, linkContext), lineKey, ...(lineKey ? lineReviews[lineKey] : {}),
             };
           })
         : undefined,
@@ -573,6 +580,11 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
     // reviewing stay in that period.
     viewQuery: viewQueryString(viewedPeriod, view),
     periodView: view ? { label: viewedPeriod.label, normalLabel: org.period_label || org.period_key } : null,
+    // "Period checked" in words: the label of the period that key belongs to, else the key's dates.
+    periodCheckedLabel: !issue?.period_checked ? null
+      : issue.period_checked === viewedPeriod.key ? viewedPeriod.label
+        : issue.period_checked === org.period_key && org.period_label ? org.period_label
+          : periodKeyLabel(issue.period_checked),
     org, issue, def, items, pagination, previousItems, previousPagination, summary, status, contact, checkType, checkDescriptions, groupSupplierTransactions,
     displayStatus: issue ? resolveCheckDisplayStatus(issue) : null, ...extraData,
   });

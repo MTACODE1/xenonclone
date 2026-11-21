@@ -68,3 +68,13 @@ test('statement lines: a good read passes, every sign of a changed table is repo
   assert.deepEqual(parser.statementProblems(COLUMNS, badAmount, parser.parseStatementRows(COLUMNS, badAmount), 1, false), ['line_amount']);
   assert.deepEqual(parser.statementProblems(['Date', 'Amount', 'Status'], [], null, 0, false), ['line_columns']);
 });
+
+test('a card Xero is still loading is recognised, so its missing count is never read as 0', () => {
+  // Shaped like Xero's live card on 21 Nov 2026 (GBP PayPal: Xero's account page said 478 to reconcile).
+  const loading = card(['GBP PayPal', '00-00-00-00000000', 'Loading your bank transactions',
+    'Your transactions will show in your account when ready.', 'Balance in Xero', 'Balance in Xero\t(326.19)', '',
+    'Statement balance (Nov 21)', 'Statement balance (Nov 21)\t1,943.78']);
+  assert.equal(parser.isLoadingCard(loading), true);
+  assert.equal(parser.parseWidget(loading).itemsToReconcile, null); // no count on the card: unknown, never a figure
+  for (const raw of Object.values(KNOWN_CARDS)) assert.equal(parser.isLoadingCard(raw), false);
+});

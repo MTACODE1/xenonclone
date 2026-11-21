@@ -726,6 +726,43 @@ function contactNameSimilarity(nameA, nameB) {
   return 1 - levenshtein.get(a, b) / Math.max(a.length, b.length);
 }
 
+// Xenon's "Contact name similarity score is at least 90%", reproduced: PHP similar_text percentage
+// (2 × letters in common / total letters) on the lower-cased name with "Ltd" / "Limited" removed. Checked against
+// Xenon's own scores for Manchesterhub (21 Nov 2026): Harvey Nichols / Harvey Nicoles 93%, LYDC LONDON / LYD LONDON
+// 95%, LYDC LONDON / YDC ONDON 90%, Ebay UK Limited / EBAYUK 92%, Waste Managed / W Waste Managed 93%,
+// InXpress / Inexpress 94%, Withdrawal / Withdrawa 95%.
+function similarTextCount(a, b) {
+  if (!a.length || !b.length) return 0;
+  let best = 0; let posA = 0; let posB = 0;
+  for (let i = 0; i < a.length; i++) {
+    for (let j = 0; j < b.length; j++) {
+      let k = 0;
+      while (i + k < a.length && j + k < b.length && a[i + k] === b[j + k]) k++;
+      if (k > best) { best = k; posA = i; posB = j; }
+    }
+  }
+  if (!best) return 0;
+  return best + similarTextCount(a.slice(0, posA), b.slice(0, posB))
+    + similarTextCount(a.slice(posA + best), b.slice(posB + best));
+}
+function xenonComparableName(name) {
+  return String(name || '').toLowerCase().replace(/\b(ltd|limited)\b\.?/g, ' ').replace(/\s+/g, ' ').trim();
+}
+function xenonNameSimilarity(nameA, nameB) {
+  const a = xenonComparableName(nameA);
+  const b = xenonComparableName(nameB);
+  if (!a || !b) return 0;
+  return (2 * similarTextCount(a, b)) / (a.length + b.length);
+}
+
+// A contact Xero or a bank feed made for one transaction carries that transaction's reference in its name
+// ("PayPal (Related to 9SD90761GB8809231)", "Wise Charges for: TRANSFER-735914327"). Such a name is the same business
+// as "PAYPAL" only in its first word, so the word rules below would pair each of them with every PayPal contact
+// (3,346 false pairs for Manchesterhub). They are compared by spelling only, as Xenon does.
+function hasTransactionReference(name) {
+  return /\(\s*related to\b/i.test(String(name || '')) || /\d{6,}/.test(String(name || ''));
+}
+
 // Names are compared after dropping legal endings ("Ltd", "Limited", "Inc", "Pty"...), plurals and spacing, so
 // "Ember Digital Media Limited" and "Ember Digital Media Ltd" match, as do "ASDA Store" and "Asda stores".
 const LEGAL_ENDINGS = new Set(['ltd', 'limited', 'llp', 'plc', 'inc', 'incorporated', 'llc', 'pty', 'co', 'company', 'corp', 'corporation', 'uk', 'the']);
@@ -752,17 +789,42 @@ function contactNamesOverlap(tokensA, tokensB) {
 // customers named "Emma", "Sarah" or "PayPal buyer", and every one of them would match every other.
 function findDuplicateContacts(contacts, threshold = CHECK_DEFAULTS.contactSimilarityThreshold) {
   const tokens = contacts.map(contact => contactNameTokens(contact.name));
-  const stripped = contacts.map(contact => String(contact.name || '').toLowerCase().replace(/[^a-z0-9]/g, ''));
+  const comparable = contacts.map(contact => xenonComparableName(contact.name));
+  const compact = comparable.map(name => name.replace(/[^a-z0-9]/g, ''));
+  const referenced = contacts.map(contact => hasTransactionReference(contact.name));
   const customerOnly = contacts.map(contact => Boolean(contact.isCustomer) && !contact.isSupplier);
+  // Letter counts, for a cheap upper bound on the letters two names can share before the exact (slower) count.
+  // Letters and digits map to slots 0-35, everything else (spaces, punctuation) shares slot 36.
+  const letterCounts = comparable.map(name => {
+    const counts = new Uint16Array(37);
+    for (let n = 0; n < name.length; n++) {
+      const code = name.charCodeAt(n);
+      counts[code >= 97 && code <= 122 ? code - 97 : code >= 48 && code <= 57 ? code - 22 : 36]++;
+    }
+    return counts;
+  });
   const byPrefix = new Map();
+  const bySuffix = new Map();
   const byFirstWord = new Map();
   const add = (map, key, index) => { if (!key) return; if (!map.has(key)) map.set(key, []); map.get(key).push(index); };
   contacts.forEach((_, index) => {
-    add(byPrefix, stripped[index].slice(0, 3), index);
-    add(byFirstWord, tokens[index][0], index);
+    // A 90% match can differ at one end of the name ("YDC LONDON" / "LYDC LONDON"), so names are grouped by their
+    // first three letters and, separately, by their last three.
+    add(byPrefix, compact[index].slice(0, 3), index);
+    add(bySuffix, compact[index].slice(-3), index);
+    if (!referenced[index]) add(byFirstWord, tokens[index][0], index);
   });
   const seen = new Set();
   const found = [];
+  const spellingMatch = (a, b) => {
+    const total = comparable[a].length + comparable[b].length;
+    if (!total || 2 * Math.min(comparable[a].length, comparable[b].length) < threshold * total) return false;
+    let shared = 0;
+    const countsA = letterCounts[a]; const countsB = letterCounts[b];
+    for (let n = 0; n < 37; n++) shared += countsA[n] < countsB[n] ? countsA[n] : countsB[n];
+    if (2 * shared < threshold * total) return false;
+    return xenonNameSimilarity(contacts[a].name, contacts[b].name) >= threshold;
+  };
   const consider = (i, j, wordRules) => {
     if (i === j) return;
     const [a, b] = i < j ? [i, j] : [j, i];
@@ -773,18 +835,18 @@ function findDuplicateContacts(contacts, threshold = CHECK_DEFAULTS.contactSimil
       const sameWords = tokens[a].length === tokens[b].length && tokens[a].every((t, n) => t === tokens[b][n]);
       match = tokens[a].length > 0 && (sameWords || (!customerOnly[a] && !customerOnly[b] && contactNamesOverlap(tokens[a], tokens[b])));
     } else {
-      const longest = Math.max(stripped[a].length, stripped[b].length);
-      match = longest > 0 && Math.abs(stripped[a].length - stripped[b].length) / longest <= 1 - threshold
-        && contactNameSimilarity(contacts[a].name, contacts[b].name) >= threshold;
+      match = spellingMatch(a, b);
     }
     if (match) { seen.add(key); found.push([a, b]); }
   };
-  for (const group of byPrefix.values()) for (let x = 0; x < group.length; x++) for (let y = x + 1; y < group.length; y++) consider(group[x], group[y], false);
+  for (const map of [byPrefix, bySuffix]) {
+    for (const group of map.values()) for (let x = 0; x < group.length; x++) for (let y = x + 1; y < group.length; y++) consider(group[x], group[y], false);
+  }
   for (const group of byFirstWord.values()) for (let x = 0; x < group.length; x++) for (let y = x + 1; y < group.length; y++) consider(group[x], group[y], true);
   // The same name written with different spacing or "and" / "&" ("K S Food And Wine" / "KS FOOD & WINE") is still a
   // duplicate name, however the words were split.
   const byJoinedName = new Map();
-  tokens.forEach((list, index) => add(byJoinedName, list.filter(t => t !== 'and').join(''), index));
+  tokens.forEach((list, index) => { if (!referenced[index]) add(byJoinedName, list.filter(t => t !== 'and').join(''), index); });
   for (const group of byJoinedName.values()) {
     for (let x = 0; x < group.length; x++) for (let y = x + 1; y < group.length; y++) {
       const [a, b] = group[x] < group[y] ? [group[x], group[y]] : [group[y], group[x]];
@@ -1346,6 +1408,7 @@ module.exports = {
   resolveDuplicateBillRequireExactTotal,
   calculateHealthScore,
   contactNameSimilarity,
+  xenonNameSimilarity,
   normalizeContactKey,
   findDirectMatches,
   findDuplicateContacts,

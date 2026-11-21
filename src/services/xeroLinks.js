@@ -20,7 +20,19 @@ const NOT_AN_INVOICE_SOURCE = new Set(['payment', 'manual_journal', 'credit_note
 
 const isCreditType = type => type === 'ACCPAYCREDIT' || type === 'ACCRECCREDIT';
 
-function xeroLinks(checkType, item) {
+// Xero retired its search page (go.xero.com/Search/Default.aspx answers 404 since Nov 2026) and its new search is a
+// side panel with no address, so nothing links to search any more. Pages that need the client's own Xero session open
+// through Xero's organisation switch, so the right client opens whatever client the user last had open in Xero.
+const SHORT_CODE = /^![A-Za-z0-9!-]{2,12}$/;
+const XERO_GUID = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
+function inClient(shortCode, page) {
+  if (!SHORT_CODE.test(String(shortCode || ''))) return null;
+  return 'https://go.xero.com/organisationlogin/default.aspx?shortcode=' + enc(shortCode)
+    + (page ? '&redirecturl=' + enc(page) : '');
+}
+
+// context: { shortCode } of the client the finding belongs to (optional).
+function xeroLinks(checkType, item, context = {}) {
   const links = [];
   const add = (label, url) => { if (url && !links.some(link => link.url === url)) links.push({ label, url }); };
   const direction = directionOf(item);
@@ -47,9 +59,12 @@ function xeroLinks(checkType, item) {
   }
   const bankId = item.bankTransactionId || item.bankTransactionID || (bankSource ? (item.invoiceId || item.id) : null);
   if (bankId) add('Open bank transaction', `https://go.xero.com/Bank/ViewTransaction.aspx?bankTransactionID=${enc(bankId)}`);
-  const paymentId = item.paymentId || item.paymentID || (item.source === 'payment' ? item.id : null);
-  // A payment has no page of its own: when the bill or invoice it pays is known (linkId), that is the link.
-  if (paymentId && !item.linkId) add('Find payment', `https://go.xero.com/Search/Default.aspx?searchTerm=${enc(paymentId)}`);
+  // A payment has no page of its own: when the bill or invoice it pays is known (linkId), that is the link; otherwise
+  // the client in Xero (below). The old "Find payment" search link went to Xero's retired search page.
+  // A bank account finding (Unprocessed Bank, Bank Balance Check) opens that account's Reconcile tab in the right client.
+  const accountGuid = [item.bankAccountId, item.bankAccountID, /^(bank_balance|unprocessed_bank)/.test(checkType) ? item.accountId : null]
+    .find(value => XERO_GUID.test(String(value || '')));
+  if (accountGuid) add('Open account in Xero', inClient(context.shortCode, '/Bank/BankRec.aspx?accountID=' + accountGuid));
   const creditId = item.creditNoteId || item.creditNoteID
     || ((/credits/.test(checkType) || isCreditType(item.type) || item.source === 'credit_note') ? item.id : null);
   if (creditId) {
@@ -74,10 +89,8 @@ function xeroLinks(checkType, item) {
   for (const contactId of contactIds.filter(Boolean)) {
     add('Open contact', `https://go.xero.com/Contacts/View/${enc(contactId)}`);
   }
-  if (!links.length) {
-    const term = item.number || item.invoiceNumber || item.contact || item.name || item.finding_key;
-    if (term) add('Search in Xero', `https://go.xero.com/Search/Default.aspx?searchTerm=${enc(term)}`);
-  }
+  // Nothing more specific: open the client in Xero (its homepage), never a dead search page.
+  if (!links.length) add('Open client in Xero', inClient(context.shortCode));
   return links;
 }
 

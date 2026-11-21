@@ -77,6 +77,13 @@
     return problems;
   }
 
+  // Xero sometimes shows "Loading your bank transactions / Your transactions will show in your account when ready"
+  // in place of the "Reconcile N items" line while it prepares an account's feed. Such a card has no count yet: it
+  // must never be read as 0 to reconcile (seen 21 Nov 2026: GBP PayPal card loading while Xero's account page
+  // said 478 to reconcile; the extension had saved 0 for four accounts this way).
+  const isLoadingCard = widget => /Loading your bank transactions|will show in your account when ready/i
+    .test(String((widget && widget.text) || ''));
+
   // page = what xero-read.js collected: { widgets: [raw widget], accounts: [parsed], cardsTextOnPage }.
   // Returns [] when the page looks as expected, otherwise one entry per problem ("Account name: balance_in_xero").
   function bankPageProblems(page) {
@@ -170,7 +177,7 @@
   const api = {
     parseAmount, parseWidget, shortCodeFromPath, isShortCode, bankAccountsUrl,
     accountIdFromHref, isAccountId, statementsUrl, sameName, parseXeroDate, parseStatementRows,
-    widgetProblems, bankPageProblems, statementProblems,
+    widgetProblems, bankPageProblems, statementProblems, isLoadingCard,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.AkrioBankParser = api;

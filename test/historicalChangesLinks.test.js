@@ -35,10 +35,10 @@ test('credit notes open on the right side, and a deleted bank transaction opens 
   assert.match(xeroLinks('historical_changes', bt)[0].url, /Bank\/ViewTransaction\.aspx\?bankTransactionID=bt-1/);
 });
 
-test('an old saved finding with no document type still falls back to a search, never a guessed page', () => {
+test('an old saved finding with no document type opens the client in Xero, never a guessed page or the retired search page', () => {
   const legacy = { documentId: 'inv-3', number: '9617', source: 'invoice', contact: 'Supplier', description: 'x', amount: 1 };
-  const links = xeroLinks('historical_changes', legacy);
-  assert.deepEqual(links.map(l => l.label), ['Search in Xero']);
+  assert.deepEqual(xeroLinks('historical_changes', legacy, { shortCode: '!abc12' }).map(l => l.label), ['Open client in Xero']);
+  assert.deepEqual(xeroLinks('historical_changes', legacy), []);
 });
 
 test('the new fields do not change the finding key, so review states are kept', () => {

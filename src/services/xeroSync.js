@@ -1815,7 +1815,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     console.error('contact_defaults check failed — skipping (will show as "Not synced"):', err.message);
   }
 
-  // --- LOW: Inactive Contacts (active customer/supplier with no transaction in last 18 months) ---
+  // --- LOW: Inactive Contacts (any active contact with no transaction in the last 18 months) ---
   // Xenon's threshold is 18 months from sync date (confirmed from Xenon UI: "contacts that have
   // a most recent transaction of 18 months or older"). A Xenon "OK" may reflect dismissed findings
   // (the "Show dismissed" toggle hides previously reviewed contacts), not genuinely zero inactives.
@@ -1868,7 +1868,9 @@ async function runSync(tenantId, progressCallback, options = {}) {
     const inactive = [];
     for (const contact of contacts) {
       if (contact.contactStatus !== 'ACTIVE') continue;
-      if (!contact.isCustomer && !contact.isSupplier) continue;
+      // Every active contact counts, as in Xenon, not only those Xero has flagged customer or supplier: Xero sets
+      // those flags only from invoices and bills, so contacts used on bank payments alone (Zapier, B&M, HMRC) were
+      // never checked. Manchesterhub, 21 Nov 2026: 1,916 of Xenon's 2,146 inactive contacts were missed this way.
       const lastTransaction = lastActivityByContact.get(contact.contactID) || null;
       const lastSeen = lastTransaction || toDateString(contact.updatedDateUTC);
       if (!lastSeen || lastSeen >= cutoff) continue;

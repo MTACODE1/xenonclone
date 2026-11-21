@@ -111,6 +111,19 @@ function resolvePeriod(input = {}, context = {}) {
   });
 }
 
+// A stored period key ("since_lock_date:2025-09-30:2026-11-21") in words, for screens that only have the key.
+const KEY_WORDS = {
+  current_month: 'Current month', previous_month: 'Previous month', rolling_12_months: 'Rolling 12 months',
+  current_fy: 'Current financial year', previous_fy: 'Previous financial year', custom: 'Custom',
+};
+function periodKeyLabel(key) {
+  const match = /^([a-z_0-9]+):(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$/.exec(String(key || ''));
+  if (!match) return String(key || '').replace(/_/g, ' ');
+  const [, type, start, end] = match;
+  if (type === 'since_lock_date') return `${ukDate(start)} to ${ukDate(end)}`;
+  return `${KEY_WORDS[type] || type.replace(/_/g, ' ')} (${ukDate(start)} to ${ukDate(end)})`;
+}
+
 function isWithinPeriod(value, period) {
   const date = isoDate(value instanceof Date ? value : String(value || '').slice(0, 10));
   if (!date || !period?.start || !period?.end) return false;
@@ -171,6 +184,7 @@ function firstCountedDay(period) {
 
 module.exports = {
   firstCountedDay,
+  periodKeyLabel,
   PERIOD_TYPES,
   isWithinPatternWindow,
   isoDate,
