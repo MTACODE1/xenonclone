@@ -23,13 +23,18 @@
     if (i >= 4 && stable >= 3 && widgets().length > 0) { settled = true; break; }
     if (i >= 25 && widgets().length === 0 && rendered()) { settled = true; break; }
   }
-  const accounts = [...widgets()].map(widget => self.AkrioBankParser.parseWidget({
+  const raw = [...widgets()].map(widget => ({
     headerText: text(widget.querySelector('[data-automationid="bankWidgetHeader"]')),
+    hasHeader: Boolean(widget.querySelector('[data-automationid="bankWidgetHeader"]')),
     text: text(widget),
     feedProblem: Boolean(widget.querySelector('[data-automationid="bankfeedErrorLabel"]')),
     noFeed: Boolean(widget.querySelector('[data-automationid="getBankFeeds"]')),
   }));
+  const accounts = raw.map(widget => self.AkrioBankParser.parseWidget(widget));
+  // The wording every bank card carries. Seen on the page with no cards found means the cards' marker changed.
+  const cardsTextOnPage = /Balance in Xero|Statement balance|No transactions imported|Reconcile \d/.test(text(document.body));
   return {
+    problems: self.AkrioBankParser.bankPageProblems({ widgets: raw, accounts, cardsTextOnPage }),
     host: location.host,
     shortCode: self.AkrioBankParser.shortCodeFromPath(location.pathname),
     pageTitle: document.title.slice(0, 200),

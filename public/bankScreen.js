@@ -168,6 +168,7 @@
       case 'timeout': case 'not_settled': return alertBox('bad', 'Xero took too long to load', 'Nothing was saved. Xero is slow at the moment. Try again in a minute.');
       case 'xero_error': return alertBox('bad', 'Xero cannot show this page right now', 'Xero itself is showing an error for this client\'s Bank accounts page. Nothing was saved. Try again later.');
       case 'not_readable': case 'unexpected_page': return alertBox('bad', 'Xero\'s Bank accounts page could not be read', 'Nothing was saved. Open the client in Xero to check the Bank accounts page loads, then try again.');
+      case 'page_changed': return alertBox('bad', 'Xero has changed its page', error.message || 'Nothing was saved. The extension needs an update: please tell Aditya.');
       case 'verify_signed_out': return alertBox('bad', 'Akrio Verify is signed out', 'Sign in to Akrio Verify again, then click "Update from Xero".');
       case 'verify_starting': return alertBox('bad', 'Akrio Verify is starting up', 'Nothing was saved. Try again in a minute.');
       case 'no_extension': return alertBox('bad', 'Browser extension not found', 'Install the Akrio Verify extension in this browser, or reload this page if you have just installed it.');
@@ -297,7 +298,7 @@
         if (!answer || !answer.ok) {
           progress.fail();
           const error = answer ? { code: answer.error, message: answer.message } : { message: 'The extension did not answer in time.' };
-          section.appendChild(['not_signed_in', 'wrong_organisation', 'timeout'].includes(error.code)
+          section.appendChild(['not_signed_in', 'wrong_organisation', 'timeout', 'page_changed'].includes(error.code)
             ? failureBox(error) : alertBox('bad', 'The items could not be listed', error.message || 'Try again.'));
           if (error.code === 'not_signed_in') return; // every further account would fail the same way
           continue;

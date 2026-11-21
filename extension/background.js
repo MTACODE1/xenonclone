@@ -7,6 +7,47 @@ const ALLOWED_SENDERS = ['https://wf.morethanaccountants.co.uk/akrio-verify/'];
 const LOAD_TIMEOUT_MS = 60000;
 const fail = (error, message) => ({ ok: false, error, message });
 const NOT_SIGNED_IN = 'Sign in to Xero in this browser, then try again.';
+// Xero changed a page the extension reads. Nothing is saved; the toolbar icon turns red until a read works again.
+const pageChanged = (pageName, problems) => ({
+  ok: false, error: 'page_changed', problems: problems.slice(0, 20),
+  message: 'Xero has changed its ' + pageName + ' page, so nothing was saved. Akrio Verify needs an update; please tell Aditya. ('
+    + problems.slice(0, 5).join('; ').slice(0, 300) + ')',
+});
+
+// ---- toolbar icon: green tick after a good read, red after a fault that needs fixing, amber when Xero needs
+// the user (signed out) or was only slow. The last state is kept so it survives the browser restarting.
+const STATUS_LOOK = {
+  ok: { text: '✓', colour: '#12B76A' },
+  fault: { text: '!', colour: '#D92D20' },
+  attention: { text: '!', colour: '#F79009' },
+};
+// Only faults that need a fix in the extension turn it red. A page that did not load, a redirect or a slow
+// Xero are amber: trying again usually works.
+const FAULTS = new Set(['page_changed', 'extension_error']);
+function statusOf(result) {
+  if (result && result.ok) return 'ok';
+  return FAULTS.has(result && result.error) ? 'fault' : 'attention';
+}
+function showStatus(state) {
+  if (!state || !STATUS_LOOK[state.status] || !chrome.action) return;
+  const look = STATUS_LOOK[state.status];
+  chrome.action.setBadgeText({ text: look.text }).catch(() => {});
+  chrome.action.setBadgeBackgroundColor({ color: look.colour }).catch(() => {});
+  const when = new Date(state.at).toLocaleString();
+  chrome.action.setTitle({ title: state.status === 'ok'
+    ? 'Akrio Verify: last Xero read worked (' + when + ').'
+    : 'Akrio Verify: last Xero read failed (' + when + '). ' + String(state.message || '').slice(0, 400) }).catch(() => {});
+}
+async function recordStatus(result) {
+  const state = { status: statusOf(result), error: (result && result.error) || null, message: (result && result.message) || null, at: Date.now() };
+  showStatus(state);
+  try { await chrome.storage.local.set({ lastStatus: state }); } catch (error) { /* the icon still shows it */ }
+}
+async function restoreStatus() {
+  try { showStatus((await chrome.storage.local.get('lastStatus')).lastStatus); } catch (error) { /* nothing saved yet */ }
+}
+chrome.runtime.onStartup.addListener(restoreStatus);
+chrome.runtime.onInstalled.addListener(restoreStatus);
 
 function waitForLoad(tabId) {
   return new Promise((resolve, reject) => {
@@ -64,6 +105,7 @@ async function readBankPage(shortCode, progress = () => {}) {
     }
     if (page.xeroError) return fail('xero_error', 'Xero says it cannot show this client\'s Bank accounts page right now. Try again later, or open it in Xero to check.');
     if (!page.settled) return fail('not_settled', 'Xero was too slow to show the bank accounts. Try again in a moment.');
+    if (Array.isArray(page.problems) && page.problems.length) return pageChanged('Bank accounts', page.problems);
     if (!page.accounts.length && !page.pageRendered) {
       return fail('not_readable', 'Xero\'s Bank accounts page did not load for this client.');
     }
@@ -77,26 +119,26 @@ async function readBankPage(shortCode, progress = () => {}) {
   }
 }
 
-// After chrome.tabs.update the tab still reports the OLD page as "complete" for a moment, so waiting for
-// "complete" alone can return too early. This waits for the new page to start loading and then to finish.
-function waitForNavigation(tabId) {
-  return new Promise((resolve, reject) => {
-    let started = false;
-    const timer = setTimeout(() => { cleanup(); reject(new Error('timeout')); }, LOAD_TIMEOUT_MS);
-    const onUpdated = (id, info) => {
-      if (id !== tabId) return;
-      if (info.status === 'loading') started = true;
-      else if (info.status === 'complete' && started) { cleanup(); resolve(); }
-    };
-    const onRemoved = id => { if (id === tabId) { cleanup(); reject(new Error('closed')); } };
-    function cleanup() {
-      clearTimeout(timer);
-      chrome.tabs.onUpdated.removeListener(onUpdated);
-      chrome.tabs.onRemoved.removeListener(onRemoved);
+// Polls the tab until it shows a fully loaded go.xero.com/Bank/Statements.aspx ('ok'), stays on Xero's sign-in page
+// for 15 seconds ('login'), or 60 seconds pass ('timeout' / 'other').
+async function waitForStatementsPage(tabId) {
+  const started = Date.now();
+  let onLoginSince = null;
+  while (Date.now() - started < LOAD_TIMEOUT_MS) {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    let tab;
+    try { tab = await chrome.tabs.get(tabId); } catch (error) { return 'closed'; }
+    let url;
+    try { url = new URL(tab.url || tab.pendingUrl || ''); } catch (error) { continue; }
+    if (url.host === 'go.xero.com' && /^\/Bank\/Statements\.aspx$/i.test(url.pathname) && tab.status === 'complete') return 'ok';
+    if (url.host === 'login.xero.com' && /\/identity\/user\/login/i.test(url.pathname) && tab.status === 'complete') {
+      onLoginSince = onLoginSince || Date.now();
+      if (Date.now() - onLoginSince > 15000) return 'login';
+    } else {
+      onLoginSince = null;
     }
-    chrome.tabs.onUpdated.addListener(onUpdated);
-    chrome.tabs.onRemoved.addListener(onRemoved);
-  });
+  }
+  return 'timeout';
 }
 
 // The unreconciled statement lines of ONE bank account, for the "items to reconcile" list in Akrio Verify.
@@ -154,12 +196,13 @@ async function readBankLines(shortCode, accountName, progress = () => {}) {
     if (!accountId) return fail('account_not_found', 'Xero does not give a link to this account\'s statement lines.');
 
     progress('reading');
-    const navigated = waitForNavigation(tab.id);
     await chrome.tabs.update(tab.id, { url: parser.statementsUrl(shortCode, accountId) });
-    await navigated;
-    host = await hostOf();
-    if (host === 'login.xero.com') return fail('not_signed_in', NOT_SIGNED_IN);
-    if (host !== 'go.xero.com') return fail('unexpected_page', 'Xero opened a different page than expected.');
+    // Xero's organisation switch passes through its sign-in server for a moment (about two seconds, seen live
+    // 21 Nov 2026) before landing on the statements page, even when signed in. So wait for the tab to LAND,
+    // and only call it "not signed in" when it stays on the sign-in page.
+    const landed = await waitForStatementsPage(tab.id);
+    if (landed === 'login') return fail('not_signed_in', NOT_SIGNED_IN);
+    if (landed !== 'ok') return fail('unexpected_page', 'Xero opened a different page than expected.');
     let page = null;
     try {
       const [injected] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['xero-lines.js'] });
@@ -174,10 +217,15 @@ async function readBankLines(shortCode, accountName, progress = () => {}) {
       || !String(page.heading || '').toLowerCase().includes(accountName.trim().replace(/\s+/g, ' ').toLowerCase())) {
       return fail('wrong_account', 'Xero did not open this bank account\'s statement lines.');
     }
-    if (!page.ok) return fail('not_readable', 'Xero\'s statement lines page has changed or did not load (' + String(page.reason || 'unknown') + ').');
-    if (page.statusFilter !== 'Unreconciled') return fail('not_readable', 'Xero\'s Unreconciled filter could not be set.');
+    if (!page.ok) {
+      // A missing table, search box or filter is a changed page; a search that never finished is only slow.
+      if (page.reason === 'search_timeout') return fail('timeout', 'Xero took too long to load.');
+      return pageChanged('Bank statements', [String(page.reason || 'unknown')]);
+    }
+    if (page.statusFilter !== 'Unreconciled') return pageChanged('Bank statements', ['status_filter']);
     const lines = parser.parseStatementRows(page.columns, page.rows);
-    if (!lines) return fail('not_readable', 'Xero\'s statement lines table has changed and could not be read.');
+    const problems = parser.statementProblems(page.columns, page.rows, lines, page.totalShownByXero, Boolean(page.truncated));
+    if (problems.length) return pageChanged('Bank statements', problems);
     return { ok: true, lines: { shortCode, accountName, lines, truncated: Boolean(page.truncated), totalShownByXero: page.totalShownByXero } };
   } catch (error) {
     if (error && error.message === 'timeout') return fail('timeout', 'Xero took too long to load.');
@@ -212,6 +260,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const work = message.type === 'READ_BANK_LINES'
     ? () => readBankLines(message.shortCode, message.accountName, progress)
     : () => readBankPage(message.shortCode, progress);
-  queue = queue.then(() => withDeadline(work())).then(sendResponse, () => sendResponse(fail('extension_error', 'Unexpected error.')));
+  const answer = async result => { await recordStatus(result); sendResponse(result); };
+  queue = queue.then(() => withDeadline(work())).then(answer, () => answer(fail('extension_error', 'Unexpected error.')));
   return true; // answer asynchronously
 });

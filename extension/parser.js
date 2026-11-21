@@ -50,6 +50,61 @@
     };
   }
 
+  // ---- spotting a changed Xero page ----
+  // Every reading is checked before it is used. A label that is on the card but whose value cannot be read, or a
+  // card in none of the states Xero is known to show, means Xero has changed its page: the reading is refused
+  // instead of saving a wrong or missing figure. Known card states (checked on 1,236 saved cards, 113 clients,
+  // and on 102 live cards of 9 clients, 21 Nov 2026): "Reconcile N items", "Reconciled", "No transactions imported"
+  // or "Manually import a statement", and cards that show "Balance in Xero" / "Statement balance". Each problem is a short code plus the label concerned.
+  function widgetProblems(widget, parsed) {
+    const text = String((widget && widget.text) || '').replace(/\r/g, '');
+    const problems = [];
+    if (widget && widget.hasHeader === false) problems.push('card_header');
+    if (!parsed || !parsed.accountName) problems.push('account_name');
+    if (!parsed) return problems;
+    // A line that starts "Reconcile" (not the account name) must be the "Reconcile N items" button.
+    const lines = text.split('\n').map(line => line.trim()).filter(Boolean);
+    const reconcileLine = lines.slice(1).some(line => /^Reconcile\b/.test(line) && !/^Reconciled$/.test(line));
+    if (reconcileLine && parsed.itemsToReconcile == null) problems.push('reconcile_count');
+    if (/Balance in Xero/.test(text) && parsed.balanceInXero == null) problems.push('balance_in_xero');
+    if (/Statement balance/.test(text) && parsed.statementBalance == null) problems.push('statement_balance');
+    // Nothing imported yet: "No transactions imported", or on an account with no feed set up only
+    // "Get bank feeds" + "Manually import a statement" (PayPal wallets, seen live 21 Nov 2026).
+    const noTransactions = /(?:^|\n)\s*No transactions imported\s*(?:\n|$)/.test(text) || /Manually import a statement/.test(text);
+    const recognised = parsed.itemsToReconcile != null || parsed.reconciled || noTransactions
+      || parsed.balanceInXero != null || parsed.statementBalance != null;
+    if (!recognised) problems.push('unrecognised_card');
+    return problems;
+  }
+
+  // page = what xero-read.js collected: { widgets: [raw widget], accounts: [parsed], cardsTextOnPage }.
+  // Returns [] when the page looks as expected, otherwise one entry per problem ("Account name: balance_in_xero").
+  function bankPageProblems(page) {
+    const problems = [];
+    const widgets = (page && page.widgets) || [];
+    const accounts = (page && page.accounts) || [];
+    // No cards found although the page shows card text: Xero has renamed the cards' marker.
+    if (!widgets.length && page && page.cardsTextOnPage) problems.push('cards_not_found');
+    widgets.forEach((widget, i) => {
+      for (const problem of widgetProblems(widget, accounts[i])) {
+        problems.push(String((accounts[i] && accounts[i].accountName) || 'Card ' + (i + 1)).slice(0, 60) + ': ' + problem);
+      }
+    });
+    return problems;
+  }
+
+  // Checks one account's statement lines read from the Bank statements tab. rows are the raw table rows.
+  function statementProblems(columns, rows, lines, totalShownByXero, truncated) {
+    if (!lines) return ['line_columns'];
+    const problems = [];
+    const statusAt = (columns || []).findIndex(column => String(column || '').trim().toLowerCase() === 'status');
+    const unreconciledRows = (rows || []).filter(row => Array.isArray(row) && String(row[statusAt] == null ? '' : row[statusAt]).trim() === 'Unreconciled').length;
+    if (unreconciledRows !== lines.length) problems.push('line_date');
+    if (lines.some(line => line.spent == null && line.received == null)) problems.push('line_amount');
+    if (!truncated && totalShownByXero != null && totalShownByXero !== lines.length) problems.push('line_count');
+    return problems;
+  }
+
   // The organisation short code is the path segment after /app/ ("!AbC12").
   function shortCodeFromPath(pathname) {
     const match = String(pathname || '').match(/^\/app\/([^/]+)\/manage-bank-accounts\/?$/);
@@ -115,6 +170,7 @@
   const api = {
     parseAmount, parseWidget, shortCodeFromPath, isShortCode, bankAccountsUrl,
     accountIdFromHref, isAccountId, statementsUrl, sameName, parseXeroDate, parseStatementRows,
+    widgetProblems, bankPageProblems, statementProblems,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.AkrioBankParser = api;
