@@ -233,7 +233,26 @@
   }
 
   // accounts: the accounts whose lines to show (one when a row's count is clicked, all with items from the tile).
-  async function openLinesDialog(shortCode, accounts) {
+  function linesCsv(accountName, lines) {
+    const cell = value => '"' + String(value == null ? '' : value).replace(/"/g, '""') + '"';
+    const rows = [['Bank account', 'Date', 'Age (days)', 'Type', 'Payee', 'Particulars', 'Code', 'Reference', 'Spent', 'Received', 'Source']];
+    for (const line of lines) rows.push([accountName, ukDate(line.date), ageDays(line.date), line.type, line.payee, line.particulars, line.code, line.reference, line.spent, line.received, line.source]);
+    return rows.map(row => row.map(cell).join(',')).join('\r\n');
+  }
+  function downloadButton(accountName, lines) {
+    const button = el('button', 'Download CSV'); button.type = 'button'; button.className = 'btn btn-outlined btn-sm';
+    button.addEventListener('click', () => {
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(new Blob(['\uFEFF' + linesCsv(accountName, lines)], { type: 'text/csv;charset=utf-8' }));
+      link.download = 'items-to-reconcile-' + accountName.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) + '.csv';
+      document.body.appendChild(link); link.click(); link.remove();
+      setTimeout(() => URL.revokeObjectURL(link.href), 5000);
+    });
+    return button;
+  }
+
+  // context: { base, csrf, tenantId } of the client card, used to save the list to Akrio Verify.
+  async function openLinesDialog(shortCode, accounts, context = {}) {
     const dialog = el('dialog', null, 'border:none;border-radius:12px;padding:0;width:min(980px,94vw);max-height:90vh;box-shadow:0 20px 60px rgba(20,30,50,0.35);');
     const header = el('div', null, 'display:flex;justify-content:space-between;align-items:flex-start;gap:16px;padding:16px 20px;border-bottom:1px solid #E5EAF2;background:#F2F6FA;');
     const titles = el('div');
@@ -245,9 +264,10 @@
     dialog.appendChild(header); dialog.appendChild(content);
     document.body.appendChild(dialog);
     let closed = false;
-    const shut = () => { closed = true; if (dialog.open) dialog.close(); dialog.remove(); };
+    const afterClose = () => { if (context.saved) { window.location.hash = 'bank-screen'; window.location.reload(); } };
+    const shut = () => { closed = true; if (dialog.open) dialog.close(); dialog.remove(); afterClose(); };
     close.addEventListener('click', shut);
-    dialog.addEventListener('close', () => { closed = true; dialog.remove(); });
+    dialog.addEventListener('close', () => { if (!closed) { closed = true; dialog.remove(); afterClose(); } });
     dialog.addEventListener('click', event => { if (event.target === dialog) shut(); });
     dialog.showModal();
 
@@ -297,13 +317,27 @@
           section.appendChild(alertBox('muted', 'The number has changed since the last update',
             'The last "Update from Xero" showed ' + account.itemsToReconcile.toLocaleString('en-GB') + ' to reconcile; Xero lists ' + lines.length.toLocaleString('en-GB') + ' unreconciled statement lines now. Click "Update from Xero" to refresh the figures on this page.'));
         }
-        if (lines.length) section.appendChild(linesTable(lines));
-        else section.appendChild(el('p', 'Xero lists no unreconciled statement lines for this account now.', 'font-size:0.85rem;color:#5A6A85;margin:0;'));
+        if (lines.length) {
+          const tools = el('div', null, 'display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-bottom:8px;');
+          const saved = el('span', '', 'font-size:0.75rem;color:#7C8FAC;');
+          tools.appendChild(saved); tools.appendChild(downloadButton(account.accountName, lines));
+          section.appendChild(tools);
+          section.appendChild(linesTable(lines));
+          // Keep the list in Akrio Verify: it gives the Unprocessed Bank check its value and the age of the oldest item.
+          if (context.tenantId) {
+            getJson((context.base || '') + '/api/bank-screen/lines', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', accept: 'application/json', 'x-csrf-token': context.csrf },
+              body: JSON.stringify({ ...answer.lines, tenantId: context.tenantId }),
+            }).then(() => { saved.textContent = 'Saved to Akrio Verify'; context.saved = true; })
+              .catch(error => { saved.textContent = 'Shown here, but not saved: ' + error.message; });
+          }
+        } else section.appendChild(el('p', 'Xero lists no unreconciled statement lines for this account now.', 'font-size:0.85rem;color:#5A6A85;margin:0;'));
       }
     } finally { linesBusy = false; }
   }
 
-  function renderReading(body, data) {
+  function renderReading(body, data, context = {}) {
     body.textContent = '';
     const reading = data.reading;
     if (!reading) {
@@ -339,7 +373,7 @@
     if (total && data.shortCode) {
       itemsTile.style.cursor = 'pointer'; itemsTile.tabIndex = 0; itemsTile.setAttribute('role', 'button');
       itemsTile.title = 'List the items to reconcile (read from Xero now)';
-      const openAll = () => openLinesDialog(data.shortCode, accounts.filter(account => account.itemsToReconcile));
+      const openAll = () => openLinesDialog(data.shortCode, accounts.filter(account => account.itemsToReconcile), context);
       itemsTile.addEventListener('click', openAll);
       itemsTile.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openAll(); } });
     }
@@ -371,7 +405,7 @@
         open.setAttribute('aria-label', 'List the ' + account.itemsToReconcile + ' items to reconcile for ' + account.accountName);
         const pill = badge(account.itemsToReconcile.toLocaleString('en-GB') + ' ›', 'warn'); pill.style.textDecoration = 'underline';
         open.appendChild(pill);
-        open.addEventListener('click', () => openLinesDialog(data.shortCode, [account]));
+        open.addEventListener('click', () => openLinesDialog(data.shortCode, [account], context));
         items.appendChild(open);
       } else if (account.itemsToReconcile) items.appendChild(badge(account.itemsToReconcile.toLocaleString('en-GB'), 'warn'));
       else if (account.itemsToReconcile === 0 || account.reconciled) items.appendChild(badge('Reconciled', 'good'));
@@ -400,7 +434,7 @@
     const button = card.querySelector('[data-bank-screen-update]');
     const note = card.querySelector('[data-bank-screen-note]');
     let data;
-    const load = async () => { data = await getJson(base + '/api/bank-screen/latest/' + encodeURIComponent(tenantId)); renderReading(body, data); };
+    const load = async () => { data = await getJson(base + '/api/bank-screen/latest/' + encodeURIComponent(tenantId)); renderReading(body, data, { base, csrf: card.dataset.csrf, tenantId }); };
     try { await load(); } catch (error) { body.textContent = error.message; return; }
     const progress = progressBar();
     body.parentNode.insertBefore(progress.element, body);

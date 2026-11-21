@@ -55,6 +55,13 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
   <% } %>
 </div>
 
+<% const viewInfo = typeof periodView === 'undefined' ? null : periodView; %>
+<% if (viewInfo) { %>
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px;background:#ECF2FF;border:1px solid #C9D8FF;color:#2A3547;border-radius:10px;padding:10px 14px;font-size:0.85rem;">
+    <span><strong>Viewing <%= selectedPeriod.label %>.</strong> This period was worked out from the data of the last sync. The client's normal results (<%= viewInfo.normalLabel %>) are unchanged.</span>
+    <a class="btn btn-outlined btn-sm" href="<%= basePath %>/client/<%= orgIdentifier %>">Back to the normal period</a>
+  </div>
+<% } %>
 <% const periodStale = !!(org.period_key && org.period_key !== selectedPeriod.key); %>
 <% const stalePeriodLabel = org.period_label || org.period_key; %>
 <% if (periodStale) { %>
@@ -62,7 +69,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
     <span class="stale-period-icon">!</span>
     <div class="stale-period-text">
       <strong>Working out <%= selectedPeriod.label %>…</strong>
-      The figures below are still for <%= stalePeriodLabel %>. This usually takes a few seconds; if it does not start, press the button.
+      The figures below are still for <%= stalePeriodLabel %>. This usually takes a minute or two; if it does not start, press the button. The client's normal results are not replaced.
     </div>
     <button type="button" class="btn btn-primary btn-sm" onclick="syncThisClient()">Calculate <%= selectedPeriod.label %></button>
   </div>
@@ -87,7 +94,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
   </span>
   <span class="text-muted" style="font-size:.75rem;"><%= selectedPeriod.start %> to <%= selectedPeriod.end %></span>
   <span style="margin-left:auto;display:flex;gap:8px;align-items:center;">
-    <button type="button" onclick="syncThisClient()" id="syncBtn" class="btn btn-secondary btn-sm">
+    <button type="button" onclick="syncThisClient()" id="syncBtn" class="btn btn-secondary btn-sm" title="<%= typeof periodView !== 'undefined' && periodView ? 'Works this period out again from the data of the last sync. To fetch new data from Xero, go back to the normal period and sync.' : 'Sync this client' %>">
       <svg style="width:14px;height:14px;display:inline-block;vertical-align:middle;margin-right:4px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
       </svg>
@@ -437,7 +444,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
       </div>
       <div class="card-body" data-bank-screen-body style="padding: 16px;">Loading…</div>
     </div>
-    <script src="<%= basePath %>/bankScreen.js?v=12" defer></script>
+    <script src="<%= basePath %>/bankScreen.js?v=13" defer></script>
     <% } %>
 
     <div class="card" id="statement-evidence" style="margin-top: 24px;">
@@ -966,7 +973,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
         { label: 'Sales Credit Notes', raw: txCounts.credit_notes_sales || 0, isCurrency: false },
         { label: 'Purchase Credit Notes', raw: txCounts.credit_notes_purchase || 0, isCurrency: false },
         { label: 'Bank Processed', raw: txCounts.bank_processed || 0, isCurrency: false },
-        { label: 'Journals', raw: txCounts.journals || 0, isCurrency: false, unknown: txCounts.journals == null },
+        { label: 'Journals', raw: (txCounts.manual_journals != null ? txCounts.manual_journals : txCounts.journals) || 0, isCurrency: false, unknown: txCounts.manual_journals == null && txCounts.journals == null },
       ];
       txItems.forEach(item => {
         const display = item.isCurrency ? formatTurnoverGbp(item.raw) : item.raw.toLocaleString('en-GB');

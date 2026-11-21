@@ -8,7 +8,8 @@ const {
   getOrganisationByTenantId, getIssuesForOrg, getIssueByCheckType, updateOrganisationMeta,
   updateOrganisationSupplierPatternLookback,
   updateOrganisationCheckConfig,
-  getTransactionCountsForOrg, getTransactionActivityForOrg, getBankReconciliationForOrg, updateStatementBalance,
+  getTransactionCountsForOrg, getTransactionActivityForOrg, getBankReconciliationForOrg,
+  getPeriodView, getIssuesForView, getIssueByCheckTypeForView, getScoringObservationsForRun, updateStatementBalance,
   getExcludedBankAccountIds, setBankAccountExcluded, getLatestStatementImportsForOrg,
   getExpenseAccountsForOrg, getAccountCheckConfigurationForOrg,
   setAccountCheckConfiguration, ensureAccountCodes, getLiveScreenItemTotal, getIssueFindings, getIssueFindingSummary, setFindingReviewStates,
@@ -30,10 +31,12 @@ const { xeroLinks } = require('../services/xeroLinks');
 const { formatTurnoverGbp, groupSupplierTransactions } = require('../services/checkPresentation');
 const { syncFreeAgentOrganisation } = require('../services/freeagentSync');
 const { CASH_HEALTH_CATEGORIES, syncInsight } = require('../services/insightSync');
-const { resolveCheckDisplayStatus, isCapitalDefaultAccount } = require('../services/checkRules');
+const { resolveCheckDisplayStatus, isCapitalDefaultAccount, NON_SCORED_CHECKS } = require('../services/checkRules');
+const { calculateScoreBreakdown } = require('../services/scoreProfile');
 const { fetchCompanyProfile, normalizeCompanyNumber } = require('../services/companiesHouse');
 const {
   periodInput, resolvePeriod, shouldUseCacheOnlyForReanalysis,
+  isNormalPeriod,
 } = require('../services/periodResolver');
 const { startJob } = require('../services/syncJobs');
 const { accessChanges } = require('../services/staffAccess');
@@ -93,14 +96,57 @@ function insightDateFrom(value) {
   return text;
 }
 
-function clientViewData(org, query = {}) {
+// ---- Period views ----
+// The client's NORMAL period is the one its last sync ran with (org.period_key). Any other period chosen on the
+// page is shown from a "period view": the same checks worked out from stored data and kept beside the normal
+// results, so looking at another period never changes them. FreeAgent clients have no views.
+function periodViewFor(org, query = {}) {
   const selectedPeriod = selectedPeriodFor(org, query);
+  const isOtherPeriod = !isNormalPeriod(org, selectedPeriod);
+  const view = isOtherPeriod && !org.freeagent_company_id ? getPeriodView(org.id, selectedPeriod.key) : null;
+  return { selectedPeriod, isOtherPeriod, view };
+}
+// Never lets a bad period in a link or form break a check page: falls back to the normal results.
+function safePeriodView(org, query) {
+  try { return periodViewFor(org, query); } catch (error) { return { selectedPeriod: null, isOtherPeriod: false, view: null }; }
+}
+// "period=...&from=...&to=..." for links and forms while a view is on screen; '' for the normal period.
+function viewQueryString(selectedPeriod, view) {
+  if (!view || !selectedPeriod) return '';
+  return new URLSearchParams({
+    period: selectedPeriod.type,
+    ...(selectedPeriod.type === 'custom' ? { from: selectedPeriod.start, to: selectedPeriod.end } : {}),
+  }).toString();
+}
+// The client record as the page should show it for a view: that period's score, totals and labels. The score is
+// worked out now, so a finding dismissed a moment ago is already reflected.
+function orgAsViewed(org, view, selectedPeriod, issues) {
+  const breakdown = calculateScoreBreakdown(getScoringObservationsForRun(org.id, view.runId, null, view.preserved), {
+    nonScoredChecks: NON_SCORED_CHECKS, asOf: new Date(`${selectedPeriod.end}T00:00:00.000Z`),
+  });
+  const scored = issues.filter(issue => !NON_SCORED_CHECKS.includes(issue.check_type));
+  return {
+    ...org,
+    score: breakdown.score,
+    total_issues: scored.reduce((sum, issue) => sum + (issue.count || 0), 0),
+    total_potential_errors_gbp: scored.reduce((sum, issue) => sum + (issue.potential_value_gbp || 0), 0),
+    unreconciled_bank_items: issues.find(issue => issue.check_type === 'unreconciled_bank_items')?.count || 0,
+    score_breakdown_json: JSON.stringify(breakdown), score_profile_version: breakdown.profileVersion,
+    period_key: selectedPeriod.key, period_type: selectedPeriod.type, period_start: selectedPeriod.start,
+    period_end: selectedPeriod.end, period_label: selectedPeriod.label,
+  };
+}
+
+function clientViewData(liveOrg, query = {}) {
+  const { selectedPeriod, view } = periodViewFor(liveOrg, query);
+  const viewIssues = view ? getIssuesForView(view) : null;
+  const org = view ? orgAsViewed(liveOrg, view, selectedPeriod, viewIssues) : liveOrg;
   const insightDate = org.xero_tenant_id ? insightDateFrom(query.insight_to) : null;
   const periodQuery = new URLSearchParams({
     period: selectedPeriod.type,
     ...(selectedPeriod.type === 'custom' ? { from: selectedPeriod.start, to: selectedPeriod.end } : {}),
   }).toString();
-  const issues = getIssuesForOrg(org.id);
+  const issues = viewIssues || getIssuesForOrg(org.id);
   const checkDefs = CHECK_DEFINITIONS.map(def => {
     const issue = issues.find(i => i.check_type === def.type);
     const merged = { ...def, ...(issue || { count: null, potential_value_gbp: 0 }) };
@@ -111,6 +157,8 @@ function clientViewData(org, query = {}) {
   });
   return {
     org, issues, checkDefs, selectedPeriod, periodQuery,
+    // Set while another period is on screen: what the client's normal period is, and when the view was worked out.
+    periodView: view ? { normalLabel: liveOrg.period_label || liveOrg.period_key, builtAt: view.builtAt } : null,
     isStale: !org.last_successful_sync_at ||
       Date.now() - new Date(org.last_successful_sync_at).getTime() > 36 * 60 * 60 * 1000,
     // Any period, added up from the per-day figures; the last sync's stored totals only if there are none yet.
@@ -437,7 +485,8 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
   const { tenantId, checkType } = req.params;
   const org = await getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).send('Organisation not found');
-  const issue = getIssueByCheckType(org.id, checkType);
+  const { selectedPeriod: viewedPeriod, view } = safePeriodView(org, req.query);
+  const issue = view ? getIssueByCheckTypeForView(view, checkType) : getIssueByCheckType(org.id, checkType);
   const def = CHECK_DEFINITIONS.find(d => d.type === checkType);
   let pagination = { items: [], page: 1, pageSize: 50, total: 0, totalPages: 1 };
   let summary = { active: 0, dismissed: 0, ignored: 0, ok: 0, previous: 0 };
@@ -520,6 +569,10 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
     extraData.bankReading = bank.reading;
   }
   res.render('checkDetail', {
+    // While another period is on screen every link and form on the page carries it, so paging, filtering and
+    // reviewing stay in that period.
+    viewQuery: viewQueryString(viewedPeriod, view),
+    periodView: view ? { label: viewedPeriod.label, normalLabel: org.period_label || org.period_key } : null,
     org, issue, def, items, pagination, previousItems, previousPagination, summary, status, contact, checkType, checkDescriptions, groupSupplierTransactions,
     displayStatus: issue ? resolveCheckDisplayStatus(issue) : null, ...extraData,
   });
@@ -537,7 +590,8 @@ router.get('/:tenantId/check/:checkType/export.csv', async (req, res) => {
   const { tenantId, checkType } = req.params;
   const org = await getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).send('Organisation not found');
-  const issue = getIssueByCheckType(org.id, checkType);
+  const exportView = safePeriodView(org, req.query).view;
+  const issue = exportView ? getIssueByCheckTypeForView(exportView, checkType) : getIssueByCheckType(org.id, checkType);
   if (!issue) return res.status(404).send('Check not found');
   const status = ['active', 'dismissed', 'ignored', 'ok', 'all'].includes(req.query.status) ? req.query.status : 'all';
   const rows = [];
@@ -574,9 +628,13 @@ router.post(
     // "Ignore/Dismiss all N items" applies to every finding matching the current status filter,
     // not just the ones visible on this page — matches Xenon's own bulk buttons, which state the
     // full count regardless of pagination.
+    // The page says which period it was showing (hidden fields); a review made in a period view applies to that
+    // view's findings.
+    const reviewed = safePeriodView(org, req.body);
+    const viewSuffix = viewQueryString(reviewed.selectedPeriod, reviewed.view);
     let findingKeys;
     if (req.body.select_all === '1') {
-      const issue = getIssueByCheckType(org.id, checkType);
+      const issue = reviewed.view ? getIssueByCheckTypeForView(reviewed.view, checkType) : getIssueByCheckType(org.id, checkType);
       const bulkStatus = ['active', 'dismissed', 'ignored', 'ok', 'all'].includes(req.body.return_status)
         ? req.body.return_status : 'active';
       findingKeys = issue ? getAllFindingKeysForIssue(issue.id, org.id, bulkStatus) : [];
@@ -584,13 +642,14 @@ router.post(
       findingKeys = [req.body.finding_key || req.body.finding_keys].flat().filter(Boolean);
     }
     try {
-      await setFindingReviewStates(org.id, checkType, findingKeys, req.body.action, req.body.notes);
+      await setFindingReviewStates(org.id, checkType, findingKeys, req.body.action, req.body.notes,
+        reviewed.view ? { viewRunId: reviewed.view.runId } : {});
     } catch (error) {
       return res.status(400).send(error.message);
     }
     const status = encodeURIComponent(req.body.return_status || 'active');
     const page = Math.max(1, Number(req.body.return_page) || 1);
-    res.redirect(`/client/${encodeURIComponent(tenantId)}/check/${encodeURIComponent(checkType)}?status=${status}&page=${page}`);
+    res.redirect(`/client/${encodeURIComponent(tenantId)}/check/${encodeURIComponent(checkType)}?status=${status}&page=${page}${viewSuffix ? '&' + viewSuffix : ''}`);
   }
 );
 
@@ -634,7 +693,9 @@ router.post(
     }
     const status = encodeURIComponent(req.body.return_status || 'active');
     const page = Math.max(1, Number(req.body.return_page) || 1);
-    res.redirect(`/client/${encodeURIComponent(tenantId)}/check/${encodeURIComponent(checkType)}?status=${status}&page=${page}`);
+    const noted = safePeriodView(org, req.body);
+    const noteSuffix = viewQueryString(noted.selectedPeriod, noted.view);
+    res.redirect(`/client/${encodeURIComponent(tenantId)}/check/${encodeURIComponent(checkType)}?status=${status}&page=${page}${noteSuffix ? '&' + noteSuffix : ''}`);
   }
 );
 
@@ -861,13 +922,22 @@ router.post('/:tenantId/sync', verifyCsrf, async (req, res) => {
   // for this client instead of asking Xero for everything again (seconds, like Xenon, not minutes).
   // Only when the stored copy is recent; otherwise do the normal live sync so the numbers are not old.
   const cacheOnly = await canRecalculateFromStoredData(org, resolvedPeriod);
+  // A period other than the client's normal one is worked out as a VIEW: from stored data, kept beside the
+  // normal results and never replacing them. (Before this, it replaced the client's results until the next
+  // nightly sync.) FreeAgent clients, and a client that has never been synced, are handled as before.
+  const asView = !org.freeagent_company_id && !isNormalPeriod(org, resolvedPeriod);
+  if (asView && !cacheOnly) {
+    return res.status(409).json({ error: 'This client\'s stored Xero data is more than two days old. Sync the client first (with its normal period), then choose the period again.' });
+  }
   const runSync = org.freeagent_company_id
     ? progress => syncFreeAgentOrganisation(tenantId, progress, { period, cacheOnly })
-    : progress => syncOrganisation(tenantId, progress, { period, cacheOnly });
+    : progress => syncOrganisation(tenantId, progress, { period, cacheOnly, view: asView });
   const started = await startJob(
-    `${tenantId}:all:${period.type}:${period.from || ''}:${period.to || ''}`,
+    `${tenantId}:${asView ? 'view' : 'all'}:${period.type}:${period.from || ''}:${period.to || ''}`,
     runSync,
-    { tenantId, orgId: org.id, mode: 'full', priority: true, payload: { period, cacheOnly } }
+    // A view job is not restored after a restart (no "period" in its payload): it is simply asked for again.
+    asView ? { tenantId, orgId: org.id, mode: 'view', priority: true, maxAttempts: 1, payload: { viewPeriod: period } }
+      : { tenantId, orgId: org.id, mode: 'full', priority: true, payload: { period, cacheOnly } }
   );
   return res.status(started.existing ? 200 : 202).json({
     success: true, jobId: started.job.id, existing: started.existing,

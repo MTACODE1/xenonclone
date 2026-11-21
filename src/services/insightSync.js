@@ -1,3 +1,4 @@
+const { bankSummaryColumns, bankSummaryRowBalances } = require('./bankSummaryReport');
 const { apiCall } = require('./xeroClient');
 const {
   saveInsightData: saveInsightDataRaw, getInsightAccountMappings, getInsightCategorySettings, getAccountCheckConfigurationForOrg,
@@ -169,6 +170,46 @@ function sumPnL(report) {
 
 // Resolve a mapping category's configured account codes to the account *names* that appear on
 // balance sheet rows (Xero's Reports API labels rows by name, not code).
+// Xero's account type for depreciation is DEPRECIATN.
+function defaultDepreciationAddbacks(accounts) {
+  return (accounts || []).filter(account => String(account.account_type || '').toUpperCase() === 'DEPRECIATN' && account.account_code)
+    .map(account => ({ account_code: account.account_code, pct: 100, treatment: 'default' }));
+}
+
+// "Enough cash to pay?" with nothing mapped: Xenon puts EVERY liability on the balance sheet (current and
+// non-current) into its own outgoing categories, and "Loans & Other" takes whatever is left ("includes any other
+// liability accounts"). Seen on Novahomes, 21 Nov 2026: Suppliers = Accounts Payable, Net Wages = Wages Payable,
+// VAT Bill = VAT, and its total equals all liabilities plus its corporation tax estimates.
+const DEFAULT_OUTGOING_GROUPS = [
+  { label: 'Suppliers', pattern: /^(accounts payable|trade creditors?|creditors? control( account)?)$/i },
+  { label: 'Net Wages', pattern: /wages? payable|net wages|salaries payable/i },
+  { label: 'PAYE / NIC', pattern: /\bPAYE\b|\bNIC\b|national insurance|payroll tax/i },
+  { label: 'Pension', pattern: /pension/i },
+  { label: 'VAT Bill', pattern: /^VAT$|\bVAT (control|payable|liability|account)|^GST$|sales tax/i },
+  { label: 'Corporation Tax', pattern: /corporation tax|corp(oration)?\.? ?tax|income tax payable/i },
+];
+function groupLiabilities(reportRows) {
+  const totals = new Map(DEFAULT_OUTGOING_GROUPS.map(group => [group.label, 0]));
+  let other = 0, any = false;
+  for (const section of reportRows || []) {
+    if (section.rowType !== 'Section' || !/liabilit/i.test(section.title || '')) continue;
+    for (const row of section.rows || []) {
+      if (row.rowType !== 'Row') continue;
+      const label = (row.cells || [])[0]?.value || '';
+      const value = parseXeroNum((row.cells || [])[1]?.value) || 0;
+      any = true;
+      const group = DEFAULT_OUTGOING_GROUPS.find(candidate => candidate.pattern.test(label));
+      if (group) totals.set(group.label, totals.get(group.label) + value);
+      else other += value;
+    }
+  }
+  if (!any) return null;
+  // Corporation Tax always has a line, because the estimates of tax not yet in the books are added to it.
+  const lines = [...totals].filter(([label, value]) => Math.abs(value) >= 0.005 || label === 'Corporation Tax').map(([name, value]) => ({ name, value }));
+  if (Math.abs(other) >= 0.005) lines.push({ name: 'Loans & Other', value: other });
+  return lines;
+}
+
 function namesForCategory(ctx, category) {
   const codes = (ctx?.mappings || {})[category] || [];
   return codes.map(c => ctx.codeToName[c]).filter(Boolean);
@@ -248,6 +289,9 @@ function parseBalanceSheet(report, ctx = {}) {
     return hasAccounts || hasRealOverride;
   });
   let liabilityLines = [];
+  // true when the lines are Xenon's default categories: the tab then adds the corporation tax estimates to the
+  // Corporation Tax line, as Xenon does ("including estimated values of unrecorded future corporation tax bills").
+  let outgoingsGrouped = false;
   if (hasCashHealthMapping) {
     for (const cat of CASH_HEALTH_CATEGORIES) {
       const setting = (ctx.categorySettings || {})[cat.key] || { enabled: true, overrideEnabled: false, overrideValue: null };
@@ -257,13 +301,8 @@ function parseBalanceSheet(report, ctx = {}) {
       if (value !== 0 || setting.overrideEnabled) liabilityLines.push({ name: cat.label, value });
     }
   } else {
-    const currentLiabSection = (rows || []).find(r => r.rowType === 'Section' && /^Current Liabilities$/i.test(r.title || ''));
-    for (const row of (currentLiabSection?.rows || [])) {
-      if (row.rowType !== 'Row') continue;
-      const label = (row.cells || [])[0]?.value || '';
-      if (/director|DLA|loan to director/i.test(label)) continue;
-      liabilityLines.push({ name: label, value: parseXeroNum((row.cells || [])[1]?.value) });
-    }
+    liabilityLines = groupLiabilities(rows) || [];
+    outgoingsGrouped = liabilityLines.length > 0;
   }
 
   // Director loan accounts — use the mapped accounts when configured, else auto-detect by name
@@ -284,7 +323,7 @@ function parseBalanceSheet(report, ctx = {}) {
 
   return {
     asAtDate, cashAndBank, tradeDebtors, tradeCreditors, stockInventory,
-    retainedEarnings, totalEquity, liabilityLines, directorAccounts, dividendsPaid,
+    retainedEarnings, totalEquity, liabilityLines, outgoingsGrouped, directorAccounts, dividendsPaid,
   };
 }
 
@@ -435,8 +474,10 @@ async function syncInsight(tenantId, orgId, options = {}) {
       );
       const report = resp?.body?.reports?.[0];
       const totalRow = flattenRows(report?.rows || []).find(r => r.rowType === 'SummaryRow' && (r.cells || [])[0]?.value === 'Total');
-      const opening = totalRow ? parseXeroNum((totalRow.cells || [])[1]?.value) : null;
-      const closing = totalRow ? parseXeroNum((totalRow.cells || [])[4]?.value) : null;
+      // Columns by heading: organisations with foreign-currency accounts have an extra "FX Gain" column.
+      const balances = totalRow ? bankSummaryRowBalances(totalRow, bankSummaryColumns(report)) : { opening: null, closing: null };
+      const opening = balances.opening;
+      const closing = balances.closing;
       cashMovements.push({ label, netMovement: (opening != null && closing != null) ? closing - opening : null });
     } catch (e) {
       cashMovements.push({ label, netMovement: null });
@@ -447,7 +488,12 @@ async function syncInsight(tenantId, orgId, options = {}) {
 
   // ---- 2. Financial year P&Ls for Corp Tax (3 years) ----
   const rateBands = getInsightCorpTaxRateBands(orgId);
-  const addbacks = getInsightCorpTaxAdjustments(orgId, 'addback');
+  // Xenon adds depreciation back to the accounting profit by default ("Depreciation Expense" is a default
+  // add-back in its settings); without it, a year with depreciation posted was under-estimated (Novahomes y.e.
+  // 30/04/2026: 14,158.94 here against Xenon's 17,180.46). Until someone configures the add-backs for a client,
+  // every depreciation account is added back in full. A client with its own add-backs uses exactly those.
+  const configuredAddbacks = getInsightCorpTaxAdjustments(orgId, 'addback');
+  const addbacks = configuredAddbacks.length ? configuredAddbacks : defaultDepreciationAddbacks(getAccountCheckConfigurationForOrg(orgId));
   const deductions = getInsightCorpTaxAdjustments(orgId, 'deduct_other');
   const fyCorpTax = [];
   for (const fy of fyPeriods) {
@@ -513,4 +559,4 @@ async function syncInsight(tenantId, orgId, options = {}) {
   return { ok: errors.length === 0, errors };
 }
 
-module.exports = { syncInsight, getFinancialYearPeriods, CASH_HEALTH_CATEGORIES, monthlyPnlPlan, parseMonthHeader, wholeMonthsFrom, assembleMonthlyPnl };
+module.exports = { syncInsight, getFinancialYearPeriods, CASH_HEALTH_CATEGORIES, parseBalanceSheet, groupLiabilities, defaultDepreciationAddbacks, monthlyPnlPlan, parseMonthHeader, wholeMonthsFrom, assembleMonthlyPnl };

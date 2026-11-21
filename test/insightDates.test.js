@@ -102,3 +102,38 @@ test('a column that does not end on its month\'s last day is not accepted as a w
   assert.deepEqual(result.headers, ['30 Sep 26', '31 Oct 26', '15 Nov 26']); // oldest first; the as-at month ends on the as-at day
   assert.deepEqual(result.totalIncome, [2, 3, 9]);
 });
+
+// ---- Xenon's Insight rules (from its documentation and its own figures, 21 Nov 2026) ----
+const { groupLiabilities, parseBalanceSheet, defaultDepreciationAddbacks } = require('../src/services/insightSync');
+const bsRow = (name, value) => ({ rowType: 'Row', cells: [{ value: name }, { value: String(value) }] });
+const bsReport = { rows: [
+  { rowType: 'Header', cells: [{ value: '' }, { value: '21 Nov 2026' }] },
+  { rowType: 'Section', title: 'Bank', rows: [bsRow('Current Account', '-2,017.00'), { rowType: 'SummaryRow', cells: [{ value: 'Total Bank' }, { value: '-2,017.00' }] }] },
+  { rowType: 'Section', title: 'Current Liabilities', rows: [bsRow('Accounts Payable', '3,857.00'), bsRow('Wages Payable - Payroll', '1,537.00'), bsRow('VAT', '5,229.00'), bsRow('Provision for Corporation Tax', '9,777.00'), bsRow('PAYE Payable', '0.00'), bsRow('Suspense', '9,713.00'), bsRow("Directors' Loan Account - A", '43,012.30')] },
+  { rowType: 'Section', title: 'Non-current Liabilities', rows: [bsRow('Bank Loan', '200,000.00'), bsRow('Hire Purchase', '8,391.70')] },
+  { rowType: 'Section', title: 'Equity', rows: [bsRow('Retained Earnings', '100.00')] },
+] };
+
+test('with nothing mapped, every liability goes into Xenon\'s outgoing categories and the rest into Loans & Other', () => {
+  const lines = Object.fromEntries(groupLiabilities(bsReport.rows).map(line => [line.name, line.value]));
+  assert.deepEqual(lines, { Suppliers: 3857, 'Net Wages': 1537, 'VAT Bill': 5229, 'Corporation Tax': 9777, 'Loans & Other': 261117 });
+  const bs = parseBalanceSheet(bsReport, {});
+  assert.equal(bs.outgoingsGrouped, true);
+  assert.equal(bs.cashAndBank, -2017);
+  // Novahomes in Xenon: provision 9,777 + estimates 33,564 = 43,341 on the Corporation Tax line; total 315,082.
+  const withEstimates = bs.liabilityLines.reduce((sum, line) => sum + line.value + (line.name === 'Corporation Tax' ? 33564.67 : 0), 0);
+  assert.equal(Math.round(withEstimates), 315082);
+  assert.equal(groupLiabilities([{ rowType: 'Section', title: 'Bank', rows: [] }]), null);
+});
+
+test('a mapped client keeps its own categories', () => {
+  const bs = parseBalanceSheet(bsReport, { mappings: { cash_health_suppliers: ['800'] }, codeToName: { 800: 'Accounts Payable' }, categorySettings: {} });
+  assert.equal(bs.outgoingsGrouped, false);
+  assert.deepEqual(bs.liabilityLines.map(line => line.value), [3857]);
+});
+
+test('depreciation accounts are the default corporation tax add-back', () => {
+  const accounts = [{ account_code: '416', account_name: 'Depreciation', account_type: 'DEPRECIATN' }, { account_code: '400', account_name: 'Advertising', account_type: 'EXPENSE' }, { account_code: null, account_type: 'DEPRECIATN' }];
+  assert.deepEqual(defaultDepreciationAddbacks(accounts), [{ account_code: '416', pct: 100, treatment: 'default' }]);
+  assert.deepEqual(defaultDepreciationAddbacks([]), []);
+});

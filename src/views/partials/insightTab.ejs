@@ -96,8 +96,16 @@ if (monthlyTarget != null) monthlyTarget = monthlyTarget * (1 + pctIncrease);
 // "VAT" + "Corporation Tax"), not a fixed Suppliers/PAYE/Corp Tax trio — mirror that here.
 const RELABEL = { 'VAT': 'VAT Bill' };
 const cashBal        = bs ? (bs.cashAndBank || 0) : null;
+// Xenon's Corporation Tax line is the provision in the books plus its estimates of tax not yet recorded. The
+// estimates are added here (not at sync) so an estimate overridden on the Dividend card is the one used.
+const estimatedCorpTax = (ctax && ctax.periods ? ctax.periods : []).reduce((sum, p, i) => {
+  const override = ctaxOverrides['fy' + i];
+  return sum + (override != null ? parseFloat(override) : (p.estimate || 0));
+}, 0);
 const payItems       = bs ? (bs.liabilityLines || [])
-  .map(l => ({ name: RELABEL[l.name] || l.name, val: Math.abs(l.value) }))
+  .map(l => ({ name: RELABEL[l.name] || l.name, val: bs.outgoingsGrouped
+    ? Math.max(0, l.value + (l.name === 'Corporation Tax' ? estimatedCorpTax : 0))
+    : Math.abs(l.value) }))
   .filter(l => l.val > 0) : [];
 const totalOutgoing  = payItems.reduce((s, l) => s + l.val, 0);
 
@@ -143,10 +151,15 @@ const valuationEstimate = valuationBase != null ? valuationBase * valuationMulti
 // creditor lines, so match that rather than defaulting to null.
 const tradeDebtors   = bs && bs.tradeDebtors   != null ? Math.abs(bs.tradeDebtors)   : 0;
 const tradeCreditors = bs && bs.tradeCreditors != null ? Math.abs(bs.tradeCreditors) : 0;
+// Xenon's formulas: debtor days = trade debtors / sales income (last 12 months) x 365; stock days and creditor
+// days = stock / trade creditors over COST OF SALES (last 12 months) x 365. Cost of sales = income less gross profit.
 const avgRevPerDay   = (pnl && pnl.totalIncome) ? pnl.totalIncome.reduce((a,b)=>a+b,0)/365 : 0;
+const costOfSales12  = (pnl && pnl.totalIncome && pnl.grossProfit) ? pnl.totalIncome.reduce((a,b)=>a+b,0) - pnl.grossProfit.reduce((a,b)=>a+b,0) : 0;
+const avgCostPerDay  = costOfSales12 > 0 ? costOfSales12 / 365 : 0;
+const stockHeld      = bs && bs.stockInventory != null ? Math.abs(bs.stockInventory) : 0;
 const debtorDays     = avgRevPerDay > 0 ? Math.round(tradeDebtors   / avgRevPerDay) : 0;
-const stockDays      = 0;
-const creditorDays   = avgRevPerDay > 0 ? Math.round(tradeCreditors / avgRevPerDay) : 0;
+const stockDays      = avgCostPerDay > 0 ? Math.round(stockHeld      / avgCostPerDay) : 0;
+const creditorDays   = avgCostPerDay > 0 ? Math.round(tradeCreditors / avgCostPerDay) : 0;
 const workingCapDays = debtorDays + stockDays - creditorDays;
 
 /* ---- dividend ---- */

@@ -1,6 +1,7 @@
 const { apiCall } = require('./xeroClient');
 const { syncInsight } = require('./insightSync');
-const { buildDailyActivity } = require('./transactionActivity');
+const { buildDailyActivity, sumActivity } = require('./transactionActivity');
+const { bankSummaryColumns, bankSummaryRowBalances } = require('./bankSummaryReport');
 const {
   upsertOrganisation, upsertHealthScore,
   deleteIssuesForOrg, insertIssue: insertIssueDb, replaceIssueForCheck, getOrganisationByTenantId, getIssuesForOrg, getScoringObservations,
@@ -10,7 +11,7 @@ const {
   getFiledAccountsForOrg, getLatestStatementImportsForOrg, getStatementLinesForOrg,
   getXeroBankItemsForOrg, replaceXeroBankItemsCache, updateFiledAccountsXeroBalance,
   updateStatementLineMatches, updateOrganisationAccountingSettings,
-  createSyncRun, finishSyncRun, activateSyncRun, getIssuesForRun, getScoringObservationsForRun,
+  createSyncRun, finishSyncRun, activateSyncRun, getIssuesForRun, getScoringObservationsForRun, registerPeriodView,
   mergeEntityCache, getCachedEntities, getEntityCacheWatermark,
   updateOrganisationCompanyNumber, upsertCompaniesHouseProfile, getCompaniesHouseProfileForOrg,
   upsertFiledAccountsFromCompaniesHouse, recordFiledAccountsExtraction, getFiledAccountsExtractionsForOrg, getReviewFrom
@@ -323,7 +324,11 @@ async function syncOrganisation(tenantId, progressCallback, options = {}) {
     syncsInProgress.delete(tenantId);
     throw new Error('Organisation not found');
   }
-  const runId = await createSyncRun(existing.id, options.checkType ? `check:${options.checkType}` : 'full');
+  if (options.view && (options.checkType || !options.cacheOnly)) {
+    syncsInProgress.delete(tenantId);
+    throw new Error('A period view is always a full recalculation from stored data');
+  }
+  const runId = await createSyncRun(existing.id, options.view ? 'view' : options.checkType ? `check:${options.checkType}` : 'full');
   try {
     return await runSync(tenantId, progressCallback, { ...options, runId });
   } catch (error) {
@@ -958,11 +963,12 @@ async function runSync(tenantId, progressCallback, options = {}) {
         return resp.body.reports?.[0];
       });
       const rows = (bankSummary?.rows || []).flatMap(r => r.rowType === 'Section' ? (r.rows || []) : []);
+      const summaryColumns = bankSummaryColumns(bankSummary);
       for (const row of rows) {
         const cells = row.cells || [];
         const accountId = cells[0]?.attributes?.find(a => a.id === 'accountID')?.value;
-        const closingBalance = parseFloat(cells[4]?.value);
-        if (!accountId || isNaN(closingBalance)) continue;
+        const closingBalance = bankSummaryRowBalances(row, summaryColumns).closing;
+        if (!accountId || closingBalance == null) continue;
         upsertBankReconciliationXeroBalance(orgId, accountId, cells[0]?.value, closingBalance, todayStr);
       }
     } catch (err) {
@@ -2520,11 +2526,12 @@ async function runSync(tenantId, progressCallback, options = {}) {
         return response.body.reports?.[0];
       });
       const rows = (bankSummary?.rows || []).flatMap(row => row.rowType === 'Section' ? (row.rows || []) : []);
+      const summaryColumns = bankSummaryColumns(bankSummary);
       for (const row of rows) {
         const cells = row.cells || [];
         const accountId = cells[0]?.attributes?.find(attribute => attribute.id === 'accountID')?.value;
-        const closingBalance = Number(String(cells[4]?.value || '').replace(/,/g, ''));
-        if (accountId === statement.bank_account_id && Number.isFinite(closingBalance)) {
+        const closingBalance = bankSummaryRowBalances(row, summaryColumns).closing;
+        if (accountId === statement.bank_account_id && closingBalance != null) {
           upsertBankReconciliationXeroBalance(
             orgId, accountId, cells[0]?.value, closingBalance, statement.statement_end_date
           );
@@ -2814,6 +2821,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
 
     // The same figures per day, for ALL dates, so the Transactions pages can show any other period without a
     // new sync (transactionActivity.js). Never allowed to fail the sync.
+    let periodActivity = null;
     try {
       const daily = buildDailyActivity({
         invoices: allInvoices, credits: [...salesCredits, ...purchaseCredits], bankTransactions: allBankTransactions,
@@ -2821,23 +2829,27 @@ async function runSync(tenantId, progressCallback, options = {}) {
         chartOfAccounts: Array.isArray(chartOfAccounts) ? chartOfAccounts : [],
       });
       replaceTransactionDaily(orgId, daily.rows, { journalsKnown: daily.journalsKnown });
+      periodActivity = sumActivity(daily.rows, period, { journalsKnown: daily.journalsKnown });
     } catch (dailyError) {
       console.error(`[transaction-daily] could not save per-day figures for org ${orgId}: ${dailyError.message}`);
     }
 
+    // The stored totals for the sync's own period follow the same rules as the per-day figures (Xenon's
+    // definitions); the older counts above are only used if the per-day build failed.
+    const counted = periodActivity || {};
     upsertTransactionCounts(orgId, {
       period: period.type,
       period_start: period.start,
       period_end: period.end,
       months_covered: period.monthsCovered,
       turnover,
-      total_transactions: totalTransactions,
-      customer_invoices: customerInvoices,
-      supplier_bills: supplierBills,
-      credit_notes_sales: creditNotesSales,
-      credit_notes_purchase: creditNotesPurchase,
-      bank_processed: bankProcessed,
-      journals: journalCount,
+      total_transactions: counted.total_transactions ?? totalTransactions,
+      customer_invoices: counted.customer_invoices ?? customerInvoices,
+      supplier_bills: counted.supplier_bills ?? supplierBills,
+      credit_notes_sales: counted.credit_notes_sales ?? creditNotesSales,
+      credit_notes_purchase: counted.credit_notes_purchase ?? creditNotesPurchase,
+      bank_processed: counted.bank_processed ?? bankProcessed,
+      journals: counted.manual_journals ?? journalCount,
       turnover_pl_value: turnoverPlValue,
       turnover_pl_mismatch: turnoverPlMismatch,
       run_id: runId,
@@ -2845,6 +2857,19 @@ async function runSync(tenantId, progressCallback, options = {}) {
     });
   } catch (err) {
     console.error('Transaction counts failed — activating check results anyway:', err.message);
+  }
+
+  // A period view: the results stay beside the client's normal ones (never activated), and nothing else
+  // about the client is refreshed, so looking at another period cannot change what the nightly sync produced.
+  if (options.view) {
+    registerPeriodView(orgId, period.key, runId, {
+      preservedTypes: preservedCheckTypes,
+      summary: { periodType: period.type, periodStart: period.start, periodEnd: period.end, periodLabel: period.label },
+    });
+    // akrio_sync_runs only allows running/succeeded/failed/cancelled; a view must not count as a successful sync.
+    await finishSyncRun(runId, 'cancelled', 'period view (not a sync)');
+    emit({ step: 'done', message: 'Period worked out.' });
+    return { score, totalIssues, totalPotentialErrors, period, view: true };
   }
 
   await activateSyncRun(orgId, runId, options.checkType || null, preservedCheckTypes);

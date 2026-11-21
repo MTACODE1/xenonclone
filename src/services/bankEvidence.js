@@ -60,7 +60,7 @@ function screenXeroBalance(account) {
 
 function buildBankEvidence({
   reconciliation = [], imports = [], unmatchedLines = [], excludedBankAccountIds = new Set(),
-  reading = null, now = new Date(),
+  reading = null, lineSummaries = [], now = new Date(),
 } = {}) {
   const excluded = excludedBankAccountIds instanceof Set ? excludedBankAccountIds : new Set(excludedBankAccountIds || []);
   const byId = new Map(reconciliation.map(row => [row.bank_account_id, row]));
@@ -186,6 +186,7 @@ function buildBankEvidence({
 
   // ---- Unprocessed Bank ----
   const csvAccounts = new Set(imports.map(item => item.bank_account_id));
+  const linesByAccount = new Map((lineSummaries || []).map(summary => [normaliseName(summary.accountName), summary]));
   const screenFindings = [];
   let knownScreenAccounts = 0;
   let screenItems = 0;
@@ -198,6 +199,10 @@ function buildBankEvidence({
       knownScreenAccounts++;
       if (!items) continue;
       screenItems += items;
+      // The account's stored "items to reconcile" list gives the money and the age, but only when it is the
+      // whole list and still agrees with the count on Xero's page; an old or partial list is not used.
+      const stored = linesByAccount.get(normaliseName(account.accountName));
+      const lines = stored && !stored.truncated && stored.lineCount === items ? stored : null;
       // `id` (not accountId) gives these rows their own identity, separate from any CSV line of the same account.
       screenFindings.push({
         id: 'bank-screen:' + accountId, bankAccountId: accountId, account: account.accountName,
@@ -206,6 +211,11 @@ function buildBankEvidence({
         statementDate: account.statementDateLabel || null,
         bankFeed: account.stoppedImporting ? 'Stopped importing' : account.feedProblem ? 'Feed problem'
           : account.noFeed ? 'No bank feed' : 'OK',
+        ...(lines ? {
+          potentialValue: lines.value, value: lines.value, oldestItem: lines.oldest,
+          ageDays: lines.oldest ? Math.max(0, Math.round((Date.parse(isoDate(now)) - Date.parse(lines.oldest)) / 86400000)) : null,
+          oldestAge: lines.oldest ? Math.max(0, Math.round((Date.parse(isoDate(now)) - Date.parse(lines.oldest)) / 86400000)) + ' days' : null,
+        } : {}),
         evidenceSource: SCREEN_SOURCE,
         lastRead: provenance.readAt ? formatReadAt(provenance.readAt) + (provenance.readByName ? ' by ' + provenance.readByName : '') : null,
         ...provenance,
@@ -220,7 +230,7 @@ function buildBankEvidence({
   const unprocessedConfigured = !!imports.length || knownScreenAccounts > 0 || emptyFreshReading;
   const unprocessed = {
     count: unprocessedConfigured ? unmatchedLines.length + screenFindings.length : null,
-    value: csvValue,
+    value: csvValue + screenFindings.reduce((sum, finding) => sum + (finding.value || 0), 0),
     findings: [...unmatchedLines, ...screenFindings],
     screenItems,
     label: unprocessedLabel,
@@ -244,7 +254,18 @@ async function loadLatestBankScreenReading(orgId, options = {}) {
   }
 }
 
+// Summaries of the stored "items to reconcile" lists, or [] when they cannot be loaded.
+async function loadBankLineSummaries(orgId, options = {}) {
+  try {
+    const get = options.getBankLineSummaries || require('../db/bankScreenReadings').getLineSummaries;
+    return (await get(orgId)) || [];
+  } catch (error) {
+    (options.logger || console).error(`[bank-screen] could not load the stored lines for org ${orgId}:`, error && error.message);
+    return [];
+  }
+}
+
 module.exports = {
-  buildBankEvidence, loadLatestBankScreenReading, syntheticAccountId, screenItemCount, screenXeroBalance,
+  buildBankEvidence, loadLatestBankScreenReading, loadBankLineSummaries, syntheticAccountId, screenItemCount, screenXeroBalance,
   SCREEN_SOURCE, NEEDS_BANK_UPDATE,
 };

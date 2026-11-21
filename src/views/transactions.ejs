@@ -53,8 +53,14 @@
           <th class="text-right"><span style="cursor: pointer;" onclick="toggleCreditSplit()">Credit Notes ▾</span></th>
           <th class="credit-split text-right" style="display: none; background: var(--primary-light);">└ Sales</th>
           <th class="credit-split text-right" style="display: none; background: var(--primary-light);">└ Purchase</th>
-          <th class="text-right">Bank Processed</th>
-          <th class="text-right">Journals</th>
+          <th class="text-right"><span style="cursor: pointer;" onclick="toggleBankSplit()" title="Customer payments + supplier payments + direct deposits + direct payments + transfers">Bank Processed ▾</span></th>
+          <th class="bank-split text-right" style="display: none; background: var(--primary-light);">└ Customer Payments</th>
+          <th class="bank-split text-right" style="display: none; background: var(--primary-light);">└ Supplier Payments</th>
+          <th class="bank-split text-right" style="display: none; background: var(--primary-light);">└ Direct Deposits</th>
+          <th class="bank-split text-right" style="display: none; background: var(--primary-light);">└ Direct Payments</th>
+          <th class="bank-split text-right" style="display: none; background: var(--primary-light);">└ Transfers</th>
+          <th class="text-right"><span title="Items waiting on the bank feed, from the latest reading of Xero's Bank accounts page (browser extension). Not tied to the period.">Bank (Unprocessed)</span></th>
+          <th class="text-right"><span title="Posted manual journals">Journals</span></th>
         </tr>
       </thead>
       <tbody id="txBody">
@@ -117,16 +123,29 @@
               <div class="text-muted" style="font-size: 0.75rem;"><%= perMth(row.bank_processed, mth) %></div>
             <% } else { %>—<% } %>
           </td>
+          <% ['customer_payments', 'supplier_payments', 'direct_deposits', 'direct_payments', 'transfers'].forEach(field => { %>
+          <td class="bank-split text-right" style="display: none; background: var(--primary-light); font-size: 0.75rem;">
+            <div><%= fmtN(row[field]) %></div>
+            <div class="text-muted"><%= perMth(row[field], mth) %></div>
+          </td>
+          <% }) %>
           <td class="text-right">
-            <% if (row.journals != null) { %>
-              <div><%= fmtN(row.journals) %></div>
-              <div class="text-muted" style="font-size: 0.75rem;"><%= perMth(row.journals, mth) %></div>
+            <% if (row.unprocessed_items != null) { %>
+              <div style="<%= row.unprocessed_stale ? 'color: var(--text-muted);' : '' %>"><%= fmtN(row.unprocessed_items) %></div>
+              <div class="text-muted" style="font-size: 0.7rem;"><%= row.unprocessed_stale ? 'old reading, ' : '' %>read <%= row.unprocessed_read_at.slice(0, 10).split('-').reverse().join('/') %></div>
+            <% } else { %><span class="text-muted" title="Not read from Xero yet">—</span><% } %>
+          </td>
+          <% const journalCount = row.manual_journals != null ? row.manual_journals : row.journals; %>
+          <td class="text-right">
+            <% if (journalCount != null) { %>
+              <div><%= fmtN(journalCount) %></div>
+              <div class="text-muted" style="font-size: 0.75rem;"><%= perMth(journalCount, mth) %></div>
             <% } else { %>—<% } %>
           </td>
         </tr>
         <% }) %>
         <% if (rows.length === 0) { %>
-        <tr><td colspan="10" class="text-center text-muted" style="padding: 48px;">No data — connect and sync clients first.</td></tr>
+        <tr><td colspan="16" class="text-center text-muted" style="padding: 48px;">No data — connect and sync clients first.</td></tr>
         <% } %>
       </tbody>
       <% if (rows.length > 0) { %>
@@ -141,6 +160,10 @@
           <td class="credit-split text-right" style="display: none; background: var(--primary-light);"><%= totals.credit_notes_sales.toLocaleString('en-GB') %></td>
           <td class="credit-split text-right" style="display: none; background: var(--primary-light);"><%= totals.credit_notes_purchase.toLocaleString('en-GB') %></td>
           <td class="text-right"><%= totals.bank_processed.toLocaleString('en-GB') %></td>
+          <% ['customer_payments', 'supplier_payments', 'direct_deposits', 'direct_payments', 'transfers'].forEach(field => { %>
+          <td class="bank-split text-right" style="display: none; background: var(--primary-light);"><%= (totals[field] || 0).toLocaleString('en-GB') %></td>
+          <% }) %>
+          <td class="text-right"><%= (totals.unprocessed_items || 0).toLocaleString('en-GB') %></td>
           <td class="text-right"><%= totals.journals.toLocaleString('en-GB') %></td>
         </tr>
       </tfoot>
@@ -162,8 +185,16 @@ function toggleCreditSplit() {
   });
 }
 
+let bankSplitVisible = false;
+function toggleBankSplit() {
+  bankSplitVisible = !bankSplitVisible;
+  document.querySelectorAll('.bank-split').forEach(el => {
+    el.style.display = bankSplitVisible ? 'table-cell' : 'none';
+  });
+}
+
 function exportCSV() {
-  const rows = [['Business Name','Ref','Turnover','Total Transactions','Customer Invoices','Supplier Bills','Credit Notes (Sales)','Credit Notes (Purchase)','Bank Processed','Journals']];
+  const rows = [['Business Name','Ref','Turnover','Total Transactions','Customer Invoices','Supplier Bills','Credit Notes (Sales)','Credit Notes (Purchase)','Bank Processed','Customer Payments','Supplier Payments','Direct Deposits','Direct Payments','Transfers','Bank (Unprocessed)','Journals','Period From','Period To']];
   <% rows.forEach(row => { %>
   rows.push([
     '<%= (row.name||'').replace(/'/g,"\'") %>',
@@ -175,7 +206,15 @@ function exportCSV() {
     '<%= row.credit_notes_sales||0 %>',
     '<%= row.credit_notes_purchase||0 %>',
     '<%= row.bank_processed||0 %>',
-    '<%= row.journals||0 %>'
+    '<%= row.customer_payments||0 %>',
+    '<%= row.supplier_payments||0 %>',
+    '<%= row.direct_deposits||0 %>',
+    '<%= row.direct_payments||0 %>',
+    '<%= row.transfers||0 %>',
+    '<%= row.unprocessed_items != null ? row.unprocessed_items : '' %>',
+    '<%= (row.manual_journals != null ? row.manual_journals : row.journals)||0 %>',
+    '<%= row.period_start||'' %>',
+    '<%= row.period_end||'' %>'
   ]);
   <% }) %>
   const csv = rows.map(r => r.map(v => '"' + String(v).replace(/"/g,'""') + '"').join(',')).join('\n');

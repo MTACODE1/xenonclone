@@ -307,3 +307,26 @@ test('a fresh reading with no bank accounts at all is clean for both checks; a s
   assert.equal(staleEmpty.bankBalance.count, null);
   assert.equal(staleEmpty.unprocessed.count, null);
 });
+
+// ---- the stored "items to reconcile" list gives Unprocessed Bank its value and age ----
+test('a complete stored list that agrees with Xero\'s count adds value and age; a partial or outdated one does not', () => {
+  const accounts = [screen('PayPal', { itemsToReconcile: 3 }), screen('Card', { itemsToReconcile: 67 }), screen('Stripe', { itemsToReconcile: 5 })];
+  const result = buildBankEvidence({
+    reading: reading(accounts), now: NOW,
+    lineSummaries: [
+      { accountName: ' paypal ', lineCount: 3, value: 250.5, oldest: '2026-06-15', truncated: false },
+      { accountName: 'Card', lineCount: 60, value: 999, oldest: '2026-01-01', truncated: false },     // count no longer agrees
+      { accountName: 'Stripe', lineCount: 5, value: 40, oldest: '2026-11-01', truncated: true },       // not the whole list
+    ],
+  });
+  const by = Object.fromEntries(result.unprocessed.findings.map(f => [f.account, f]));
+  assert.equal(by.PayPal.value, 250.5);
+  assert.equal(by.PayPal.potentialValue, 250.5);
+  assert.equal(by.PayPal.oldestItem, '2026-06-15');
+  assert.equal(by.PayPal.ageDays, 158);
+  assert.equal(by.PayPal.oldestAge, '158 days');
+  assert.equal(by.Card.value, undefined);
+  assert.equal(by.Stripe.value, undefined);
+  assert.equal(result.unprocessed.count, 3);
+  assert.equal(result.unprocessed.value, 250.5);
+});

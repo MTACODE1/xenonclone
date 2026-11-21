@@ -39,6 +39,39 @@ function ensureTables(pool = getPool()) {
         UNIQUE KEY uq_bank_screen_account (batch_id, position),
         KEY idx_bank_screen_accounts_org (org_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+      // The "items to reconcile" lists: one read per bank account (the newest replaces the one before), one
+      // row per unreconciled statement line.
+      await pool.query(`CREATE TABLE IF NOT EXISTS akrio_bank_screen_line_reads (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        org_id INT NOT NULL,
+        account_name VARCHAR(255) NOT NULL,
+        line_count INT NOT NULL,
+        line_value DECIMAL(16,2) NOT NULL DEFAULT 0,
+        oldest_date DATE NULL,
+        truncated TINYINT(1) NOT NULL DEFAULT 0,
+        total_shown INT NULL,
+        read_by_staff_id INT NULL,
+        read_by_name VARCHAR(255) NULL,
+        read_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_bank_screen_line_reads_org (org_id, id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+      await pool.query(`CREATE TABLE IF NOT EXISTS akrio_bank_screen_lines (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        read_id BIGINT NOT NULL,
+        org_id INT NOT NULL,
+        position INT NOT NULL,
+        line_date DATE NOT NULL,
+        line_type VARCHAR(40) NULL,
+        payee VARCHAR(255) NULL,
+        particulars VARCHAR(500) NULL,
+        code VARCHAR(100) NULL,
+        reference VARCHAR(255) NULL,
+        spent DECIMAL(16,2) NULL,
+        received DECIMAL(16,2) NULL,
+        source VARCHAR(60) NULL,
+        UNIQUE KEY uq_bank_screen_line (read_id, position),
+        KEY idx_bank_screen_lines_org (org_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
     })().catch(err => { tableReady = null; throw err; });
   }
   return tableReady;
@@ -82,6 +115,112 @@ async function saveReading(orgId, reading, staff = {}, { pool = getPool(), ensur
 }
 
 const num = value => (value == null ? null : Number(value));
+
+// lines must already have been through validateLines. The account's earlier read is replaced; all or nothing.
+async function saveLines(orgId, read, staff = {}, { pool = getPool(), ensure = ensureTables } = {}) {
+  if (!Number.isInteger(orgId)) throw new Error('saveLines needs the organisation id');
+  await ensure(pool);
+  const { summariseLines } = require('../services/bankScreenReading');
+  const summary = summariseLines(read.lines);
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [old] = await connection.query(
+      `SELECT id FROM akrio_bank_screen_line_reads WHERE org_id = ? AND account_name = ?`, [orgId, read.accountName]);
+    if (old.length) {
+      const ids = old.map(row => row.id);
+      await connection.query(`DELETE FROM akrio_bank_screen_lines WHERE read_id IN (?) AND org_id = ?`, [ids, orgId]);
+      await connection.query(`DELETE FROM akrio_bank_screen_line_reads WHERE id IN (?) AND org_id = ?`, [ids, orgId]);
+    }
+    const [result] = await connection.query(
+      `INSERT INTO akrio_bank_screen_line_reads (org_id, account_name, line_count, line_value, oldest_date, truncated,
+         total_shown, read_by_staff_id, read_by_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [orgId, read.accountName, read.lines.length, summary.value, summary.oldest, bit(read.truncated),
+        read.totalShownByXero, staff.id ?? null, staff.name ?? null]
+    );
+    const readId = result.insertId;
+    for (let start = 0; start < read.lines.length; start += 200) {
+      await connection.query(
+        `INSERT INTO akrio_bank_screen_lines (read_id, org_id, position, line_date, line_type, payee, particulars, code,
+           reference, spent, received, source) VALUES ?`,
+        [read.lines.slice(start, start + 200).map((line, index) => [
+          readId, orgId, start + index, line.date, line.type, line.payee, line.particulars, line.code,
+          line.reference, line.spent, line.received, line.source,
+        ])]
+      );
+    }
+    await connection.commit();
+    return readId;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+const isoDay = value => (value == null ? null : (value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10)));
+
+// The newest read of each bank account of one organisation, without the lines: name, how many lines, their
+// value, the oldest date and when it was read. Used by the Unprocessed Bank check.
+async function getLineSummaries(orgId, { pool = getPool(), ensure = ensureTables } = {}) {
+  await ensure(pool);
+  const [rows] = await pool.query(
+    `SELECT account_name, line_count, line_value, DATE_FORMAT(oldest_date, '%Y-%m-%d') AS oldest_date, truncated,
+       total_shown, read_by_name, UNIX_TIMESTAMP(read_at) AS read_at_unix
+     FROM akrio_bank_screen_line_reads WHERE org_id = ? ORDER BY id`, [orgId]
+  );
+  const byAccount = new Map();
+  for (const row of rows) {
+    byAccount.set(row.account_name, {
+      accountName: row.account_name, lineCount: Number(row.line_count), value: Number(row.line_value),
+      oldest: row.oldest_date || null, truncated: Boolean(row.truncated),
+      totalShownByXero: row.total_shown == null ? null : Number(row.total_shown),
+      readByName: row.read_by_name, readAt: new Date(Number(row.read_at_unix) * 1000),
+    });
+  }
+  return [...byAccount.values()];
+}
+
+// The stored lines of one bank account (newest read), or null.
+async function getStoredLines(orgId, accountName, { pool = getPool(), ensure = ensureTables } = {}) {
+  await ensure(pool);
+  const [reads] = await pool.query(
+    `SELECT id, line_count, truncated, total_shown, read_by_name, UNIX_TIMESTAMP(read_at) AS read_at_unix
+     FROM akrio_bank_screen_line_reads WHERE org_id = ? AND account_name = ? ORDER BY id DESC LIMIT 1`, [orgId, accountName]
+  );
+  if (!reads.length) return null;
+  const [rows] = await pool.query(
+    `SELECT DATE_FORMAT(line_date, '%Y-%m-%d') AS line_date, line_type, payee, particulars, code, reference, spent, received, source
+     FROM akrio_bank_screen_lines WHERE read_id = ? AND org_id = ? ORDER BY position`, [reads[0].id, orgId]
+  );
+  return {
+    accountName, truncated: Boolean(reads[0].truncated),
+    totalShownByXero: reads[0].total_shown == null ? null : Number(reads[0].total_shown),
+    readByName: reads[0].read_by_name, readAt: new Date(Number(reads[0].read_at_unix) * 1000),
+    lines: rows.map(row => ({
+      date: isoDay(row.line_date), type: row.line_type, payee: row.payee, particulars: row.particulars, code: row.code,
+      reference: row.reference, spent: num(row.spent), received: num(row.received), source: row.source,
+    })),
+  };
+}
+
+// For the all-clients Transactions page: each organisation's items to reconcile in its newest reading.
+// Map(orgId -> { items, accounts, readAt }).
+async function getLatestItemTotals({ pool = getPool(), ensure = ensureTables } = {}) {
+  await ensure(pool);
+  const [rows] = await pool.query(
+    `SELECT b.org_id, UNIX_TIMESTAMP(b.read_at) AS read_at_unix, COALESCE(SUM(a.items_to_reconcile), 0) AS items,
+       SUM(a.items_to_reconcile > 0) AS accounts
+     FROM akrio_bank_screen_batches b
+     JOIN (SELECT org_id, MAX(id) AS id FROM akrio_bank_screen_batches GROUP BY org_id) latest ON latest.id = b.id
+     LEFT JOIN akrio_bank_screen_accounts a ON a.batch_id = b.id AND a.org_id = b.org_id
+     GROUP BY b.org_id, b.read_at`
+  );
+  return new Map(rows.map(row => [Number(row.org_id), {
+    items: Number(row.items) || 0, accounts: Number(row.accounts) || 0, readAt: new Date(Number(row.read_at_unix) * 1000),
+  }]));
+}
 
 async function getLatestReading(orgId, { pool = getPool(), ensure = ensureTables } = {}) {
   await ensure(pool);
@@ -151,4 +290,7 @@ async function getShortCodeIndex({ pool = getPool(), now = Date.now() } = {}) {
   return index;
 }
 
-module.exports = { ensureTables, saveReading, getLatestReading, getLastReadTimes, getActiveBankAccountCount, getShortCodeIndex };
+module.exports = {
+  ensureTables, saveReading, getLatestReading, getLastReadTimes, getActiveBankAccountCount, getShortCodeIndex,
+  saveLines, getLineSummaries, getStoredLines, getLatestItemTotals,
+};

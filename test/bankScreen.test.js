@@ -414,3 +414,55 @@ test('Xero dates, account ids and the statement page address', () => {
   assert.equal(linesParser.sameName('  Main   Account ', 'main account'), true);
   assert.equal(linesParser.sameName('PayPal', 'PayPal 1'), false);
 });
+
+// ---- saving the "items to reconcile" list ----
+const { validateLines, summariseLines } = require('../src/services/bankScreenReading');
+const goodLine = extra => ({ date: '2026-10-12', type: 'Debit', payee: null, particulars: 'CARD PAYMENT', code: null, reference: 'R1', spent: 10.99, received: null, source: 'Bank Feed', ...extra });
+const goodLines = extra => ({ shortCode: '!alpha', accountName: 'Main Account', lines: [goodLine(), goodLine({ date: '2026-06-15', spent: null, received: 150 })], truncated: false, totalShownByXero: 2, ...extra });
+
+test('validateLines keeps known fields only and refuses anything malformed', () => {
+  const clean = validateLines({ ...goodLines(), extra: 'x', lines: [{ ...goodLine(), hack: '<script>' }] });
+  assert.deepEqual(Object.keys(clean).sort(), ['accountName', 'lines', 'shortCode', 'totalShownByXero', 'truncated']);
+  assert.equal(clean.lines[0].hack, undefined);
+  assert.equal(clean.lines[0].spent, 10.99);
+  for (const bad of [
+    goodLines({ shortCode: 'nope' }), goodLines({ accountName: '' }), goodLines({ lines: 'x' }),
+    goodLines({ lines: [goodLine({ date: '12 Oct 2026' })] }), goodLines({ lines: [goodLine({ date: '2026-02-30' })] }),
+    goodLines({ lines: [goodLine({ spent: '10.99' })] }), goodLines({ lines: [goodLine({ particulars: 'x'.repeat(501) })] }),
+    goodLines({ lines: Array.from({ length: 1001 }, () => goodLine()) }), goodLines({ totalShownByXero: -1 }),
+  ]) assert.throws(() => validateLines(bad), ReadingError);
+  assert.deepEqual(summariseLines(clean.lines.concat([goodLine({ date: '2026-06-15', spent: null, received: 150 })])), { value: 160.99, oldest: '2026-06-15' });
+  assert.deepEqual(summariseLines([]), { value: 0, oldest: null });
+});
+
+test('POST /lines saves for the right client and account, and refuses the rest', async () => {
+  const savedLines = [];
+  const recomputed = [];
+  const deps = {
+    getLatestReading: async orgId => (orgId === 1 ? { batchId: 41, readAt: new Date(), readByName: 'T', accounts: [{ accountName: 'Main Account', itemsToReconcile: 2 }] } : null),
+    saveLines: async (orgId, read, staffMember) => { savedLines.push({ orgId, read, staffMember }); return 7; },
+    getStoredLines: async (orgId, accountName) => ({ accountName, lines: [goodLine()], orgId }),
+    recomputeEvidenceIssues: async (orgId, periodKey, onlyCheck) => { recomputed.push([orgId, periodKey, onlyCheck]); },
+  };
+  const server = await startApp(staff, [], deps);
+  try {
+    const ok = await call(server, 'POST', '/lines', { body: goodLines({ tenantId: 'tenant-1' }), csrf: 'tok' });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(ok.json, { ok: true, readId: 7, lines: 2, checksUpdated: true });
+    assert.equal(savedLines[0].orgId, 1);
+    assert.deepEqual(savedLines[0].staffMember, { id: 9, name: 'Tester' });
+    assert.deepEqual(recomputed, [[1, 'since_lock_date:2025-10-31:2026-11-30', 'unprocessed_bank']]);
+    assert.equal((await call(server, 'POST', '/lines', { body: goodLines() })).status, 403);                         // no token
+    assert.equal((await call(server, 'POST', '/lines', { body: goodLines({ lines: 'x' }), csrf: 'tok' })).status, 400);
+    assert.equal((await call(server, 'POST', '/lines', { body: goodLines({ shortCode: '!nomatch' }), csrf: 'tok' })).status, 404);
+    assert.equal((await call(server, 'POST', '/lines', { body: goodLines({ shortCode: '!beta2' }), csrf: 'tok' })).status, 403); // no access to client 2
+    assert.equal((await call(server, 'POST', '/lines', { body: goodLines({ tenantId: 'tenant-2' }), csrf: 'tok' })).status, 409);
+    assert.equal((await call(server, 'POST', '/lines', { body: goodLines({ accountName: 'Unknown Account' }), csrf: 'tok' })).status, 409);
+    assert.equal(savedLines.length, 1);
+    const stored = await call(server, 'GET', '/lines/tenant-1?account=Main%20Account');
+    assert.equal(stored.status, 200);
+    assert.equal(stored.json.stored.orgId, 1);
+    assert.equal((await call(server, 'GET', '/lines/tenant-2?account=Main%20Account')).status, 403);
+    assert.equal((await call(server, 'GET', '/lines/tenant-1')).status, 400);
+  } finally { server.close(); }
+});

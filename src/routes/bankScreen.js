@@ -4,13 +4,13 @@
 // staff member must have access to that organisation.
 const express = require('express');
 const { isStaffManager } = require('../services/staffPermissions');
-const { validateReading, readingFreshness, ReadingError, STALE_AFTER_DAYS } = require('../services/bankScreenReading');
+const { validateReading, validateLines, readingFreshness, ReadingError, STALE_AFTER_DAYS } = require('../services/bankScreenReading');
 
 function createBankScreenRouter(deps) {
   const {
     getAllOrganisations, getOrganisationById, getOrganisationByTenantId, staffHasOrgAccess,
     getShortCodeIndex, saveReading, getLatestReading, getLastReadTimes, getActiveBankAccountCount,
-    recomputeEvidenceIssues,
+    recomputeEvidenceIssues, saveLines, getStoredLines,
   } = deps;
   const router = express.Router();
 
@@ -95,6 +95,51 @@ function createBankScreenRouter(deps) {
         }
       }
       res.json({ ok: true, batchId, name: org.name, accounts: reading.accounts.length, checksUpdated });
+    } catch (error) { next(error); }
+  });
+
+  // The "items to reconcile" list of one bank account, read by the extension from Xero's Bank statements tab.
+  // Saved so the Unprocessed Bank check can show a value and the age of the oldest item, and so the list can be
+  // looked at (and downloaded) again without reading Xero.
+  router.post('/lines', express.json({ limit: '1mb' }), verifyAjaxCsrf, async (req, res, next) => {
+    try {
+      let read;
+      try {
+        read = validateLines(req.body);
+      } catch (error) {
+        if (error instanceof ReadingError) return res.status(400).json({ error: error.message });
+        throw error;
+      }
+      const { byCode } = await getShortCodeIndex();
+      const orgId = byCode.get(read.shortCode);
+      const org = orgId == null ? null : await getOrganisationById(orgId);
+      if (!org) return res.status(404).json({ error: 'No client in Akrio Verify matches this Xero organisation' });
+      if (!(await canAccess(req, org.id))) return res.status(403).json({ error: 'You do not have access to this client' });
+      if (req.body.tenantId != null && req.body.tenantId !== org.xero_tenant_id) {
+        return res.status(409).json({ error: 'The Xero page read does not belong to this client' });
+      }
+      // Only an account the client's latest reading knows can have lines stored against it.
+      const latest = await getLatestReading(org.id);
+      const known = latest && latest.accounts.some(account => account.accountName === read.accountName);
+      if (!known) return res.status(409).json({ error: 'This bank account is not in the client\'s latest reading. Click "Update from Xero" first.' });
+      const readId = await saveLines(org.id, read, { id: req.session.staffId ?? null, name: req.session.staffName ?? null });
+      let checksUpdated = false;
+      if (typeof recomputeEvidenceIssues === 'function') {
+        try { await recomputeEvidenceIssues(org.id, org.period_key || null, 'unprocessed_bank'); checksUpdated = true; }
+        catch (error) { console.error(`[bank-screen] lines ${readId} saved but Unprocessed Bank could not be recalculated for org ${org.id}:`, error && error.message); }
+      }
+      res.json({ ok: true, readId, lines: read.lines.length, checksUpdated });
+    } catch (error) { next(error); }
+  });
+
+  router.get('/lines/:tenantId', async (req, res, next) => {
+    try {
+      const org = await getOrganisationByTenantId(req.params.tenantId);
+      if (!org) return res.status(404).json({ error: 'Organisation not found' });
+      if (!(await canAccess(req, org.id))) return res.status(403).json({ error: 'You do not have access to this client' });
+      const accountName = typeof req.query.account === 'string' ? req.query.account.slice(0, 255) : '';
+      if (!accountName) return res.status(400).json({ error: 'Name the bank account' });
+      res.json({ stored: await getStoredLines(org.id, accountName) });
     } catch (error) { next(error); }
   });
 

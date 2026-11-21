@@ -76,6 +76,49 @@ function validateReading(body) {
   return { shortCode: body.shortCode, pageTitle: text(body.pageTitle, 'Page title', 200), accounts };
 }
 
+// One bank account's unreconciled statement lines, as read from Xero's "Bank statements" tab by the extension
+// (the "items to reconcile" list). Same rule as readings: a clean copy of known fields or a ReadingError.
+const MAX_LINES = 1000;
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+function validateLines(body) {
+  if (!isPlainObject(body)) throw new ReadingError('The lines are missing');
+  if (!isShortCode(body.shortCode)) throw new ReadingError('The Xero short code is not valid');
+  if (!Array.isArray(body.lines)) throw new ReadingError('lines must be a list');
+  if (body.lines.length > MAX_LINES) throw new ReadingError('Too many lines for one bank account');
+  const lines = body.lines.map((raw, index) => {
+    const at = `Line ${index + 1}`;
+    if (!isPlainObject(raw)) throw new ReadingError(`${at} is not valid`);
+    if (typeof raw.date !== 'string' || !ISO_DAY.test(raw.date) || Number.isNaN(Date.parse(raw.date + 'T00:00:00Z'))
+      || new Date(raw.date + 'T00:00:00Z').toISOString().slice(0, 10) !== raw.date) {
+      throw new ReadingError(`${at}: the date is not valid`);
+    }
+    const spent = amount(raw.spent, `${at}: spent`);
+    const received = amount(raw.received, `${at}: received`);
+    return {
+      date: raw.date, type: text(raw.type, `${at}: type`, 40), payee: text(raw.payee, `${at}: payee`, 255),
+      particulars: text(raw.particulars, `${at}: particulars`, 500), code: text(raw.code, `${at}: code`, 100),
+      reference: text(raw.reference, `${at}: reference`, 255), spent, received, source: text(raw.source, `${at}: source`, 60),
+    };
+  });
+  let total = body.totalShownByXero;
+  if (total != null && (!Number.isInteger(total) || total < 0 || total > MAX_ITEMS)) throw new ReadingError('The total shown by Xero is not valid');
+  if (total == null) total = null;
+  return {
+    shortCode: body.shortCode, accountName: text(body.accountName, 'Bank account name', 255, { required: true }),
+    lines, truncated: body.truncated === true, totalShownByXero: total,
+  };
+}
+
+// Figures for the Unprocessed Bank check from one account's stored lines: how much money, and how old.
+function summariseLines(lines) {
+  let value = 0, oldest = null;
+  for (const line of lines || []) {
+    value += Math.abs(Number(line.spent) || 0) + Math.abs(Number(line.received) || 0);
+    if (line.date && (oldest == null || line.date < oldest)) oldest = line.date;
+  }
+  return { value: Math.round(value * 100) / 100, oldest };
+}
+
 // rows: [{ orgId, shortCode }] from the cached Xero organisation records. A short code that appears
 // for more than one organisation is left out altogether, so a reading can never land on the wrong client.
 function buildShortCodeIndex(rows) {
@@ -106,5 +149,5 @@ function readingFreshness(readAt, now = new Date()) {
 
 module.exports = {
   ReadingError, validateReading, buildShortCodeIndex, readingFreshness,
-  MAX_ACCOUNTS, STALE_AFTER_DAYS,
+  MAX_ACCOUNTS, STALE_AFTER_DAYS, validateLines, summariseLines, MAX_LINES,
 };

@@ -32,7 +32,7 @@ const REVIEW_TABLES = [
 ];
 // insight_cache holds the Insight tab's figures (P&L, balance sheet KPIs). It was missing here, so every deploy
 // emptied the Insight tab for all clients until the next nightly sync.
-const RESULT_TABLES = ['issues', 'issue_findings', 'transaction_counts', 'bank_reconciliation', 'transaction_daily', 'transaction_daily_meta', 'insight_cache'];
+const RESULT_TABLES = ['issues', 'issue_findings', 'transaction_counts', 'bank_reconciliation', 'transaction_daily', 'transaction_daily_meta', 'insight_cache', 'period_views'];
 const ALL_TABLES = [...REVIEW_TABLES, ...RESULT_TABLES];
 
 const CYCLE_MS = Number(process.env.SNAPSHOT_CYCLE_MS) || 15 * 1000;

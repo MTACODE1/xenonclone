@@ -573,6 +573,75 @@ function getScoringObservationsForRun(orgId, runId, checkType = null, preserveTy
   }));
 }
 
+// ---- Period views: another period's health checks, kept beside the normal results ----
+const MAX_PERIOD_VIEWS_PER_ORG = 3;
+const hasTable = (db, name) => Boolean(db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(name));
+
+// The normal (active) run a client's results currently come from.
+function activeRunId(orgId, db = getDb()) {
+  const row = db.prepare(`SELECT MAX(run_id) AS run_id FROM issues WHERE org_id = ? AND is_active = 1`).get(orgId);
+  return row && row.run_id != null ? row.run_id : null;
+}
+
+// Removes a view run's staged rows. Only rows that are NOT active can ever be deleted here.
+function deleteViewRunRows(db, orgId, runId) {
+  db.prepare(`DELETE FROM issue_findings WHERE org_id = ? AND run_id = ? AND is_active = 0`).run(orgId, runId);
+  db.prepare(`DELETE FROM issues WHERE org_id = ? AND run_id = ? AND is_active = 0`).run(orgId, runId);
+  db.prepare(`DELETE FROM transaction_counts WHERE org_id = ? AND run_id = ? AND is_active = 0`).run(orgId, runId);
+}
+
+// Records a finished view run. Replaces an earlier view of the same period and keeps only the newest few per
+// client, so views never pile up.
+function registerPeriodView(orgId, periodKey, runId, { preservedTypes = [], summary = {}, baseRunId } = {}, db = getDb()) {
+  db.transaction(() => {
+    const previous = db.prepare(`SELECT run_id FROM period_views WHERE org_id = ? AND period_key = ?`).get(orgId, periodKey);
+    if (previous && previous.run_id !== runId) deleteViewRunRows(db, orgId, previous.run_id);
+    db.prepare(`
+      INSERT INTO period_views (org_id, period_key, run_id, base_run_id, preserved_json, summary_json, built_at)
+      VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(org_id, period_key) DO UPDATE SET run_id = excluded.run_id, base_run_id = excluded.base_run_id,
+        preserved_json = excluded.preserved_json, summary_json = excluded.summary_json, built_at = CURRENT_TIMESTAMP
+    `).run(orgId, periodKey, runId, baseRunId === undefined ? activeRunId(orgId, db) : baseRunId,
+      JSON.stringify(preservedTypes || []), JSON.stringify(summary || {}));
+    const extra = db.prepare(`
+      SELECT period_key, run_id FROM period_views WHERE org_id = ? ORDER BY built_at DESC, run_id DESC LIMIT -1 OFFSET ?
+    `).all(orgId, MAX_PERIOD_VIEWS_PER_ORG);
+    for (const view of extra) {
+      deleteViewRunRows(db, orgId, view.run_id);
+      db.prepare(`DELETE FROM period_views WHERE org_id = ? AND period_key = ?`).run(orgId, view.period_key);
+    }
+  })();
+}
+
+// The view of one period, or null when there is none or it was built on an older normal run than the current one.
+function getPeriodView(orgId, periodKey, db = getDb()) {
+  const row = db.prepare(`SELECT * FROM period_views WHERE org_id = ? AND period_key = ?`).get(orgId, periodKey);
+  if (!row) return null;
+  if (row.base_run_id !== activeRunId(orgId, db)) return null;
+  let preserved = [], summary = {};
+  try { preserved = JSON.parse(row.preserved_json) || []; } catch (error) { preserved = []; }
+  try { summary = JSON.parse(row.summary_json) || {}; } catch (error) { summary = {}; }
+  return { orgId, periodKey, runId: row.run_id, baseRunId: row.base_run_id, preserved, summary, builtAt: row.built_at };
+}
+
+// Every view of a client goes when a new normal run is activated: they were worked out from older results.
+function clearPeriodViews(db, orgId) {
+  if (!hasTable(db, 'period_views')) return;
+  for (const view of db.prepare(`SELECT run_id FROM period_views WHERE org_id = ?`).all(orgId)) deleteViewRunRows(db, orgId, view.run_id);
+  db.prepare(`DELETE FROM period_views WHERE org_id = ?`).run(orgId);
+}
+
+// The checks of a view: what the view run produced, plus the normal result of the checks a stored-data
+// recalculation cannot produce (kept in view.preserved).
+function getIssuesForView(view, db = getDb()) {
+  return getIssuesForRun(view.orgId, view.runId, null, view.preserved, db).map(issue => ({ ...issue }));
+}
+function getIssueByCheckTypeForView(view, checkType, db = getDb()) {
+  const staged = db.prepare(`SELECT * FROM issues WHERE org_id = ? AND run_id = ? AND is_active = 0 AND check_type = ?`).get(view.orgId, view.runId, checkType);
+  if (staged) return staged;
+  return view.preserved.includes(checkType) ? getIssueByCheckType(view.orgId, checkType) : undefined;
+}
+
 // sync_runs — migrated to the shared MySQL database (akrio_sync_runs), moved alongside
 // organisations/health_scores since all three are joined together elsewhere in this file.
 async function createSyncRun(orgId, mode, periodKey = null) {
@@ -616,6 +685,8 @@ function activateSqliteResults(db, orgId, runId, checkType = null, preserveTypes
       db.prepare(`UPDATE issue_findings SET is_active = 0 WHERE org_id = ? AND is_active = 1${notKept}`).run(orgId, ...keep);
       db.prepare(`UPDATE transaction_counts SET is_active = 0 WHERE org_id = ? AND is_active = 1`).run(orgId);
     }
+    // Views of other periods were worked out from the results being replaced; they are rebuilt on demand.
+    if (!checkType) clearPeriodViews(db, orgId);
     db.prepare(`UPDATE issues SET is_active = 1 WHERE org_id = ? AND run_id = ?`).run(orgId, runId);
     db.prepare(`UPDATE issue_findings SET is_active = 1 WHERE org_id = ? AND run_id = ?`).run(orgId, runId);
     if (!checkType) {
@@ -907,13 +978,18 @@ function getReportFindings(orgId, perCheckLimit = 50) {
 // refreshLatestHealthScore) — it now runs as a separate step after the SQLite transaction
 // commits, same two-phase pattern as activateSyncRun, and reuses that function instead of
 // duplicating the score-recalculation logic that used to be inlined here.
-async function setFindingReviewStates(orgId, checkType, findingKeys, state, notes = null) {
+// options.viewRunId: the review is made while looking at a period view, so the finding keys belong to that
+// view's result for the check (not to the normal result).
+async function setFindingReviewStates(orgId, checkType, findingKeys, state, notes = null, options = {}) {
   if (!['dismissed', 'ignored', 'ok', 'restore'].includes(state)) throw new Error('Invalid review state');
   const db = getDb();
   const uniqueKeys = [...new Set(findingKeys.filter(Boolean))];
   if (!uniqueKeys.length) return 0;
   const changed = db.transaction(() => {
-    const issue = db.prepare(`
+    const viewIssue = options.viewRunId != null ? db.prepare(`
+      SELECT id, period_checked FROM issues WHERE org_id = ? AND check_type = ? AND run_id = ? AND is_active = 0
+    `).get(orgId, checkType, options.viewRunId) : null;
+    const issue = viewIssue || db.prepare(`
       SELECT id, period_checked FROM issues WHERE org_id = ? AND check_type = ? AND is_active = 1
     `).get(orgId, checkType);
     if (!issue) throw new Error('Issue check not found');
@@ -1933,6 +2009,8 @@ function upsertTransactionCounts(orgId, data) {
 // counts already stored are kept (they are still the best known figures) rather than wiped to zero.
 function replaceTransactionDaily(orgId, rows, { journalsKnown = true } = {}) {
   const db = getDb();
+  const { COUNT_FIELDS } = require('../services/transactionActivity');
+  const columns = [...COUNT_FIELDS, 'turnover'];
   db.transaction(() => {
     const meta = db.prepare(`SELECT journals_known FROM transaction_daily_meta WHERE org_id = ?`).get(orgId);
     const keepJournals = !journalsKnown && meta && meta.journals_known === 1;
@@ -1941,32 +2019,36 @@ function replaceTransactionDaily(orgId, rows, { journalsKnown = true } = {}) {
       : new Map();
     db.prepare(`DELETE FROM transaction_daily WHERE org_id = ?`).run(orgId);
     const insert = db.prepare(`
-      INSERT INTO transaction_daily (org_id, day, customer_invoices, supplier_bills, credit_notes_sales,
-        credit_notes_purchase, bank_processed, journals, turnover) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO transaction_daily (org_id, day, ${columns.join(', ')}) VALUES (?, ?, ${columns.map(() => '?').join(', ')})
     `);
     const seen = new Set();
     for (const row of rows) {
       seen.add(row.day);
-      insert.run(orgId, row.day, row.customer_invoices, row.supplier_bills, row.credit_notes_sales,
-        row.credit_notes_purchase, row.bank_processed, keepJournals ? (previousJournals.get(row.day) || 0) : row.journals, row.turnover);
+      const values = { ...row, journals: keepJournals ? (previousJournals.get(row.day) || 0) : row.journals };
+      insert.run(orgId, row.day, ...columns.map(column => Number(values[column]) || 0));
     }
     for (const [day, journals] of previousJournals) {
-      if (!seen.has(day)) insert.run(orgId, day, 0, 0, 0, 0, 0, journals, 0);
+      if (!seen.has(day)) insert.run(orgId, day, ...columns.map(column => (column === 'journals' ? journals : 0)));
     }
     db.prepare(`
-      INSERT INTO transaction_daily_meta (org_id, journals_known, built_at) VALUES (?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(org_id) DO UPDATE SET journals_known = excluded.journals_known, built_at = CURRENT_TIMESTAMP
-    `).run(orgId, journalsKnown || keepJournals ? 1 : 0);
+      INSERT INTO transaction_daily_meta (org_id, journals_known, built_at, definition) VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+      ON CONFLICT(org_id) DO UPDATE SET journals_known = excluded.journals_known, built_at = CURRENT_TIMESTAMP,
+        definition = excluded.definition
+    `).run(orgId, journalsKnown || keepJournals ? 1 : 0, TRANSACTION_DAILY_DEFINITION);
   })();
 }
 
+// Counting rules the per-day rows were built with. 2 = Xenon's definitions (drafts counted, payments and
+// transfers inside Bank Processed, manual journals). Rows of an older definition are ignored until the client's
+// next sync rebuilds them, so two different sets of rules are never added together.
+const TRANSACTION_DAILY_DEFINITION = 2;
+
 // A client's figures for any period, added up from its per-day rows. null when the client has no per-day
-// rows yet (not synced since this was introduced).
+// rows of the current definition yet (not synced since it was introduced).
 function getTransactionActivityForOrg(orgId, period) {
   const db = getDb();
-  const meta = db.prepare(`SELECT journals_known, built_at FROM transaction_daily_meta WHERE org_id = ?`).get(orgId);
-  if (!meta) return null;
-  // Rows a day either side of the period are enough for the boundary rule applied in sumActivity.
+  const meta = db.prepare(`SELECT journals_known, built_at, definition FROM transaction_daily_meta WHERE org_id = ?`).get(orgId);
+  if (!meta || meta.definition !== TRANSACTION_DAILY_DEFINITION) return null;
   const rows = db.prepare(`SELECT * FROM transaction_daily WHERE org_id = ? AND day >= ? AND day <= ?`).all(orgId, period.start, period.end);
   const { sumActivity } = require('../services/transactionActivity');
   return { ...sumActivity(rows, period, { journalsKnown: meta.journals_known === 1 }), built_at: meta.built_at, source: 'daily' };
@@ -2023,7 +2105,7 @@ async function getAllTransactionActivity(periodInputValue) {
   const orgs = await getAllOrganisations();
   return orgs.map(o => {
     const base = {
-      xero_tenant_id: o.xero_tenant_id || o.freeagent_company_id, name: o.name, client_ref: o.client_ref,
+      org_id: o.id, xero_tenant_id: o.xero_tenant_id || o.freeagent_company_id, name: o.name, client_ref: o.client_ref,
       connection_status: o.connection_status, last_synced_at: o.last_synced_at,
     };
     let period;
@@ -2044,6 +2126,9 @@ async function getAllTransactionActivity(periodInputValue) {
       turnover: tc.turnover, total_transactions: tc.total_transactions, customer_invoices: tc.customer_invoices,
       supplier_bills: tc.supplier_bills, credit_notes_sales: tc.credit_notes_sales,
       credit_notes_purchase: tc.credit_notes_purchase, bank_processed: tc.bank_processed, journals: tc.journals,
+      customer_payments: tc.customer_payments, supplier_payments: tc.supplier_payments, other_payments: tc.other_payments,
+      direct_deposits: tc.direct_deposits, direct_payments: tc.direct_payments, transfers: tc.transfers,
+      manual_journals: tc.manual_journals,
       source: tc.source || (tc.turnover != null ? 'sync' : null),
     };
   });
@@ -2422,6 +2507,7 @@ module.exports = {
   getOrganisationByFreeAgentCompanyId, markOrganisationDisconnectedByFreeAgentCompany,
   upsertTransactionCounts, getTransactionCountsForOrg, getAllTransactionCounts, getPanoramaOrganisations,
   replaceTransactionDaily, getTransactionActivityForOrg, getAllTransactionActivity,
+  activeRunId, registerPeriodView, getPeriodView, clearPeriodViews, getIssuesForView, getIssueByCheckTypeForView,
   upsertBankReconciliationXeroBalance, updateStatementBalance, getBankReconciliationForOrg,
   getExcludedBankAccountIds, setBankAccountExcluded,
   getXeroBankItemsForOrg, replaceXeroBankItemsCache, createStatementImport,

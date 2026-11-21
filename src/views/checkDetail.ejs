@@ -1,6 +1,12 @@
 <%- include('partials/header', { currentPage: 'client' }) %>
 <%
 const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
+// While another period is on screen (a "period view"), every link and form here carries that period so paging,
+// filtering, exporting and reviewing stay in it. Empty for the client's normal period.
+const viewQs = typeof viewQuery === 'undefined' ? '' : (viewQuery || '');
+const viewAmp = viewQs ? '&' + viewQs : '';
+const viewFields = viewQs ? [...new URLSearchParams(viewQs)] : [];
+const viewInfo = typeof periodView === 'undefined' ? null : periodView;
 // Finding values store dates as plain YYYY-MM-DD strings (toDateString() throughout the app) —
 // reformat to UK DD/MM/YYYY for display without touching the underlying data or any other check
 // that reads these same fields.
@@ -12,6 +18,12 @@ function fmtDisplayDate(val) {
 }
 %>
 
+<% if (viewInfo) { %>
+<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px;background:#ECF2FF;border:1px solid #C9D8FF;color:#2A3547;border-radius:10px;padding:10px 14px;font-size:0.85rem;">
+  <span><strong>Viewing <%= viewInfo.label %>.</strong> The client's normal results (<%= viewInfo.normalLabel %>) are unchanged.</span>
+  <a class="btn btn-outlined btn-sm" href="?status=<%= status %>">Back to the normal period</a>
+</div>
+<% } %>
 <nav class="breadcrumb">
   <a href="<%= basePath %>/">Home</a>
   <span>/</span>
@@ -21,7 +33,7 @@ function fmtDisplayDate(val) {
 </nav>
 
 <div class="page-header check-header">
-  <a href="<%= basePath %>/client/<%= orgIdentifier %>" class="btn btn-outlined btn-sm back-button">
+  <a href="<%= basePath %>/client/<%= orgIdentifier %><%= viewQs ? '?' + viewQs : '' %>" class="btn btn-outlined btn-sm back-button">
     <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
     Back to issues
   </a>
@@ -103,7 +115,10 @@ function fmtDisplayDate(val) {
   }
   // The active finding for each account, so "Mark as OK" marks that account's difference OK for this period.
   const findingKeyByAccount = {};
-  (items || []).forEach(item => { if (item.accountId && item.finding_key) findingKeyByAccount[item.accountId] = item.finding_key; });
+  const noteByAccount = {};
+  (items || []).forEach(item => {
+    if (item.accountId && item.finding_key) { findingKeyByAccount[item.accountId] = item.finding_key; noteByAccount[item.accountId] = item.standaloneNote || ''; }
+  });
   const readText = reading && reading.readAt
     ? new Date(reading.readAt).toLocaleString('en-GB', { timeZone: 'Europe/London', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) + (reading.readByName ? ' by ' + reading.readByName : '')
     : null;
@@ -210,10 +225,21 @@ function fmtDisplayDate(val) {
   <% if (findingKeyByAccount[acc.accountId]) { %>
   <form method="POST" action="<%= basePath %>/client/<%= orgIdentifier %>/check/bank_balance/review" style="margin-top:8px;">
     <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+<% viewFields.forEach(([name, value]) => { %><input type="hidden" name="<%= name %>" value="<%= value %>"><% }) %>
     <input type="hidden" name="finding_key" value="<%= findingKeyByAccount[acc.accountId] %>">
     <input type="hidden" name="action" value="ok">
     <input type="hidden" name="return_status" value="active">
     <button type="submit" class="btn btn-outlined btn-sm" style="width:100%;text-align:center;border-color:#16a34a;color:#16a34a;">Mark as "OK"</button>
+  </form>
+  <%# A note against this account's difference; it stays with the account from one sync to the next. %>
+  <% if (noteByAccount[acc.accountId]) { %><p style="font-size:0.78rem;color:#5A6A85;margin:8px 0 0;background:#F8FAFC;border-radius:6px;padding:6px 8px;"><strong>Note:</strong> <%= noteByAccount[acc.accountId] %></p><% } %>
+  <form method="POST" action="<%= basePath %>/client/<%= orgIdentifier %>/check/bank_balance/note" style="margin-top:6px;display:flex;gap:6px;">
+    <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+<% viewFields.forEach(([name, value]) => { %><input type="hidden" name="<%= name %>" value="<%= value %>"><% }) %>
+    <input type="hidden" name="finding_key" value="<%= findingKeyByAccount[acc.accountId] %>">
+    <input type="hidden" name="return_status" value="active">
+    <input type="text" name="notes" maxlength="500" placeholder="Add a note" value="<%= noteByAccount[acc.accountId] || '' %>" class="form-input" style="flex:1;min-width:0;padding:5px 8px;font-size:0.78rem;">
+    <button type="submit" class="btn btn-outlined btn-sm"><%= noteByAccount[acc.accountId] ? 'Save' : 'Add Note' %></button>
   </form>
   <% } %>
   <% if (acc.excluded) { %><div style="margin-top:6px;font-size:0.75rem;color:var(--text-muted);text-align:center;">Excluded from checks</div><% } %>
@@ -255,13 +281,14 @@ function toggleBbEditForm(id) {
       ['all', 'All', summary.active + summary.dismissed + summary.ignored + summary.ok]
     ].forEach(([key, label, count]) => { %>
       <a class="btn btn-sm <%= status === key ? 'btn-primary' : 'btn-outlined' %>"
-         href="?status=<%= key %><%= contact ? '&contact=' + encodeURIComponent(contact) : '' %>"><%= label %> (<%= count %>)</a>
+         href="?status=<%= key %><%= contact ? '&contact=' + encodeURIComponent(contact) : '' %><%= viewAmp %>"><%= label %> (<%= count %>)</a>
     <% }) %>
     <form method="get" style="display:inline-flex;gap:6px;margin-left:auto;align-items:center;">
+      <% viewFields.forEach(([name, value]) => { %><input type="hidden" name="<%= name %>" value="<%= value %>"><% }) %>
       <input type="hidden" name="status" value="<%= status %>">
       <input class="form-input" type="search" name="contact" value="<%= contact %>" maxlength="100" placeholder="Filter by contact" style="width:200px;">
       <button type="submit" class="btn btn-sm btn-outlined">Filter</button>
-      <% if (contact) { %><a class="btn btn-sm btn-outlined" href="?status=<%= status %>">Clear</a><% } %>
+      <% if (contact) { %><a class="btn btn-sm btn-outlined" href="?status=<%= status %><%= viewAmp %>">Clear</a><% } %>
     </form>
   </div>
   <%
@@ -302,6 +329,7 @@ function toggleBbEditForm(id) {
       <form id="bulkAll" method="post" action="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= checkType %>/review"></form>
       <div class="table-filters">
         <input form="bulkAll" type="hidden" name="csrf_token" value="<%= csrfToken %>">
+        <% viewFields.forEach(([name, value]) => { %><input form="bulkAll" type="hidden" name="<%= name %>" value="<%= value %>"><% }) %>
         <input form="bulkAll" type="hidden" name="return_status" value="<%= status %>">
         <input form="bulkAll" type="hidden" name="return_page" value="1">
         <input form="bulkAll" type="hidden" name="select_all" value="1">
@@ -318,9 +346,10 @@ function toggleBbEditForm(id) {
     <% } %>
     <div class="table-filters">
       <input form="bulkReview" type="hidden" name="csrf_token" value="<%= csrfToken %>">
+      <% viewFields.forEach(([name, value]) => { %><input form="bulkReview" type="hidden" name="<%= name %>" value="<%= value %>"><% }) %>
       <input form="bulkReview" type="hidden" name="return_status" value="<%= status %>">
       <input form="bulkReview" type="hidden" name="return_page" value="<%= pagination.page %>">
-      <a class="btn btn-sm btn-outlined" href="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= checkType %>/export.csv?status=<%= status %><%= contact ? '&contact=' + encodeURIComponent(contact) : '' %>">Export CSV</a>
+      <a class="btn btn-sm btn-outlined" href="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= checkType %>/export.csv?status=<%= status %><%= contact ? '&contact=' + encodeURIComponent(contact) : '' %><%= viewAmp %>">Export CSV</a>
       <button type="button" class="btn btn-sm btn-outlined" id="selectPageBtn" onclick="toggleSelectPage(this)">Select page</button>
       <select form="bulkReview" name="action" class="form-input" style="width:auto;">
         <option value="dismissed">Dismiss</option>
@@ -355,7 +384,7 @@ function toggleBbEditForm(id) {
         'ageDays', // rendered as a dedicated "Age" column instead of the generic "age Days" label
         'standaloneNote', // rendered inline under the Review actions, not as its own column
         // Unprocessed Bank rows from Xero's Bank accounts page: ids and raw provenance; "lastRead" shows it readably.
-        'bankAccountId', 'batchId', 'readAt', 'readByName',
+        'bankAccountId', 'batchId', 'readAt', 'readByName', 'potentialValue',
       ]);
       // Per-transaction column set for the drill-down (multi_account_suppliers/multi_tax_suppliers)
       // — same hidden-ID-field rule as the main table, applied to each transaction sub-object.
@@ -480,6 +509,7 @@ function toggleBbEditForm(id) {
                 <% if (item.notes) { %><div class="text-muted"><%= item.notes %></div><% } %>
                 <form method="post" action="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= checkType %>/review" style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap;">
                   <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+<% viewFields.forEach(([name, value]) => { %><input type="hidden" name="<%= name %>" value="<%= value %>"><% }) %>
                   <input type="hidden" name="finding_key" value="<%= item.finding_key %>">
                   <input type="hidden" name="return_status" value="<%= status %>">
                   <input type="hidden" name="return_page" value="<%= pagination.page %>">
@@ -494,6 +524,7 @@ function toggleBbEditForm(id) {
                 <% if (item.standaloneNote) { %><div class="text-muted" style="margin-top:4px;"><%= item.standaloneNote %></div><% } %>
                 <form method="post" action="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= checkType %>/note" style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;">
                   <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
+<% viewFields.forEach(([name, value]) => { %><input type="hidden" name="<%= name %>" value="<%= value %>"><% }) %>
                   <input type="hidden" name="finding_key" value="<%= item.finding_key %>">
                   <input type="hidden" name="return_status" value="<%= status %>">
                   <input type="hidden" name="return_page" value="<%= pagination.page %>">
@@ -622,10 +653,10 @@ function toggleBbEditForm(id) {
         </span>
         <div style="display:flex; gap:8px;">
           <% if (previousPage.page > 1) { %>
-            <a class="btn btn-outlined btn-sm" href="?status=<%= status %>&page=<%= pagination.page %>&ppage=<%= previousPage.page - 1 %><%= contact ? '&contact=' + encodeURIComponent(contact) : '' %>">Previous</a>
+            <a class="btn btn-outlined btn-sm" href="?status=<%= status %>&page=<%= pagination.page %>&ppage=<%= previousPage.page - 1 %><%= contact ? '&contact=' + encodeURIComponent(contact) : '' %><%= viewAmp %>">Previous</a>
           <% } %>
           <% if (previousPage.page < previousPage.totalPages) { %>
-            <a class="btn btn-outlined btn-sm" href="?status=<%= status %>&page=<%= pagination.page %>&ppage=<%= previousPage.page + 1 %><%= contact ? '&contact=' + encodeURIComponent(contact) : '' %>">Next</a>
+            <a class="btn btn-outlined btn-sm" href="?status=<%= status %>&page=<%= pagination.page %>&ppage=<%= previousPage.page + 1 %><%= contact ? '&contact=' + encodeURIComponent(contact) : '' %><%= viewAmp %>">Next</a>
           <% } %>
         </div>
       </div>
@@ -637,10 +668,10 @@ function toggleBbEditForm(id) {
         </span>
         <div style="display:flex; gap:8px;">
           <% if (pagination.page > 1) { %>
-            <a class="btn btn-outlined btn-sm" href="?status=<%= status %>&page=<%= pagination.page - 1 %><%= contact ? '&contact=' + encodeURIComponent(contact) : '' %>">Previous</a>
+            <a class="btn btn-outlined btn-sm" href="?status=<%= status %>&page=<%= pagination.page - 1 %><%= contact ? '&contact=' + encodeURIComponent(contact) : '' %><%= viewAmp %>">Previous</a>
           <% } %>
           <% if (pagination.page < pagination.totalPages) { %>
-            <a class="btn btn-outlined btn-sm" href="?status=<%= status %>&page=<%= pagination.page + 1 %><%= contact ? '&contact=' + encodeURIComponent(contact) : '' %>">Next</a>
+            <a class="btn btn-outlined btn-sm" href="?status=<%= status %>&page=<%= pagination.page + 1 %><%= contact ? '&contact=' + encodeURIComponent(contact) : '' %><%= viewAmp %>">Next</a>
           <% } %>
         </div>
       </div>

@@ -201,6 +201,19 @@ router.get('/transactions', async (req, res, next) => {
   }
   try {
   let rows = await getAllTransactionActivity(input);
+  // Bank (Unprocessed): items waiting on the bank feed, from each client's latest reading of Xero's Bank accounts
+  // page. A page view must never fail because the readings cannot be reached.
+  try {
+    const { getLatestItemTotals } = require('../db/bankScreenReadings');
+    const { readingFreshness } = require('../services/bankScreenReading');
+    const totalsByOrg = await getLatestItemTotals();
+    rows = rows.map(row => {
+      const reading = totalsByOrg.get(row.org_id);
+      return reading ? { ...row, unprocessed_items: reading.items, unprocessed_read_at: reading.readAt.toISOString(), unprocessed_stale: readingFreshness(reading.readAt) !== 'current' } : row;
+    });
+  } catch (error) {
+    console.error('[transactions] bank readings unavailable:', error.message);
+  }
   const { sort, search } = req.query;
   if (search) rows = rows.filter(r => r.name.toLowerCase().includes(search.toLowerCase()));
   if (sort === 'turnover') rows.sort((a, b) => (b.turnover || 0) - (a.turnover || 0));
@@ -215,7 +228,13 @@ router.get('/transactions', async (req, res, next) => {
     credit_notes_sales: rows.reduce((s, r) => s + (r.credit_notes_sales || 0), 0),
     credit_notes_purchase: rows.reduce((s, r) => s + (r.credit_notes_purchase || 0), 0),
     bank_processed: rows.reduce((s, r) => s + (r.bank_processed || 0), 0),
-    journals: rows.reduce((s, r) => s + (r.journals || 0), 0),
+    journals: rows.reduce((s, r) => s + ((r.manual_journals != null ? r.manual_journals : r.journals) || 0), 0),
+    customer_payments: rows.reduce((s, r) => s + (r.customer_payments || 0), 0),
+    supplier_payments: rows.reduce((s, r) => s + (r.supplier_payments || 0), 0),
+    direct_deposits: rows.reduce((s, r) => s + (r.direct_deposits || 0), 0),
+    direct_payments: rows.reduce((s, r) => s + (r.direct_payments || 0), 0),
+    transfers: rows.reduce((s, r) => s + (r.transfers || 0), 0),
+    unprocessed_items: rows.reduce((s, r) => s + (r.unprocessed_stale ? 0 : (r.unprocessed_items || 0)), 0),
   };
   res.render('transactions', { rows, totals, query: { ...req.query, period: selectedPeriod } });
   } catch (error) {

@@ -355,13 +355,36 @@ function initSchema() {
       bank_processed INTEGER NOT NULL DEFAULT 0,
       journals INTEGER NOT NULL DEFAULT 0,
       turnover REAL NOT NULL DEFAULT 0,
+      customer_payments INTEGER NOT NULL DEFAULT 0,
+      supplier_payments INTEGER NOT NULL DEFAULT 0,
+      other_payments INTEGER NOT NULL DEFAULT 0,
+      direct_deposits INTEGER NOT NULL DEFAULT 0,
+      direct_payments INTEGER NOT NULL DEFAULT 0,
+      transfers INTEGER NOT NULL DEFAULT 0,
+      manual_journals INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (org_id, day)
     );
+    -- "Period views": the health checks worked out for a period OTHER than the client's normal one, kept beside
+    -- the normal results (their issues/findings rows stay is_active = 0 under run_id) so looking at another
+    -- period never replaces what the nightly sync produced. base_run_id is the normal run the view was built on;
+    -- once a newer normal run exists the view is out of date and is rebuilt on demand.
+    CREATE TABLE IF NOT EXISTS period_views (
+      org_id INTEGER NOT NULL,
+      period_key TEXT NOT NULL,
+      run_id INTEGER NOT NULL,
+      base_run_id INTEGER,
+      preserved_json TEXT NOT NULL DEFAULT '[]',
+      summary_json TEXT NOT NULL DEFAULT '{}',
+      built_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (org_id, period_key)
+    );
+
     -- One row per client: when its daily figures were last rebuilt, and whether the journal count is known.
     CREATE TABLE IF NOT EXISTS transaction_daily_meta (
       org_id INTEGER PRIMARY KEY,
       journals_known INTEGER NOT NULL DEFAULT 0,
-      built_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      built_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      definition INTEGER NOT NULL DEFAULT 1
     );
 
     CREATE TABLE IF NOT EXISTS sync_runs (
@@ -754,6 +777,14 @@ function initSchema() {
   // tolerance (not a flat £1) decides turnover_pl_mismatch — see resolveTurnoverPlMismatch in
   // xeroSync.js — because a flat absolute threshold fires constantly on FX/rounding noise for a
   // large client while being too loose for a tiny one.
+  // transaction_daily first shipped without the bank breakdown; add those columns to a table that already exists.
+  const dailyColumns = new Set(db.prepare(`PRAGMA table_info(transaction_daily)`).all().map(column => column.name));
+  for (const column of ['customer_payments', 'supplier_payments', 'other_payments', 'direct_deposits', 'direct_payments', 'transfers', 'manual_journals']) {
+    if (dailyColumns.size && !dailyColumns.has(column)) db.exec(`ALTER TABLE transaction_daily ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
+  }
+  // definition = which counting rules a client's rows were built with; rows of an older definition are not shown.
+  const dailyMetaColumns = new Set(db.prepare(`PRAGMA table_info(transaction_daily_meta)`).all().map(column => column.name));
+  if (dailyMetaColumns.size && !dailyMetaColumns.has('definition')) db.exec(`ALTER TABLE transaction_daily_meta ADD COLUMN definition INTEGER NOT NULL DEFAULT 1`);
   const transactionCountColumns = new Set(db.prepare(`PRAGMA table_info(transaction_counts)`).all().map(column => column.name));
   if (!transactionCountColumns.has('turnover_pl_value')) {
     db.exec(`ALTER TABLE transaction_counts ADD COLUMN turnover_pl_value REAL`);

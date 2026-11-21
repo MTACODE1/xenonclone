@@ -129,6 +129,18 @@ function isWithinPatternWindow(value, period, windowStart) {
   return Boolean(date) && date >= windowStart && date <= period.end;
 }
 
+// Is this the client's NORMAL period (the one its sync runs with), or another one to be shown as a period view?
+// Decided by the KIND of period, not its exact dates: a period key includes today's date, so the client's own
+// period (say "since lock date") gets a new key every day and must still count as the normal one, refreshed by a
+// real sync. Only a custom range is compared by its dates. A client never synced has no other period yet.
+function isNormalPeriod(org, selectedPeriod) {
+  if (!org || !org.period_key || !org.period_type) return true;
+  if (selectedPeriod.type !== org.period_type) return false;
+  const day = value => (value instanceof Date ? value.toISOString().slice(0, 10) : String(value || '').slice(0, 10));
+  return selectedPeriod.type !== 'custom'
+    || (selectedPeriod.start === day(org.period_start) && selectedPeriod.end === day(org.period_end));
+}
+
 function periodInput(query = {}, fallback = 'since_lock_date') {
   return {
     type: PERIOD_TYPES.includes(query.period) ? query.period : fallback,
@@ -149,4 +161,5 @@ module.exports = {
   periodInput,
   resolvePeriod,
   shouldUseCacheOnlyForReanalysis,
+  isNormalPeriod,
 };

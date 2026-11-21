@@ -22,7 +22,7 @@ const screen = (name, extra = {}) => ({
 const reading = accounts => ({ batchId: 3, readAt: new Date('2026-11-20T09:15:00Z'), readByName: 'Test <Person>', accounts });
 
 function renderBankBalance(evidence) {
-  const items = evidence.bankBalance.findings.map((item, index) => ({ ...item, finding_key: 'fk-' + index, review_state: 'active' }));
+  const items = evidence.bankBalance.findings.map((item, index) => ({ ...item, finding_key: 'fk-' + index, review_state: 'active', standaloneNote: index === 0 ? 'Agreed with the client <b>' : null }));
   return ejs.renderFile(path.join(__dirname, '../src/views/checkDetail.ejs'), {
     ...locals, checkType: 'bank_balance',
     def: { type: 'bank_balance', label: 'Bank Balance Check', importance: 'critical' },
@@ -57,6 +57,8 @@ test('Bank Balance cards show the bank feed balance, the Xero balance and their 
   assert.match(current, /Difference[\s\S]*£1,044\.25/);
   assert.match(current, /Compared using: Xero Bank accounts screen/);
   assert.match(current, /name="finding_key" value="fk-0"/, 'Mark as OK posts this account\'s finding');
+  assert.match(current, /check\/bank_balance\/note/, 'a note can be added against the account');
+  assert.match(current, /Agreed with the client &lt;b&gt;/, 'an existing note is shown, escaped');
   assert.match(current, /Click to add balance/);
   // A matching account is hidden until "Show all" is ticked, like Xenon.
   assert.match(card('Savings'), /data-has-disc="0"[^>]*style="display:none;"/);

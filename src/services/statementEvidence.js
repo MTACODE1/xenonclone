@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { RESERVED_PERIOD_LABELS, resolvePeriodChecked } = require('./checkRules');
 const { getSetting } = require('../db/queries');
-const { buildBankEvidence, loadLatestBankScreenReading } = require('./bankEvidence');
+const { buildBankEvidence, loadLatestBankScreenReading, loadBankLineSummaries } = require('./bankEvidence');
 
 const COLUMN_ALIASES = {
   date: ['date', 'transaction date', 'posted date', 'value date'],
@@ -466,7 +466,9 @@ async function recomputeEvidenceIssues(orgId, periodKey = null, onlyCheck = null
   // latest fresh reading of Xero's Bank accounts page (see bankEvidence.js). Xenon supports excluding
   // individual bank accounts; exclusions are organisation-scoped, so one client's never affect another's.
   const reading = await loadLatestBankScreenReading(orgId, options);
+  const lineSummaries = reading ? await loadBankLineSummaries(orgId, options) : [];
   const bank = buildBankEvidence({
+    lineSummaries,
     reconciliation: getBankReconciliationForOrg(orgId), imports, unmatchedLines: unmatched,
     excludedBankAccountIds, reading, now: options.now || new Date(),
   });

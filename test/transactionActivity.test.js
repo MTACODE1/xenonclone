@@ -23,39 +23,49 @@ const { getDb } = require('../src/db/schema');
 
 test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
-// ---- the sync's period calculation, as the reference ----
+// ---- the reference: turnover exactly as the sync's own step works it out, and counts by the stated rules ----
+// Counts follow Xenon's Transaction Counts (see transactionActivity.js): drafts and awaiting-approval documents are
+// counted, Bank Processed = customer payments + supplier payments + direct deposits + direct payments + transfers,
+// Journals = posted manual journals, and the total includes them.
 function referenceCounts(data, period) {
   const codes = new Set(data.chartOfAccounts.filter(a => a._class === 'REVENUE' && ['REVENUE', 'SALES'].includes(a.type)).map(a => a.code.toUpperCase()));
   const ids = new Set(data.chartOfAccounts.filter(a => a._class === 'REVENUE' && ['REVENUE', 'SALES'].includes(a.type)).map(a => a.accountID));
   const inPeriod = items => items.filter(item => isWithinPeriod(toDateString(item.date), period));
-  const live = ['AUTHORISED', 'PAID', 'VOIDED'];
-  const recentAccrec = inPeriod(data.invoices.filter(i => i.type === 'ACCREC' && live.includes(i.status)));
-  const recentAccpay = inPeriod(data.invoices.filter(i => i.type === 'ACCPAY' && live.includes(i.status)));
-  const recentSalesCN = inPeriod(data.credits.filter(c => c.type === 'ACCRECCREDIT')).filter(c => live.includes(c.status));
-  const recentPurchaseCN = inPeriod(data.credits.filter(c => c.type === 'ACCPAYCREDIT')).filter(c => live.includes(c.status));
+  const posted = ['AUTHORISED', 'PAID'];
+  const counted = ['DRAFT', 'SUBMITTED', 'AUTHORISED', 'PAID'];
   const net = (line, doc) => (doc.lineAmountTypes === 'Inclusive' ? (line.lineAmount || 0) - (line.taxAmount || 0) : (line.lineAmount || 0)) / (doc.currencyRate || 1);
   const amount = (line, doc) => (line.accountCode && codes.has(line.accountCode.toUpperCase()) ? net(line, doc) : 0);
   let turnover = 0;
-  for (const inv of recentAccrec.filter(i => i.status !== 'VOIDED')) for (const line of inv.lineItems || []) turnover += amount(line, inv);
-  for (const cn of recentSalesCN.filter(c => c.status !== 'VOIDED')) for (const line of cn.lineItems || []) turnover -= amount(line, cn);
+  for (const inv of inPeriod(data.invoices.filter(i => i.type === 'ACCREC' && posted.includes(i.status)))) for (const line of inv.lineItems || []) turnover += amount(line, inv);
+  for (const cn of inPeriod(data.credits.filter(c => c.type === 'ACCRECCREDIT' && posted.includes(c.status)))) for (const line of cn.lineItems || []) turnover -= amount(line, cn);
   const bank = type => data.bankTransactions.filter(b => b.type === type && b.status === 'AUTHORISED' && isWithinPeriod(toDateString(b.date), period));
   for (const bt of bank('RECEIVE')) for (const line of bt.lineItems || []) turnover += amount(line, bt);
   for (const bt of bank('SPEND')) for (const line of bt.lineItems || []) turnover -= amount(line, bt);
   turnover += turnoverAdjustmentFromPayments(data.payments, { revenueAccountIds: ids, revenueAccountCodes: codes, period });
-  for (const mj of data.manualJournals.filter(j => j.status === 'POSTED' && isWithinPeriod(toDateString(j.date), period))) {
+  const postedJournals = data.manualJournals.filter(j => j.status === 'POSTED' && isWithinPeriod(toDateString(j.date), period));
+  for (const mj of postedJournals) {
     for (const line of mj.journalLines || []) {
       if (!line.accountCode || !codes.has(line.accountCode.toUpperCase())) continue;
       turnover += -(mj.lineAmountTypes === 'Inclusive' ? (line.lineAmount || 0) - (line.taxAmount || 0) : (line.lineAmount || 0));
     }
   }
-  const notVoided = item => item.status !== 'VOIDED';
+  const docs = (list, type) => inPeriod(list.filter(d => d.type === type && counted.includes(d.status))).length;
+  const liveBank = data.bankTransactions.filter(b => b.status === 'AUTHORISED' && isWithinPeriod(toDateString(b.date), period) && countsAsBankProcessed(b));
+  const livePayments = data.payments.filter(p => p.status === 'AUTHORISED' && isWithinPeriod(toDateString(p.date), period));
   const counts = {
-    customer_invoices: recentAccrec.filter(notVoided).length, supplier_bills: recentAccpay.filter(notVoided).length,
-    credit_notes_sales: recentSalesCN.filter(notVoided).length, credit_notes_purchase: recentPurchaseCN.filter(notVoided).length,
-    bank_processed: data.bankTransactions.filter(b => b.status === 'AUTHORISED' && isWithinPeriod(toDateString(b.date), period) && countsAsBankProcessed(b)).length,
+    customer_invoices: docs(data.invoices, 'ACCREC'), supplier_bills: docs(data.invoices, 'ACCPAY'),
+    credit_notes_sales: docs(data.credits, 'ACCRECCREDIT'), credit_notes_purchase: docs(data.credits, 'ACCPAYCREDIT'),
+    customer_payments: livePayments.filter(p => p.paymentType === 'ACCRECPAYMENT').length,
+    supplier_payments: livePayments.filter(p => p.paymentType === 'ACCPAYPAYMENT').length,
+    other_payments: livePayments.filter(p => !['ACCRECPAYMENT', 'ACCPAYPAYMENT'].includes(p.paymentType)).length,
+    direct_deposits: liveBank.filter(b => /^RECEIVE/.test(b.type) && !/-TRANSFER$/.test(b.type)).length,
+    direct_payments: liveBank.filter(b => /^SPEND/.test(b.type) && !/-TRANSFER$/.test(b.type)).length,
+    transfers: liveBank.filter(b => /-TRANSFER$/.test(b.type)).length,
+    manual_journals: postedJournals.length,
     journals: data.journals.filter(j => isWithinPeriod(toDateString(j.journalDate), period)).length,
   };
-  return { ...counts, turnover, total_transactions: counts.customer_invoices + counts.supplier_bills + counts.credit_notes_sales + counts.credit_notes_purchase + counts.bank_processed };
+  counts.bank_processed = counts.customer_payments + counts.supplier_payments + counts.direct_deposits + counts.direct_payments + counts.transfers;
+  return { ...counts, turnover, total_transactions: counts.customer_invoices + counts.supplier_bills + counts.credit_notes_sales + counts.credit_notes_purchase + counts.bank_processed + counts.manual_journals };
 }
 
 // ---- made-up client data, from a seeded generator so a failure can be reproduced ----
@@ -79,7 +89,7 @@ function generator(seed) {
     credits: many(40, () => doc(['ACCRECCREDIT', 'ACCPAYCREDIT'], ['AUTHORISED', 'PAID', 'VOIDED', 'DRAFT'])),
     bankTransactions: many(160, () => ({ ...doc(['SPEND', 'RECEIVE', 'SPEND-TRANSFER', 'RECEIVE-TRANSFER'], ['AUTHORISED', 'DELETED']), total: pick([0, 0.004, 12.5, 300]) })),
     manualJournals: many(30, () => ({ status: pick(['POSTED', 'DRAFT', 'VOIDED']), date: xeroDate(day()), lineAmountTypes: pick(['NoTax', 'Inclusive']), journalLines: lines() })),
-    payments: many(60, () => ({ status: pick(['AUTHORISED', 'DELETED']), date: xeroDate(day()), paymentType: pick(['ACCRECPAYMENT', 'ACCPAYPAYMENT']), amount: Math.abs(money()), bankAmount: pick([undefined, 55.5]), currencyRate: pick([undefined, 1.1]), account: pick([{ accountID: 'acc-090', code: '090' }, { accountID: 'acc-200', code: '200' }, { code: '260' }]) })),
+    payments: many(60, () => ({ status: pick(['AUTHORISED', 'DELETED']), date: xeroDate(day()), paymentType: pick(['ACCRECPAYMENT', 'ACCPAYPAYMENT', 'ARCREDITPAYMENT', 'APPREPAYMENTPAYMENT']), amount: Math.abs(money()), bankAmount: pick([undefined, 55.5]), currencyRate: pick([undefined, 1.1]), account: pick([{ accountID: 'acc-090', code: '090' }, { accountID: 'acc-200', code: '200' }, { code: '260' }]) })),
     journals: many(200, () => ({ journalDate: xeroDate(day()) })),
   };
 }
@@ -100,7 +110,7 @@ test('for every period type, the days added up equal the sync\'s own calculation
       const period = resolvePeriod(input, CONTEXT);
       const expected = referenceCounts(data, period);
       const got = sumActivity(daily.rows, period);
-      for (const field of ['customer_invoices', 'supplier_bills', 'credit_notes_sales', 'credit_notes_purchase', 'bank_processed', 'journals', 'total_transactions']) {
+      for (const field of ['customer_invoices', 'supplier_bills', 'credit_notes_sales', 'credit_notes_purchase', 'customer_payments', 'supplier_payments', 'other_payments', 'direct_deposits', 'direct_payments', 'transfers', 'bank_processed', 'manual_journals', 'journals', 'total_transactions']) {
         assert.equal(got[field], expected[field], `${field} for ${period.key} (seed ${seed})`);
       }
       assert.ok(Math.abs(got.turnover - expected.turnover) < 0.005, `turnover for ${period.key} (seed ${seed}): ${got.turnover} vs ${expected.turnover}`);
@@ -164,4 +174,55 @@ test('a later sync without journals keeps the journal counts already known and r
   // A client whose journals were never downloaded shows unknown.
   queries.replaceTransactionDaily(602, second.rows, { journalsKnown: false });
   assert.equal(queries.getTransactionActivityForOrg(602, resolvePeriod({ type: 'current_fy' }, CONTEXT)).journals, null);
+});
+
+test('Xenon\'s counting rules: drafts counted, payments and transfers inside Bank Processed, manual journals in the total', () => {
+  const day = '2026-10-10';
+  const data = {
+    chartOfAccounts: [{ code: '200', accountID: 'a', _class: 'REVENUE', type: 'REVENUE' }],
+    invoices: [
+      ...['DRAFT', 'SUBMITTED', 'AUTHORISED', 'PAID', 'VOIDED', 'DELETED'].map(status => ({ type: 'ACCREC', status, date: day, lineItems: [{ accountCode: '200', lineAmount: 100 }] })),
+      { type: 'ACCPAY', status: 'DRAFT', date: day }, { type: 'ACCPAY', status: 'PAID', date: day },
+      { type: 'ACCPAY', status: 'DRAFT', date: null }, // a draft with no date belongs to no period
+    ],
+    credits: [{ type: 'ACCRECCREDIT', status: 'DRAFT', date: day, lineItems: [{ accountCode: '200', lineAmount: 30 }] }, { type: 'ACCPAYCREDIT', status: 'VOIDED', date: day }],
+    bankTransactions: [
+      { type: 'RECEIVE', status: 'AUTHORISED', date: day, total: 50 }, { type: 'SPEND', status: 'AUTHORISED', date: day, total: 20 },
+      { type: 'SPEND', status: 'AUTHORISED', date: day, total: 0 }, { type: 'SPEND', status: 'DELETED', date: day, total: 9 },
+      { type: 'SPEND-TRANSFER', status: 'AUTHORISED', date: day, total: 70 }, { type: 'RECEIVE-TRANSFER', status: 'AUTHORISED', date: day, total: 70 },
+      { type: 'RECEIVE-OVERPAYMENT', status: 'AUTHORISED', date: day, total: 5 },
+    ],
+    payments: [
+      { status: 'AUTHORISED', date: day, paymentType: 'ACCRECPAYMENT', amount: 1 }, { status: 'AUTHORISED', date: day, paymentType: 'ACCRECPAYMENT', amount: 1 },
+      { status: 'AUTHORISED', date: day, paymentType: 'ACCPAYPAYMENT', amount: 1 }, { status: 'DELETED', date: day, paymentType: 'ACCPAYPAYMENT', amount: 1 },
+      { status: 'AUTHORISED', date: day, paymentType: 'ARCREDITPAYMENT', amount: 1 },
+    ],
+    manualJournals: [{ status: 'POSTED', date: day }, { status: 'DRAFT', date: day }],
+    journals: [{ journalDate: day }, { journalDate: day }, { journalDate: day }],
+  };
+  const total = sumActivity(buildDailyActivity(data).rows, resolvePeriod({ type: 'custom', from: day, to: day }, CONTEXT));
+  assert.equal(total.customer_invoices, 4);   // draft, awaiting approval, approved, paid
+  assert.equal(total.supplier_bills, 2);
+  assert.equal(total.credit_notes_sales, 1);
+  assert.equal(total.credit_notes_purchase, 0);
+  assert.equal(total.turnover, 200);          // only the approved and the paid invoice; the draft credit note takes nothing off
+  assert.equal(total.customer_payments, 2);
+  assert.equal(total.supplier_payments, 1);
+  assert.equal(total.other_payments, 1);      // counted apart, not in Bank Processed
+  assert.equal(total.direct_deposits, 2);     // RECEIVE and RECEIVE-OVERPAYMENT
+  assert.equal(total.direct_payments, 1);     // the £0.00 and the deleted one are left out
+  assert.equal(total.transfers, 2);           // one transfer, once on each side
+  assert.equal(total.bank_processed, 8);
+  assert.equal(total.manual_journals, 1);
+  assert.equal(total.journals, 3);            // system journals: shown nowhere in the total
+  assert.equal(total.total_transactions, 4 + 2 + 1 + 0 + 8 + 1);
+});
+
+test('per-day rows built with older counting rules are not shown', () => {
+  getDb();
+  queries.replaceTransactionDaily(701, buildDailyActivity(generator(5)).rows, { journalsKnown: true });
+  const period = resolvePeriod({ type: 'rolling_12_months' }, CONTEXT);
+  assert.equal(queries.getTransactionActivityForOrg(701, period).source, 'daily');
+  getDb().prepare(`UPDATE transaction_daily_meta SET definition = 1 WHERE org_id = 701`).run();
+  assert.equal(queries.getTransactionActivityForOrg(701, period), null);
 });
