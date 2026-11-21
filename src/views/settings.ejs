@@ -42,7 +42,7 @@
       <div class="form-group">
         <label class="form-label">Default Sync Period</label>
         <select name="default_sync_period" class="form-select" style="width:100%;">
-          <option value="since_lock_date" <%= settings.defaultSyncPeriod === 'since_lock_date' ? 'selected' : '' %>>Since Lock Date</option>
+          <option value="since_lock_date" <%= settings.defaultSyncPeriod === 'since_lock_date' ? 'selected' : '' %>>Since Xero Lock Date</option>
           <option value="current_month" <%= settings.defaultSyncPeriod === 'current_month' ? 'selected' : '' %>>Current Month</option>
           <option value="previous_month" <%= settings.defaultSyncPeriod === 'previous_month' ? 'selected' : '' %>>Previous Month</option>
           <option value="rolling_12_months" <%= settings.defaultSyncPeriod === 'rolling_12_months' ? 'selected' : '' %>>Rolling 12 Months</option>

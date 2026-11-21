@@ -148,9 +148,9 @@ test('check page in a period view: links, filter form, review and note forms all
     practiceName: 'P', cssVersion: 't', staffName: null, staffRole: null, isStaffManager: false, canAccessSettings: false,
   };
   const file = path.join(__dirname, '../src/views/checkDetail.ejs');
-  const viewed = await ejs.renderFile(file, { ...locals, viewQuery: 'period=custom&from=2026-07-01&to=2026-09-30', periodView: { label: 'Custom (2026-07-01 to 2026-09-30)', normalLabel: 'Since lock date (2025-04-30)' } });
+  const viewed = await ejs.renderFile(file, { ...locals, viewQuery: 'period=custom&from=2026-07-01&to=2026-09-30', periodView: { label: 'Custom (2026-07-01 to 2026-09-30)', normalLabel: 'Since Xero Lock Date (30/04/2025)' } });
   assert.match(viewed, /Viewing Custom \(2026-07-01 to 2026-09-30\)\./);
-  assert.match(viewed, /normal results \(Since lock date \(2025-04-30\)\) are unchanged/);
+  assert.match(viewed, /normal results \(Since Xero Lock Date \(30\/04\/2025\)\) are unchanged/);
   assert.match(viewed, /href="\?status=active&amp;period=custom&amp;from=2026-07-01&amp;to=2026-09-30"|href="\?status=active&period=custom&from=2026-07-01&to=2026-09-30"/);
   assert.match(viewed, /page=3[^"]*period=custom/, 'the Next link stays in the period');
   assert.match(viewed, /export\.csv\?status=active[^"]*period=custom/);

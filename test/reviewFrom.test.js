@@ -50,7 +50,7 @@ test('the period starts after the review-from date and says where the date came 
   const from = reviewFromDate('2024-08-31', '2025-08-31', ASOF);
   const period = resolvePeriod({ type: 'since_lock_date' }, { lockDate: from.date, lockSource: from.source, asOf: ASOF });
   assert.equal(period.start, '2025-08-31');
-  assert.equal(period.label, 'Since last signed accounts (2025-08-31)');
+  assert.equal(period.label, 'Since last signed accounts (31/08/2025)');
   assert.equal(period.key, 'since_lock_date:2025-08-31:2026-10-20');
   assert.equal(isWithinPeriod('2025-08-31', period), false, 'the signed year end itself is excluded, as the lock date is');
   assert.equal(isWithinPeriod('2025-09-01', period), true);
@@ -58,9 +58,9 @@ test('the period starts after the review-from date and says where the date came 
 });
 
 test('the lock date label and the no-date label are unchanged', () => {
-  assert.equal(resolvePeriod({ type: 'since_lock_date' }, { lockDate: '2026-03-31', lockSource: 'lock_date', asOf: ASOF }).label, 'Since lock date (2026-03-31)');
-  assert.equal(resolvePeriod({ type: 'since_lock_date' }, { lockDate: '2026-03-31', asOf: ASOF }).label, 'Since lock date (2026-03-31)');
-  assert.equal(resolvePeriod({ type: 'since_lock_date' }, { asOf: ASOF }).label, 'All activity to 2026-10-20');
+  assert.equal(resolvePeriod({ type: 'since_lock_date' }, { lockDate: '2026-03-31', lockSource: 'lock_date', asOf: ASOF }).label, 'Since Xero Lock Date (31/03/2026)');
+  assert.equal(resolvePeriod({ type: 'since_lock_date' }, { lockDate: '2026-03-31', asOf: ASOF }).label, 'Since Xero Lock Date (31/03/2026)');
+  assert.equal(resolvePeriod({ type: 'since_lock_date' }, { asOf: ASOF }).label, 'All transactions to 20/10/2026 (no Xero lock date)');
 });
 
 test('other period types ignore the review-from date', () => {

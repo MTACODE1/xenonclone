@@ -226,3 +226,14 @@ test('per-day rows built with older counting rules are not shown', () => {
   getDb().prepare(`UPDATE transaction_daily_meta SET definition = 1 WHERE org_id = 701`).run();
   assert.equal(queries.getTransactionActivityForOrg(701, period), null);
 });
+
+test('labels show the first day a period counts: the day after the lock date for since-lock-date', () => {
+  const { firstCountedDay, isWithinPeriod } = require('../src/services/periodResolver');
+  const sinceLock = { type: 'since_lock_date', start: '2025-10-31', end: '2026-11-21' };
+  assert.equal(firstCountedDay(sinceLock), '2025-11-01');
+  assert.equal(isWithinPeriod('2025-10-31', sinceLock), false); // the locked day is not counted
+  assert.equal(isWithinPeriod('2025-11-01', sinceLock), true);
+  assert.equal(firstCountedDay({ type: 'previous_fy', start: '2025-11-01', end: '2026-10-31' }), '2025-11-01');
+  assert.equal(firstCountedDay({ type: 'since_lock_date', start: '2025-12-31', end: '2026-11-21' }), '2026-01-01');
+  assert.equal(firstCountedDay(null), null);
+});

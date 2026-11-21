@@ -78,7 +78,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
 <form method="GET" class="form-row mb-24" id="periodForm" style="align-items:center;flex-wrap:wrap;gap:8px;">
   <select name="period" class="form-select" style="width:auto;" onchange="document.getElementById('customPeriod').style.display=this.value==='custom'?'flex':'none';if(this.value!=='custom')this.form.submit()">
     <% [
-      ['since_lock_date','Since Lock Date'],['current_month','Current Month'],
+      ['since_lock_date','Since Xero Lock Date'],['current_month','Current Month'],
       ['previous_month','Previous Month'],['rolling_12_months','Rolling 12 Months'],
       ['current_fy','Current Financial Year'],['previous_fy','Previous Financial Year'],
       ['custom','Custom Date Range']

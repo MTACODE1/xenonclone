@@ -41,6 +41,8 @@ function clampFinancialYearEnd(year, month, day) {
   return formatDate(end);
 }
 
+const ukDate = iso => String(iso || '').slice(0, 10).split('-').reverse().join('/');
+
 function resolvePeriod(input = {}, context = {}) {
   const type = PERIOD_TYPES.includes(input.type) ? input.type : 'since_lock_date';
   const asOf = isoDate(context.asOf) || formatDate(new Date());
@@ -51,8 +53,11 @@ function resolvePeriod(input = {}, context = {}) {
 
   if (type === 'since_lock_date') {
     start = isoDate(context.lockDate) || '2000-01-01';
-    label = !context.lockDate ? `All activity to ${end}`
-      : context.lockSource === 'signed_accounts' ? `Since last signed accounts (${start})` : `Since lock date (${start})`;
+    // Xenon's wording and UK date order ("Since Xero Lock Date (31/10/2025)"). Where Abdur's rule starts the review at
+    // the last signed accounts instead (later than Xero's lock date), the label says so rather than naming a date
+    // that is not Xero's lock date.
+    label = !context.lockDate ? `All transactions to ${ukDate(end)} (no Xero lock date)`
+      : context.lockSource === 'signed_accounts' ? `Since last signed accounts (${ukDate(start)})` : `Since Xero Lock Date (${ukDate(start)})`;
   } else if (type === 'current_month') {
     start = `${asOf.slice(0, 7)}-01`;
     label = `Current month (${start} to ${end})`;
@@ -153,7 +158,19 @@ function shouldUseCacheOnlyForReanalysis(activePeriodKey, selectedPeriodKey) {
   return Boolean(activePeriodKey) && Boolean(selectedPeriodKey) && selectedPeriodKey !== activePeriodKey;
 }
 
+// The first day a period actually counts, for labels. A since-lock-date period starts the day AFTER the lock date
+// (isWithinPeriod leaves the locked day out), so showing period.start would wrongly suggest the locked day is in.
+function firstCountedDay(period) {
+  const start = isoDate(String(period?.start || '').slice(0, 10));
+  if (!start) return null;
+  if (period.type !== 'since_lock_date') return start;
+  const next = new Date(start + 'T00:00:00Z');
+  next.setUTCDate(next.getUTCDate() + 1);
+  return next.toISOString().slice(0, 10);
+}
+
 module.exports = {
+  firstCountedDay,
   PERIOD_TYPES,
   isWithinPatternWindow,
   isoDate,

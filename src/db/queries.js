@@ -2123,6 +2123,7 @@ async function getAllTransactionActivity(periodInputValue) {
     return {
       ...base,
       period: period.type, period_start: period.start, period_end: period.end, months_covered: period.monthsCovered,
+      period_from: require('../services/periodResolver').firstCountedDay(period),
       turnover: tc.turnover, total_transactions: tc.total_transactions, customer_invoices: tc.customer_invoices,
       supplier_bills: tc.supplier_bills, credit_notes_sales: tc.credit_notes_sales,
       credit_notes_purchase: tc.credit_notes_purchase, bank_processed: tc.bank_processed, journals: tc.journals,

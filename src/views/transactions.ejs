@@ -17,12 +17,12 @@
   <input type="text" name="search" value="<%= query.search || '' %>" placeholder="Search clients..." class="form-input" style="width: 250px;" oninput="this.form.submit()">
 
   <select name="period" class="form-select" onchange="handlePeriodChange(this)">
-    <option value="since_lock_date" <%= query.period==='since_lock_date'?'selected':'' %>>Since Lock Date</option>
-    <option value="rolling_12_months" <%= (query.period||'rolling_12_months')==='rolling_12_months'?'selected':'' %>>Rolling 12 Months</option>
+    <option value="previous_fy" <%= query.period==='previous_fy'?'selected':'' %>>Previous Financial Year</option>
+    <option value="current_fy" <%= query.period==='current_fy'?'selected':'' %>>Current Financial Year</option>
+    <option value="rolling_12_months" <%= query.period==='rolling_12_months'?'selected':'' %>>Rolling 12 Months</option>
     <option value="current_month" <%= query.period==='current_month'?'selected':'' %>>Current Month</option>
     <option value="previous_month" <%= query.period==='previous_month'?'selected':'' %>>Previous Month</option>
-    <option value="current_fy" <%= query.period==='current_fy'?'selected':'' %>>Current Financial Year</option>
-    <option value="previous_fy" <%= query.period==='previous_fy'?'selected':'' %>>Previous Financial Year</option>
+    <option value="since_lock_date" <%= query.period==='since_lock_date'?'selected':'' %>>Since Xero Lock Date</option>
     <option value="custom" <%= query.period==='custom'?'selected':'' %>>Custom Date Range</option>
   </select>
 
@@ -76,7 +76,7 @@
             <a href="<%= basePath %>/client/<%= row.xero_tenant_id %>" class="font-medium"><%= row.name %></a>
             <% if (row.client_ref) { %><div class="text-muted" style="font-size: 0.75rem;"><%= row.client_ref %></div><% } %>
             <% if (row.connection_status === 'disconnected') { %><div class="text-error" style="font-size: 0.75rem;">Disconnected</div><% } %>
-            <% if (row.period_start && row.period_end) { %><div class="text-muted" style="font-size: 0.7rem;"><%= row.period_start.split('-').reverse().join('/') %> to <%= row.period_end.split('-').reverse().join('/') %></div><% } %>
+            <% if (row.period_start && row.period_end) { %><div class="text-muted" style="font-size: 0.7rem;"><%= (row.period_from || row.period_start).split('-').reverse().join('/') %> to <%= row.period_end.split('-').reverse().join('/') %></div><% } %>
           </td>
           <td class="text-right">
             <% if (row.turnover != null) { %>
@@ -173,8 +173,10 @@
 </div>
 
 <script>
+// Every period applies at once, like the client page; Custom waits for its two dates and the Apply button.
 function handlePeriodChange(sel) {
   document.getElementById('customDates').style.display = sel.value === 'custom' ? 'flex' : 'none';
+  if (sel.value !== 'custom') sel.form.submit();
 }
 
 let creditSplitVisible = false;
@@ -213,7 +215,7 @@ function exportCSV() {
     '<%= row.transfers||0 %>',
     '<%= row.unprocessed_items != null ? row.unprocessed_items : '' %>',
     '<%= (row.manual_journals != null ? row.manual_journals : row.journals)||0 %>',
-    '<%= row.period_start||'' %>',
+    '<%= row.period_from||row.period_start||'' %>',
     '<%= row.period_end||'' %>'
   ]);
   <% }) %>

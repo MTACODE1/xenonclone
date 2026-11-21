@@ -192,8 +192,10 @@ router.get('/bank-lines.csv', async (req, res, next) => {
 });
 
 router.get('/transactions', async (req, res, next) => {
-  const selectedPeriod = PERIOD_TYPES.includes(req.query.period)
-    ? req.query.period : (getSetting('default_sync_period') || 'since_lock_date');
+  // Client Panorama opens on the previous financial year: a complete year that matches Xero's Profit and Loss and
+  // Xenon's Client Panorama, the same length for every client (agreed 21 Nov 2026). "Since Xero Lock Date" is still
+  // in the list. The health checks keep their own period (Since Xero Lock Date, Abdur's rule).
+  const selectedPeriod = PERIOD_TYPES.includes(req.query.period) ? req.query.period : 'previous_fy';
   const input = periodInput(req.query, selectedPeriod);
   if (selectedPeriod === 'custom') {
     // Fail early with a clear message; each client's own period is resolved in getAllTransactionActivity.
