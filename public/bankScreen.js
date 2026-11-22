@@ -101,12 +101,11 @@
       result.failed.push('The extension is too old to read the lines (version ' + (version || 'unknown') + ').');
       return result;
     }
-    for (const account of wanted) {
+    // One read of one account: null when saved, else why not (and whether trying again is pointless).
+    const readOne = async account => {
       const answer = await askExtension({ type: 'READ_BANK_LINES', shortCode, accountName: account.accountName }, 150000);
       if (!answer || !answer.ok) {
-        result.failed.push(account.accountName + ': ' + ((answer && answer.message) || 'the extension did not answer in time.'));
-        if (answer && answer.error === 'not_signed_in') break; // every further account would fail the same way
-        continue;
+        return { message: (answer && answer.message) || 'the extension did not answer in time.', code: answer && answer.error };
       }
       try {
         await getJson(base + '/api/bank-screen/lines', {
@@ -114,10 +113,26 @@
           headers: { 'content-type': 'application/json', accept: 'application/json', 'x-csrf-token': csrfToken },
           body: JSON.stringify({ ...answer.lines, tenantId }),
         });
-        result.saved++;
+        return null;
       } catch (error) {
-        result.failed.push(account.accountName + ': ' + error.message);
+        return { message: error.message, code: error.code };
       }
+    };
+    // A read can fail once for a passing reason (Xero still switching organisation, a slow page): seen on
+    // 22 Nov 2026, when the first account of a client failed and the same account then read in 30 seconds.
+    // So every failed account is tried once more at the end, unless Xero is signed out.
+    let retry = [];
+    for (const account of wanted) {
+      const problem = await readOne(account);
+      if (!problem) { result.saved++; continue; }
+      if (problem.code === 'not_signed_in') { result.failed.push(account.accountName + ': ' + problem.message); return result; }
+      retry.push({ account, problem });
+    }
+    for (const { account, problem: first } of retry) {
+      const problem = await readOne(account);
+      if (!problem) { result.saved++; continue; }
+      console.warn('[akrio] unreconciled lines not read for ' + account.accountName + ':', first.code || '', first.message, '| again:', problem.code || '', problem.message);
+      result.failed.push(account.accountName + ': ' + problem.message + (problem.code ? ' (' + problem.code + ')' : ''));
     }
     return result;
   }
