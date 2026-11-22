@@ -8,6 +8,8 @@ function fmtDisplayDate(val) {
   const [y, m, d] = val.split('-');
   return `${d}/${m}/${y}`;
 }
+// Any YYYY-MM-DD inside a piece of text (stored messages, labels) shown as DD/MM/YYYY.
+const ukText = text => String(text == null ? '' : text).replace(/\b(\d{4})-(\d{2})-(\d{2})\b/g, '$3/$2/$1');
 %>
 <%
 const score = org.score || 0;
@@ -641,10 +643,10 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
           <div style="font-weight:500;margin-bottom:6px;">Automatic reading attempts</div>
           <% failedExtractions.forEach(item => { %>
             <div style="padding:6px 0;border-bottom:1px solid #f2f6fa;color:#7C8FAC;">
-              <strong style="color:var(--dark);"><%= item.made_up_to %></strong> ·
-              <%= extractionReasons[item.failure_reason] || item.failure_reason %>
+              <strong style="color:var(--dark);"><%= ukText(item.made_up_to) %></strong> ·
+              <%= ukText(extractionReasons[item.failure_reason] || item.failure_reason) %>
               <% if (item.extracted_value != null) { %> (read £<%= Number(item.extracted_value).toLocaleString('en-GB',{minimumFractionDigits:2}) %>)<% } %>
-              <% if (item.available_dates) { try { const dates = JSON.parse(item.available_dates); if (dates.length) { %> · dates present in the filing: <%= dates.join(', ') %><% } } catch (e) {} } %>
+              <% if (item.available_dates) { try { const dates = JSON.parse(item.available_dates); if (dates.length) { %> · dates present in the filing: <%= ukText(dates.join(', ')) %><% } } catch (e) {} } %>
             </div>
           <% }) %>
         </div>
@@ -988,7 +990,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
       <% }) %>
     </div>
     <div style="padding: 8px 20px; font-size: 0.75rem; color: #7C8FAC; border-top: 1px solid #e5eaef; background: #F2F6FA;">
-      Period: <%= txCounts.period_start || '—' %> to <%= txCounts.period_end || '—' %> (<%= Math.round(mth * 10) / 10 %> months)
+      Period: <%= txCounts.period_start ? ukText(txCounts.period_start) : '—' %> to <%= txCounts.period_end ? ukText(txCounts.period_end) : '—' %> (<%= Math.round(mth * 10) / 10 %> months)
     </div>
     <% } else { %>
     <div style="padding: 48px 20px; text-align: center; color: #7C8FAC;">No transaction data yet — sync this client first.</div>

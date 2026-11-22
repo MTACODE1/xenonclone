@@ -210,7 +210,9 @@ router.get('/transactions', async (req, res, next) => {
     const { readingFreshness, datedUnprocessed, unprocessedInPeriod } = require('../services/bankScreenReading');
     const { isWithinPeriod } = require('../services/periodResolver');
     const totalsByOrg = await getLatestItemTotals();
-    const byDate = await getUnprocessedByDate();
+    // The dates are extra: if they cannot be loaded, the totals above are still shown (for all dates).
+    let byDate = new Map();
+    try { byDate = await getUnprocessedByDate(); } catch (error) { console.error('[transactions] unprocessed line dates unavailable:', error.message); }
     rows = rows.map(row => {
       const reading = totalsByOrg.get(row.org_id);
       if (!reading) return row;

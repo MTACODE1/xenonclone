@@ -239,13 +239,13 @@ async function getUnprocessedByDate({ pool = getPool(), ensure = ensureTables } 
        ON newest.id = r.id`
   );
   const [days] = await pool.query(
-    `SELECT read_id, DATE_FORMAT(line_date, '%Y-%m-%d') AS day, COUNT(*) AS lines
+    `SELECT read_id, DATE_FORMAT(line_date, '%Y-%m-%d') AS line_day, COUNT(*) AS line_total
      FROM akrio_bank_screen_lines GROUP BY read_id, line_date`
   );
   const daysByRead = new Map();
   for (const row of days) {
     if (!daysByRead.has(Number(row.read_id))) daysByRead.set(Number(row.read_id), new Map());
-    daysByRead.get(Number(row.read_id)).set(row.day, Number(row.lines));
+    daysByRead.get(Number(row.read_id)).set(row.line_day, Number(row.line_total));
   }
   const byOrg = new Map();
   const entry = orgId => {
