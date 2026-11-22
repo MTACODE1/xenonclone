@@ -7,6 +7,7 @@ const os = require('os');
 const dbPath = path.join(os.tmpdir(), `snapshot-${process.pid}.db`);
 process.env.XERO_DASHBOARD_DB_PATH = dbPath;
 process.env.AKRIO_DB_USER = 'test-user';
+process.env.SNAPSHOT_SMALL_RESULTS_GAP_MS = '1'; // no minimum gap between post-sync saves in these tests
 
 // Minimal in-memory stand-in for the MySQL snapshot + lease tables.
 const snap = []; // {table_name, chunk_no, row_count, data_hash, payload}
@@ -33,11 +34,14 @@ const exec = async (sql, params = []) => {
   if (/^DELETE FROM akrio_snapshot_lease/i.test(sql)) { lease = null; return [[]]; }
   return [[]];
 };
+let activeExec = null;
+const swapExec = fn => { activeExec = fn; };
+const run = (sql, params) => (activeExec || exec)(sql, params);
 const poolPath = require.resolve('../src/db/mysqlPool');
 require.cache[poolPath] = {
   id: poolPath, filename: poolPath, loaded: true,
-  exports: { getPool: () => ({ query: exec, getConnection: async () => ({
-    query: exec, beginTransaction: async () => {}, commit: async () => {}, rollback: async () => {}, release: () => {},
+  exports: { getPool: () => ({ query: run, getConnection: async () => ({
+    query: run, beginTransaction: async () => {}, commit: async () => {}, rollback: async () => {}, release: () => {},
   }) }) },
 };
 const { getDb } = require('../src/db/schema');
@@ -98,4 +102,61 @@ test('large tables are split into several chunks and still round-trip', async ()
   store._resetForTests();
   await store.restoreSnapshots();
   assert.equal(count('finding_notes'), 200);
+});
+
+test('after a sync the per-day figures are saved at the next cycle, without waiting for the ten-minute result save', async () => {
+  lease = null;
+  store._resetForTests();
+  await store.restoreSnapshots();
+  await store.runCycle({ force: true }); // a full save has just happened
+  const saved = t => snap.filter(r => r.table_name === t).reduce((n, r) => n + r.row_count, 0);
+  getDb().prepare("INSERT INTO transaction_daily_meta (org_id, journals_known, built_at, definition) VALUES (9001, 1, CURRENT_TIMESTAMP, 2)").run();
+  getDb().prepare("INSERT INTO issues (org_id, check_type, importance, count) VALUES (9001, 'y', 'low', 1)").run();
+  const issuesBefore = saved('issues');
+
+  await store.runCycle(); // no sync finished: nothing new is saved
+  assert.equal(saved('transaction_daily_meta'), 0);
+
+  store.requestResultSave(); // a sync finished
+  await new Promise(resolve => setTimeout(resolve, 5));
+  await store.runCycle();
+  assert.equal(saved('transaction_daily_meta'), 1);
+  assert.equal(saved('issues'), issuesBefore); // the large tables keep their ten-minute schedule
+
+  await store.runCycle({ force: true });
+  assert.equal(saved('issues'), issuesBefore + 1);
+});
+
+test('the small result tables come first in the shutdown save and before the large ones in a full save', () => {
+  assert.deepEqual([...store.SMALL_RESULT_TABLES].sort(), ['bank_reconciliation', 'insight_cache', 'period_views', 'transaction_counts', 'transaction_daily', 'transaction_daily_meta']);
+  assert.deepEqual(store.LARGE_RESULT_TABLES, ['issues', 'issue_findings']);
+  assert.deepEqual([...store.RESULT_TABLES].sort(), [...store.SMALL_RESULT_TABLES, ...store.LARGE_RESULT_TABLES].sort());
+  const source = require('fs').readFileSync(require.resolve('../src/db/snapshotStore'), 'utf8');
+  const shutdown = source.slice(source.indexOf('const shutdown'));
+  assert.ok(shutdown.indexOf('SMALL_RESULT_TABLES') < shutdown.indexOf('REVIEW_TABLES'));
+  assert.ok(shutdown.indexOf('REVIEW_TABLES') < shutdown.indexOf('LARGE_RESULT_TABLES'));
+});
+
+test('a failed post-sync save is tried again at the next cycle', async () => {
+  lease = null;
+  store._resetForTests();
+  await store.restoreSnapshots();
+  await store.runCycle({ force: true });
+  getDb().prepare("INSERT INTO transaction_daily_meta (org_id, journals_known, built_at, definition) VALUES (9002, 1, CURRENT_TIMESTAMP, 2)").run();
+  const realQuery = exec;
+  let failOnce = true;
+  const failing = async (sql, params) => {
+    if (failOnce && /^INSERT INTO akrio_sqlite_snapshot/i.test(sql) && params[0] === 'transaction_daily_meta') { failOnce = false; throw new Error('MySQL went away'); }
+    return realQuery(sql, params);
+  };
+  swapExec(failing);
+  store.requestResultSave();
+  await new Promise(resolve => setTimeout(resolve, 5));
+  await store.runCycle();
+  const saved = () => snap.filter(r => r.table_name === 'transaction_daily_meta').reduce((n, r) => n + r.row_count, 0);
+  assert.equal(failOnce, false);
+  await new Promise(resolve => setTimeout(resolve, 5));
+  await store.runCycle(); // no new sync, but the failed save is retried
+  assert.ok(saved() >= 2, 'the retried save includes the new row');
+  swapExec(realQuery);
 });

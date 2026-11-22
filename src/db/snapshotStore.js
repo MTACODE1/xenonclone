@@ -14,7 +14,10 @@ const gunzip = promisify(zlib.gunzip);
 // - REVIEW tables are people's work (dismissals, notes, exclusions, statement evidence, insight
 //   settings): saved every cycle (~15s) whenever they change, and again on shutdown.
 // - RESULT tables are re-derivable by a sync but slow to rebuild (check results, counts): saved
-//   every ~10 minutes and on shutdown.
+//   every ~10 minutes and on shutdown. The small ones (counts, per-day figures, insight figures) are also saved
+//   about a minute after a sync finishes (requestResultSave), and first on shutdown. Until 22 Nov 2026 a container
+//   stopped within ten minutes of a sync lost that sync's per-day figures: the shutdown save had 20 seconds and
+//   spent them on the large tables first (35 clients kept the previous day's Panorama figures after one restart).
 // - Caches (xero_entity_cache, bank item cache, chart of accounts, insight_cache) are not saved.
 //
 // During a rolling deploy two containers overlap. A lease row decides which one saves; the other
@@ -32,11 +35,18 @@ const REVIEW_TABLES = [
 ];
 // insight_cache holds the Insight tab's figures (P&L, balance sheet KPIs). It was missing here, so every deploy
 // emptied the Insight tab for all clients until the next nightly sync.
-const RESULT_TABLES = ['issues', 'issue_findings', 'transaction_counts', 'bank_reconciliation', 'transaction_daily', 'transaction_daily_meta', 'insight_cache', 'period_views'];
+const SMALL_RESULT_TABLES = ['transaction_counts', 'bank_reconciliation', 'transaction_daily', 'transaction_daily_meta', 'insight_cache', 'period_views'];
+const LARGE_RESULT_TABLES = ['issues', 'issue_findings'];
+const RESULT_TABLES = [...LARGE_RESULT_TABLES, ...SMALL_RESULT_TABLES];
 const ALL_TABLES = [...REVIEW_TABLES, ...RESULT_TABLES];
 
 const CYCLE_MS = Number(process.env.SNAPSHOT_CYCLE_MS) || 15 * 1000;
 const RESULT_EVERY_MS = Number(process.env.SNAPSHOT_RESULTS_MS) || 10 * 60 * 1000;
+// After a sync, the small result tables are saved at the next cycle at least this long after their last save, so a
+// run of syncs (the nightly) saves them about once a minute rather than after every client.
+const SMALL_RESULTS_MIN_GAP_MS = Number(process.env.SNAPSHOT_SMALL_RESULTS_GAP_MS) || 60 * 1000;
+// The container is given 60 seconds to stop (ECS stopTimeout); the shutdown save must finish inside that.
+const SHUTDOWN_SAVE_MS = Number(process.env.SNAPSHOT_SHUTDOWN_MS) || 50 * 1000;
 const LEASE_SECONDS = 45;
 const PAGE_ROWS = 2000;
 const CHUNK_RAW_BYTES = 3 * 1024 * 1024;
@@ -48,6 +58,8 @@ const remoteRows = new Map(); // table -> rows in the saved copy, as last seen
 let isLeader = false;
 let timer = null;
 let lastResultsRun = 0;
+let lastSmallResultsRun = 0;
+let smallResultsPending = false;
 let running = false;
 
 const enabled = () => !!process.env.AKRIO_DB_USER;
@@ -259,12 +271,18 @@ async function pullChanges() {
   return pulled;
 }
 
-async function saveTables(tables) {
+// Returns how many tables were written; `failed` counts tables whose save threw. With `keepLease`, the lease is renewed
+// before each table and saving stops if another container has taken it over (used by the shutdown save, which can
+// run longer than the lease).
+async function saveTables(tables, { keepLease = false } = {}) {
   let saved = 0;
+  let failed = 0;
   for (const table of tables) {
+    if (keepLease && !(await acquireLease().catch(() => false))) { isLeader = false; failed += 1; break; }
     try { if (await saveTable(table)) saved += 1; }
-    catch (err) { console.error(`[snapshot] saving ${table} failed:`, err.message); }
+    catch (err) { failed += 1; console.error(`[snapshot] saving ${table} failed:`, err.message); }
   }
+  saveTables.lastFailed = failed;
   return saved;
 }
 
@@ -281,8 +299,16 @@ async function runCycle({ force = false } = {}) {
     if (!isLeader) { await pullChanges(); isLeader = true; }
     await saveTables(REVIEW_TABLES);
     if (force || Date.now() - lastResultsRun >= RESULT_EVERY_MS) {
-      await saveTables(RESULT_TABLES);
+      smallResultsPending = false;
+      await saveTables(SMALL_RESULT_TABLES);
+      await saveTables(LARGE_RESULT_TABLES);
       lastResultsRun = Date.now();
+      lastSmallResultsRun = lastResultsRun;
+    } else if (smallResultsPending && Date.now() - lastSmallResultsRun >= SMALL_RESULTS_MIN_GAP_MS) {
+      smallResultsPending = false;
+      await saveTables(SMALL_RESULT_TABLES);
+      if (saveTables.lastFailed) smallResultsPending = true; // try again at the next cycle
+      lastSmallResultsRun = Date.now();
     }
   } catch (err) {
     console.error('[snapshot] cycle failed:', err.message);
@@ -299,11 +325,21 @@ function startSnapshotSync() {
   const shutdown = async signal => {
     console.log(`[snapshot] ${signal} received, saving before exit`);
     clearInterval(timer);
-    const deadline = new Promise(resolve => setTimeout(resolve, 20000));
+    const deadline = new Promise(resolve => setTimeout(resolve, SHUTDOWN_SAVE_MS));
     await Promise.race([
       (async () => {
         while (running) await new Promise(r => setTimeout(r, 100));
-        if (isLeader) { await saveTables(REVIEW_TABLES); await saveTables(RESULT_TABLES); await releaseLease(); }
+        // Small result tables first: they are the ones a sync just changed and they save in seconds; the large
+        // check-result tables can take longer than the time left.
+        // The lease is renewed before every table: the save can run past the 45-second lease, and a new container
+        // must not take over and save while this one is still writing.
+        if (isLeader) {
+          for (const tables of [SMALL_RESULT_TABLES, REVIEW_TABLES, LARGE_RESULT_TABLES]) {
+            await saveTables(tables, { keepLease: true });
+            if (!isLeader) break;
+          }
+          if (isLeader) await releaseLease();
+        }
       })().catch(err => console.error('[snapshot] shutdown save failed:', err.message)),
       deadline,
     ]);
@@ -313,7 +349,14 @@ function startSnapshotSync() {
   process.once('SIGINT', () => shutdown('SIGINT'));
 }
 
+// Called when a sync has finished: its counts and per-day figures are saved at the next cycle (within about a
+// minute), not up to ten minutes later.
+function requestResultSave() {
+  smallResultsPending = true;
+}
+
 module.exports = {
-  REVIEW_TABLES, RESULT_TABLES, restoreSnapshots, startSnapshotSync, runCycle, saveTable, loadTable,
-  _resetForTests: () => { knownHash.clear(); seenNonEmpty.clear(); remoteRows.clear(); isLeader = false; },
+  REVIEW_TABLES, RESULT_TABLES, SMALL_RESULT_TABLES, LARGE_RESULT_TABLES, restoreSnapshots, startSnapshotSync, runCycle,
+  saveTable, loadTable, requestResultSave,
+  _resetForTests: () => { knownHash.clear(); seenNonEmpty.clear(); remoteRows.clear(); isLeader = false; lastSmallResultsRun = 0; smallResultsPending = false; },
 };

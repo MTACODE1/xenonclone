@@ -18,7 +18,8 @@ const { isWithinPeriod } = require('./periodResolver');
 //   manual_journals : posted manual journals, the "Journals" column, and part of the total;
 //   journals        : Xero's system journals. Kept for reference only: every document already creates one, so
 //       it is not part of the total.
-// Turnover uses approved and paid documents only, as Xero's Profit & Loss does.
+// Turnover comes from Xero's journals on revenue accounts, as Xero's Profit & Loss does. Only when the journals
+// are not available is it built from approved and paid documents instead.
 const COUNT_FIELDS = ['customer_invoices', 'supplier_bills', 'credit_notes_sales', 'credit_notes_purchase',
   'customer_payments', 'supplier_payments', 'other_payments', 'direct_deposits', 'direct_payments', 'transfers',
   'bank_processed', 'manual_journals', 'journals'];
@@ -125,15 +126,38 @@ function buildDailyActivity({ invoices = [], credits = [], bankTransactions = []
     });
     if (adjustment) at(date).turnover += adjustment;
   }
+  const turnoverFromJournals = Array.isArray(journals) && journals.length > 0;
   if (Array.isArray(journals)) {
+    // Turnover the way Xero's Profit and Loss works it out: every journal line posted to a revenue account,
+    // net of tax and in base currency, on the journal's date. Building it from documents (above) missed postings
+    // that are not sales documents: conversion balances, supplier bills or bill credits coded to a revenue
+    // account, prepayments and overpayments, and line amounts Xero rounds differently (4-decimal unit prices,
+    // tax-inclusive lines). Checked on 22 Nov 2026 against Xero's Profit and Loss for 103 clients and 5 periods.
+    // The document figures are kept only for a sync whose journal download was skipped or timed out.
+    const journalTurnover = new Map();
     for (const journal of journals) {
       const day = at(journal.journalDate);
-      if (day) day.journals += 1;
+      if (!day) continue;
+      day.journals += 1;
+      for (const line of journal.journalLines || []) {
+        // Matched on the account's ID, which never changes: a journal keeps the account code it was posted with,
+        // so after an account's code is changed in Xero the code no longer matches (seen 22 Nov 2026: revenue
+        // posted to a code that was later renamed was left out). The code is the fallback when there is no ID.
+        const onRevenue = line.accountID
+          ? ids.has(line.accountID)
+          : !!line.accountCode && codes.has(String(line.accountCode).toUpperCase());
+        if (!onRevenue) continue;
+        // a credit (negative) to a revenue account is revenue
+        journalTurnover.set(day.day, (journalTurnover.get(day.day) || 0) - (Number(line.netAmount) || 0));
+      }
     }
+    // An empty list is not proof of no revenue: a recalculation from stored data returns [] for a client whose
+    // journals were never downloaded. Turnover then stays as worked out from the documents.
+    if (turnoverFromJournals) for (const day of days.values()) day.turnover = journalTurnover.get(day.day) || 0;
   }
   const rows = [...days.values()].sort((a, b) => a.day.localeCompare(b.day));
   for (const row of rows) row.bank_processed = bankProcessedOf(row);
-  return { rows, journalsKnown: Array.isArray(journals) };
+  return { rows, journalsKnown: Array.isArray(journals), turnoverFromJournals };
 }
 
 // Which side of the business a Xero payment is on: customer (money in from, or refunded to, a customer) or supplier.

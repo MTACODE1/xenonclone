@@ -418,6 +418,8 @@ async function runFreeAgentSync(companyId, progressCallback, options = {}) {
   });
 
   await activateSyncRun(orgId, runId, options.checkType || null);
+  // Save this sync's results to MySQL within about a minute (see snapshotStore.requestResultSave). Never fails the sync.
+  try { require('../db/snapshotStore').requestResultSave(); } catch (snapshotError) { console.error('[snapshot] could not queue a result save:', snapshotError.message); }
   emit({ step: 'done', message: 'Sync complete!' });
 
   return { score: scoreBreakdown.score, totalIssues, totalPotentialErrors, period };

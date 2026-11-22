@@ -2824,6 +2824,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     // The same figures per day, for ALL dates, so the Transactions pages can show any other period without a
     // new sync (transactionActivity.js). Never allowed to fail the sync.
     let periodActivity = null;
+    let turnoverFromJournals = false;
     try {
       const daily = buildDailyActivity({
         invoices: allInvoices, credits: [...salesCredits, ...purchaseCredits], bankTransactions: allBankTransactions,
@@ -2831,6 +2832,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
         chartOfAccounts: Array.isArray(chartOfAccounts) ? chartOfAccounts : [],
       });
       replaceTransactionDaily(orgId, daily.rows, { journalsKnown: daily.journalsKnown });
+      turnoverFromJournals = daily.turnoverFromJournals;
       periodActivity = sumActivity(daily.rows, period, { journalsKnown: daily.journalsKnown });
     } catch (dailyError) {
       console.error(`[transaction-daily] could not save per-day figures for org ${orgId}: ${dailyError.message}`);
@@ -2839,6 +2841,14 @@ async function runSync(tenantId, progressCallback, options = {}) {
     // The stored totals for the sync's own period follow the same rules as the per-day figures (Xenon's
     // definitions); the older counts above are only used if the per-day build failed.
     const counted = periodActivity || {};
+    // With the journals downloaded, turnover comes from them (Xero's Profit and Loss rule, transactionActivity.js);
+    // the document figure above is kept only when they were not. The P&L cross-check is redone on that figure.
+    if (periodActivity && turnoverFromJournals) {
+      turnover = periodActivity.turnover;
+      if (turnoverPlValue != null) {
+        turnoverPlMismatch = Math.abs(turnover - turnoverPlValue) > Math.max(1, Math.abs(turnoverPlValue) * 0.005) ? 1 : 0;
+      }
+    }
     upsertTransactionCounts(orgId, {
       period: period.type,
       period_start: period.start,
@@ -2864,6 +2874,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
   // A period view: the results stay beside the client's normal ones (never activated), and nothing else
   // about the client is refreshed, so looking at another period cannot change what the nightly sync produced.
   if (options.view) {
+    try { require('../db/snapshotStore').requestResultSave(); } catch (snapshotError) { console.error('[snapshot] could not queue a result save:', snapshotError.message); }
     registerPeriodView(orgId, period.key, runId, {
       preservedTypes: preservedCheckTypes,
       summary: { periodType: period.type, periodStart: period.start, periodEnd: period.end, periodLabel: period.label },
@@ -2875,6 +2886,9 @@ async function runSync(tenantId, progressCallback, options = {}) {
   }
 
   await activateSyncRun(orgId, runId, options.checkType || null, preservedCheckTypes);
+  // Save this sync's counts and per-day figures to MySQL within about a minute, so a container stopping soon after
+  // (a deploy, or ECS replacing it) does not take them with it. Never fails the sync.
+  try { require('../db/snapshotStore').requestResultSave(); } catch (snapshotError) { console.error('[snapshot] could not queue a result save:', snapshotError.message); }
 
   // Refresh Insight KPI data (P&L + Balance Sheet) in the background — failure does not block sync
   try {
@@ -2887,6 +2901,8 @@ async function runSync(tenantId, progressCallback, options = {}) {
   } catch (e) {
     console.warn('[syncOrganisation] insightSync failed (non-fatal):', e.message);
   }
+  // Again once the Insight figures are written, in case a save ran between the two.
+  try { require('../db/snapshotStore').requestResultSave(); } catch (snapshotError) { console.error('[snapshot] could not queue a result save:', snapshotError.message); }
 
   emit({ step: 'done', message: 'Sync complete!' });
   return { score, totalIssues, totalPotentialErrors, period };

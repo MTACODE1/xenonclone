@@ -23,7 +23,23 @@ const { getDb } = require('../src/db/schema');
 
 test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
-// ---- the reference: turnover exactly as the sync's own step works it out, and counts by the stated rules ----
+// ---- the reference: turnover as the sync's own document step works it out (used when the journal download was
+// skipped), turnover from journals (Xero's Profit and Loss rule, used whenever journals are available), and counts by
+// the stated rules ----
+function referenceJournalTurnover(data, period) {
+  const revenue = data.chartOfAccounts.filter(a => a._class === 'REVENUE' && ['REVENUE', 'SALES'].includes(a.type));
+  const ids = new Set(revenue.map(a => a.accountID));
+  const codes = new Set(revenue.map(a => a.code.toUpperCase()));
+  let turnover = 0;
+  for (const j of data.journals.filter(j => isWithinPeriod(toDateString(j.journalDate), period))) {
+    for (const line of j.journalLines || []) {
+      const onRevenue = line.accountID ? ids.has(line.accountID) : !!line.accountCode && codes.has(line.accountCode.toUpperCase());
+      if (onRevenue) turnover -= line.netAmount || 0;
+    }
+  }
+  return turnover;
+}
+
 // Counts follow Xenon's Transaction Counts (see transactionActivity.js): drafts and awaiting-approval documents are
 // counted, Bank Processed = customer payments + supplier payments + direct deposits + direct payments + transfers,
 // Journals = posted manual journals, and the total includes them.
@@ -90,7 +106,16 @@ function generator(seed) {
     bankTransactions: many(160, () => ({ ...doc(['SPEND', 'RECEIVE', 'SPEND-TRANSFER', 'RECEIVE-TRANSFER'], ['AUTHORISED', 'DELETED']), total: pick([0, 0.004, 12.5, 300]) })),
     manualJournals: many(30, () => ({ status: pick(['POSTED', 'DRAFT', 'VOIDED']), date: xeroDate(day()), lineAmountTypes: pick(['NoTax', 'Inclusive']), journalLines: lines() })),
     payments: many(60, () => ({ status: pick(['AUTHORISED', 'DELETED']), date: xeroDate(day()), paymentType: pick(['ACCRECPAYMENT', 'ACCPAYPAYMENT', 'ARCREDITPAYMENT', 'APPREPAYMENTPAYMENT']), amount: Math.abs(money()), bankAmount: pick([undefined, 55.5]), currencyRate: pick([undefined, 1.1]), account: pick([{ accountID: 'acc-090', code: '090' }, { accountID: 'acc-200', code: '200' }, { code: '260' }]) })),
-    journals: many(200, () => ({ journalDate: xeroDate(day()) })),
+    // System journals: some lines carry the account's ID (and an old code, as after an account code is changed in
+    // Xero), some only a code, as older journals do.
+    journals: many(200, () => ({
+      journalDate: xeroDate(day()),
+      journalLines: Array.from({ length: Math.floor(next() * 3) }, () => {
+        const account = pick(['acc-200', 'acc-260', 'acc-270', 'acc-400', 'acc-090']);
+        const netAmount = Math.round((next() * 3000 - 1500) * 100) / 100;
+        return next() < 0.7 ? { accountID: account, accountCode: 'OLD', netAmount } : { accountCode: account.slice(4), netAmount };
+      }),
+    })),
   };
 }
 
@@ -113,7 +138,11 @@ test('for every period type, the days added up equal the sync\'s own calculation
       for (const field of ['customer_invoices', 'supplier_bills', 'credit_notes_sales', 'credit_notes_purchase', 'customer_payments', 'supplier_payments', 'other_payments', 'direct_deposits', 'direct_payments', 'transfers', 'bank_processed', 'manual_journals', 'journals', 'total_transactions']) {
         assert.equal(got[field], expected[field], `${field} for ${period.key} (seed ${seed})`);
       }
-      assert.ok(Math.abs(got.turnover - expected.turnover) < 0.005, `turnover for ${period.key} (seed ${seed}): ${got.turnover} vs ${expected.turnover}`);
+      const journalTurnover = referenceJournalTurnover(data, period);
+      assert.ok(Math.abs(got.turnover - journalTurnover) < 0.005, `turnover for ${period.key} (seed ${seed}): ${got.turnover} vs ${journalTurnover}`);
+      // Without journals (download skipped or timed out) turnover falls back to the sync's document calculation.
+      const fallback = sumActivity(buildDailyActivity({ ...data, journals: null }).rows, period, { journalsKnown: false });
+      assert.ok(Math.abs(fallback.turnover - expected.turnover) < 0.005, `document turnover for ${period.key} (seed ${seed}): ${fallback.turnover} vs ${expected.turnover}`);
       assert.equal(got.period_start, period.start);
       assert.equal(got.months_covered, period.monthsCovered);
     }
@@ -155,7 +184,7 @@ test('stored per client: any period is read back without a sync, and one client 
     assert.equal(got.source, 'daily');
     assert.equal(got.total_transactions, expected.total_transactions, period.key);
     assert.equal(got.journals, expected.journals, period.key);
-    assert.ok(Math.abs(got.turnover - expected.turnover) < 0.005, period.key);
+    assert.ok(Math.abs(got.turnover - referenceJournalTurnover(data, period)) < 0.005, period.key);
   }
   assert.equal(queries.getTransactionActivityForOrg(999, resolvePeriod({ type: 'current_month' }, CONTEXT)), null);
 });
@@ -205,7 +234,9 @@ test('Xenon\'s counting rules: drafts counted, payments and transfers inside Ban
   assert.equal(total.supplier_bills, 2);
   assert.equal(total.credit_notes_sales, 1);
   assert.equal(total.credit_notes_purchase, 0);
-  assert.equal(total.turnover, 200);          // only the approved and the paid invoice; the draft credit note takes nothing off
+  assert.equal(total.turnover, 0);            // turnover comes from the journals, and these carry no revenue lines
+  const fromDocuments = sumActivity(buildDailyActivity({ ...data, journals: null }).rows, resolvePeriod({ type: 'custom', from: day, to: day }, CONTEXT), { journalsKnown: false });
+  assert.equal(fromDocuments.turnover, 200);  // without journals: only the approved and the paid invoice; the draft credit note takes nothing off
   assert.equal(total.customer_payments, 3);   // two invoice payments and one credit-note refund, as Xenon counts them
   assert.equal(total.supplier_payments, 1);
   assert.equal(total.other_payments, 0);
@@ -236,4 +267,64 @@ test('labels show the first day a period counts: the day after the lock date for
   assert.equal(firstCountedDay({ type: 'previous_fy', start: '2025-11-01', end: '2026-10-31' }), '2025-11-01');
   assert.equal(firstCountedDay({ type: 'since_lock_date', start: '2025-12-31', end: '2026-11-21' }), '2026-01-01');
   assert.equal(firstCountedDay(null), null);
+});
+
+test('a conversion balance on a revenue account counts as turnover, as Xero\'s Profit and Loss counts it', () => {
+  const day = '2026-06-30';
+  const chartOfAccounts = [{ code: '200', accountID: 'a200', type: 'REVENUE', _class: 'REVENUE' }, { code: '400', accountID: 'a400', type: 'EXPENSE', _class: 'EXPENSE' }];
+  const data = {
+    invoices: [{ type: 'ACCREC', status: 'PAID', date: day, lineAmountTypes: 'Exclusive', lineItems: [{ accountCode: '200', lineAmount: 7000 }] }],
+    journals: [
+      { journalDate: day, sourceType: 'ACCREC', journalLines: [{ accountCode: '200', netAmount: -7000 }] }, // the invoice: already counted from the invoice
+      { journalDate: day, journalLines: [{ accountCode: '200', netAmount: -160956.75 }, { accountCode: '400', netAmount: 160956.75 }] },
+      { journalDate: day, journalLines: [{ accountCode: '200', netAmount: 160956.75 }] },
+      { journalDate: day, journalLines: [{ accountCode: '200', netAmount: -160956.75 }] },
+    ],
+    chartOfAccounts,
+  };
+  const total = sumActivity(buildDailyActivity(data).rows, resolvePeriod({ type: 'custom', from: day, to: day }, CONTEXT));
+  assert.equal(Math.round(total.turnover * 100) / 100, 7000 + 160956.75);
+  assert.equal(total.journals, 4);
+});
+
+test('turnover follows Xero\'s journals: bill lines on a revenue account count, and a renamed account code still matches', () => {
+  const day = '2026-03-15';
+  const chartOfAccounts = [
+    { code: '220', accountID: 'rev-1', type: 'REVENUE', _class: 'REVENUE' },
+    { code: '270', accountID: 'oth-1', type: 'OTHERINCOME', _class: 'REVENUE' },
+    { code: '400', accountID: 'exp-1', type: 'EXPENSE', _class: 'EXPENSE' },
+  ];
+  const data = {
+    chartOfAccounts,
+    // The invoice now shows the account's new code (220); its journal still carries the code it was posted with.
+    invoices: [
+      { type: 'ACCREC', status: 'PAID', date: day, lineAmountTypes: 'Exclusive', lineItems: [{ accountCode: '220', lineAmount: 750 }] },
+      { type: 'ACCPAY', status: 'AUTHORISED', date: day, lineAmountTypes: 'Exclusive', lineItems: [{ accountCode: '220', lineAmount: 49.15 }] },
+    ],
+    journals: [
+      { journalDate: day, sourceType: 'ACCREC', journalLines: [{ accountID: 'rev-1', accountCode: '201', netAmount: -750 }] },
+      // a supplier bill with a line on the revenue account: Xero's Profit and Loss takes it off turnover
+      { journalDate: day, sourceType: 'ACCPAY', journalLines: [{ accountID: 'rev-1', accountCode: '220', netAmount: 49.15 }, { accountID: 'exp-1', netAmount: -49.15 }] },
+      // other income is not turnover
+      { journalDate: day, sourceType: 'CASHREC', journalLines: [{ accountID: 'oth-1', netAmount: -500 }] },
+    ],
+  };
+  const period = resolvePeriod({ type: 'custom', from: day, to: day }, CONTEXT);
+  const total = sumActivity(buildDailyActivity(data).rows, period);
+  assert.equal(Math.round(total.turnover * 100) / 100, 750 - 49.15);
+  // The journals' day decides the period, also for a day that has no documents at all.
+  const opening = buildDailyActivity({ chartOfAccounts, journals: [{ journalDate: '2025-04-01', journalLines: [{ accountID: 'rev-1', netAmount: -1000 }] }] });
+  assert.equal(sumActivity(opening.rows, resolvePeriod({ type: 'custom', from: '2025-04-01', to: '2025-04-01' }, CONTEXT)).turnover, 1000);
+});
+
+test('an empty journal list (never downloaded) keeps the document turnover instead of showing nothing', () => {
+  const day = '2026-05-05';
+  const data = {
+    chartOfAccounts: [{ code: '200', accountID: 'r', _class: 'REVENUE', type: 'REVENUE' }],
+    invoices: [{ type: 'ACCREC', status: 'AUTHORISED', date: day, lineItems: [{ accountCode: '200', lineAmount: 400 }] }],
+    journals: [],
+  };
+  const daily = buildDailyActivity(data);
+  assert.equal(daily.turnoverFromJournals, false);
+  assert.equal(sumActivity(daily.rows, resolvePeriod({ type: 'custom', from: day, to: day }, CONTEXT)).turnover, 400);
 });
