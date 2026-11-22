@@ -613,7 +613,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
             <div style="padding:6px 0;border-bottom:1px solid #f2f6fa;">
               <strong><%= fmtDisplayDate(item.filing_date) %></strong> · Filed net assets £<%= Number(item.net_assets).toLocaleString('en-GB',{minimumFractionDigits:2}) %> · Xero: <%= item.xero_net_assets == null ? 'Needs sync' : '£' + Number(item.xero_net_assets).toLocaleString('en-GB',{minimumFractionDigits:2}) %>
               <span style="font-size:0.7rem;padding:1px 6px;border-radius:3px;background:<%= item.source === 'companies_house' ? '#E1F5EE' : '#F1EFE8' %>;color:<%= item.source === 'companies_house' ? '#0F6E56' : '#5F5E5A' %>;"><%= item.source === 'companies_house' ? 'Companies House (automatic)' : 'Accountant entered' %></span>
-              <% if (item.source_note) { %> · <%= item.source_note %><% } %><% if (item.source_document_path) { %> · document stored privately<% } %>
+              <% if (item.source_note) { %> · <%= ukText(item.source_note) %><% } %><% if (item.source_document_path) { %> · document stored privately<% } %>
               <% if (item.taxonomy_concept) { %>
                 <div style="color:#7C8FAC;font-size:0.7rem;margin-top:2px;">Read from <code><%= item.taxonomy_concept %></code> · context <%= item.context_ref %> at <%= typeof ukDate === 'function' ? ukDate(item.context_date) : item.context_date %> · <%= item.extraction_confidence %> confidence<% if (item.ch_document_id) { %> · document <%= item.ch_document_id %><% } %></div>
               <% } %>
