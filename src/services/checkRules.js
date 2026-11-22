@@ -876,7 +876,7 @@ function contactNamesOverlap(tokensA, tokensB) {
 // the other plus extra words" rule is not applied to customer-only contacts: retail clients have thousands of
 // customers named "Emma", "Sarah" or "PayPal buyer", and every one of them would match every other.
 //
-// The search is a generator that pauses every 1,024 pairs, so the sync can let the server answer other requests in
+// The search is a generator that pauses every 64 pairs, so the sync can let the server answer other requests in
 // between (findDuplicateContactsAsync) and a large client never holds it for long; findDuplicateContacts runs it
 // straight through. Both give exactly the same pairs.
 function findDuplicateContacts(contacts, threshold = CHECK_DEFAULTS.contactSimilarityThreshold) {
@@ -886,6 +886,9 @@ function findDuplicateContacts(contacts, threshold = CHECK_DEFAULTS.contactSimil
   return step.value;
 }
 const DUPLICATE_SEARCH_SLICE_MS = 25;
+// Pairs compared between checks of the clock. One pair of long names that do not match can cost 2 ms, so 1,024 pairs
+// could hold the server for over a second; 64 keeps each stretch to about 150 ms at worst.
+const PAIRS_PER_PAUSE = 64;
 async function findDuplicateContactsAsync(contacts, threshold = CHECK_DEFAULTS.contactSimilarityThreshold) {
   const search = duplicateContactSearch(contacts, threshold);
   let sliceStart = Date.now();
@@ -956,12 +959,12 @@ function* duplicateContactSearch(contacts, threshold) {
   for (const map of [byPrefix, bySuffix]) {
     for (const group of map.values()) for (let x = 0; x < group.length; x++) for (let y = x + 1; y < group.length; y++) {
       consider(group[x], group[y], false);
-      if (++pairsSincePause === 1024) { pairsSincePause = 0; yield; }
+      if (++pairsSincePause === PAIRS_PER_PAUSE) { pairsSincePause = 0; yield; }
     }
   }
   for (const group of byFirstWord.values()) for (let x = 0; x < group.length; x++) for (let y = x + 1; y < group.length; y++) {
     consider(group[x], group[y], true);
-    if (++pairsSincePause === 1024) { pairsSincePause = 0; yield; }
+    if (++pairsSincePause === PAIRS_PER_PAUSE) { pairsSincePause = 0; yield; }
   }
   // The same name written with different spacing or "and" / "&" ("K S Food And Wine" / "KS FOOD & WINE") is still a
   // duplicate name, however the words were split.
@@ -972,7 +975,7 @@ function* duplicateContactSearch(contacts, threshold) {
       const [a, b] = group[x] < group[y] ? [group[x], group[y]] : [group[y], group[x]];
       const key = a * contacts.length + b;
       if (!seen.has(key)) { seen.add(key); found.push([a, b]); }
-      if (++pairsSincePause === 1024) { pairsSincePause = 0; yield; }
+      if (++pairsSincePause === PAIRS_PER_PAUSE) { pairsSincePause = 0; yield; }
     }
   }
   return found.sort((p, q) => p[0] - q[0] || p[1] - q[1]).map(([i, j]) => ({
