@@ -39,7 +39,12 @@ app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'src/views'));
 app.use(BASE_PATH, express.static(path.join(__dirname, 'public')));
 app.use(BASE_PATH + '/uploads', express.static(path.join(__dirname, 'data/uploads')));
-app.use(express.json());
+// The bank-screen routes parse their own JSON with their own size limits (a list of up to 1,000 unreconciled
+// statement lines is several hundred KB). Parsing them here first, at the 100 KB default, refused every list over
+// about 200 lines with HTTP 413 (found 22 Nov 2026), so they are left to their routes.
+const defaultJson = express.json();
+const BANK_SCREEN_API = BASE_PATH + '/api/bank-screen/';
+app.use((req, res, next) => (req.path.startsWith(BANK_SCREEN_API) ? next() : defaultJson(req, res, next)));
 app.use(express.urlencoded({ extended: true }));
 
 // Until the saved results have been restored from MySQL (about a minute and a half, and growing with the data), every
