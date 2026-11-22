@@ -746,28 +746,30 @@ async function getLastSuccessfulRun(orgId) {
   return rows[0] || null;
 }
 
-function mergeEntityCache(orgId, entityType, rows, { runId = null, fullRefresh = false } = {}) {
-  const db = getDb();
-  const idFields = {
-    invoice: 'invoiceID', contact: 'contactID', credit_note: 'creditNoteID',
-    bank_transaction: 'bankTransactionID', payment: 'paymentID', account: 'accountID',
-    bank_transfer: 'bankTransferID', manual_journal: 'manualJournalID', batch_payment: 'batchPaymentID',
-    overpayment: 'overpaymentID', prepayment: 'prepaymentID',
-    tax_rate: 'taxType',
-    organisation: 'organisationID',
-    journal: 'journalNumber',
-  };
-  const idField = idFields[entityType];
-  if (!idField) throw new Error(`Unsupported cache entity type: ${entityType}`);
-  const fetchedAt = new Date().toISOString();
-  const insert = db.prepare(`
+const ENTITY_ID_FIELDS = {
+  invoice: 'invoiceID', contact: 'contactID', credit_note: 'creditNoteID',
+  bank_transaction: 'bankTransactionID', payment: 'paymentID', account: 'accountID',
+  bank_transfer: 'bankTransferID', manual_journal: 'manualJournalID', batch_payment: 'batchPaymentID',
+  overpayment: 'overpaymentID', prepayment: 'prepaymentID',
+  tax_rate: 'taxType',
+  organisation: 'organisationID',
+  journal: 'journalNumber',
+};
+const ENTITY_CACHE_UPSERT_SQL = `
     INSERT INTO xero_entity_cache
       (org_id, entity_type, entity_id, json, modified_at, fetched_at, source_run_id)
     VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(org_id, entity_type, entity_id) DO UPDATE SET
       json = excluded.json, modified_at = excluded.modified_at,
       fetched_at = excluded.fetched_at, source_run_id = excluded.source_run_id
-  `);
+  `;
+
+function mergeEntityCache(orgId, entityType, rows, { runId = null, fullRefresh = false } = {}) {
+  const db = getDb();
+  const idField = ENTITY_ID_FIELDS[entityType];
+  if (!idField) throw new Error(`Unsupported cache entity type: ${entityType}`);
+  const fetchedAt = new Date().toISOString();
+  const insert = db.prepare(ENTITY_CACHE_UPSERT_SQL);
   let written = 0;    // rows saved locally; the same rows are then saved to MySQL so a deploy does not lose them
   db.transaction(() => {
     const seen = new Set();
@@ -799,6 +801,97 @@ function getCachedEntities(orgId, entityType) {
   return getDb().prepare(`
     SELECT json FROM xero_entity_cache WHERE org_id = ? AND entity_type = ? ORDER BY entity_id
   `).all(orgId, entityType).map(row => JSON.parse(row.json));
+}
+
+// The same two operations for a sync, in steps of 2,000 rows with a pause between them so the server keeps answering
+// (health checks included). For the largest clients one call held it for 2-6 seconds (160,000 journals); the
+// synchronous versions above stay for scripts and tests. The rows written and returned are exactly the same.
+const CACHE_STEP_ROWS = 2000;
+const pauseForOtherWork = () => new Promise(resolve => setImmediate(resolve));
+
+// One stepwise write at a time per client and record type, so two can never interleave (a full refresh of one would
+// otherwise delete rows the other had just written).
+const cacheWriteLocks = new Map();
+async function mergeEntityCacheAsync(orgId, entityType, rows, options = {}) {
+  const key = `${orgId}|${entityType}`;
+  const previous = cacheWriteLocks.get(key) || Promise.resolve();
+  const current = previous.catch(() => {}).then(() => mergeEntityCacheSteps(orgId, entityType, rows, options));
+  const settled = current.catch(() => {});
+  cacheWriteLocks.set(key, settled);
+  settled.then(() => { if (cacheWriteLocks.get(key) === settled) cacheWriteLocks.delete(key); });
+  return current;
+}
+
+async function mergeEntityCacheSteps(orgId, entityType, rows, { runId = null, fullRefresh = false } = {}) {
+  const db = getDb();
+  const idField = ENTITY_ID_FIELDS[entityType];
+  if (!idField) throw new Error(`Unsupported cache entity type: ${entityType}`);
+  const fetchedAt = new Date().toISOString();
+  // Written in several transactions now, not one. If a later step fails, the rows already written must not move the
+  // watermark forward (the next sync would then skip what never got written): they are put back to the old one.
+  const previousWatermark = getEntityCacheWatermark(orgId, entityType);
+  const insert = db.prepare(ENTITY_CACHE_UPSERT_SQL);
+  let written = 0;
+  const seen = new Set();
+  try {
+    for (let start = 0; start < rows.length; start += CACHE_STEP_ROWS) {
+      db.transaction(() => {
+        for (const row of rows.slice(start, start + CACHE_STEP_ROWS)) {
+          const id = row?.[idField] ?? row?.journalNumber;
+          if (id == null) continue;
+          seen.add(String(id));
+          insert.run(
+            orgId, entityType, String(id), JSON.stringify(row),
+            cacheDate(row.updatedDateUTC || row.updatedDateUtc),
+            fetchedAt, runId
+          );
+          written++;
+        }
+      })();
+      await pauseForOtherWork();
+    }
+    if (fullRefresh) {
+      const gone = db.prepare(`
+        SELECT entity_id FROM xero_entity_cache WHERE org_id = ? AND entity_type = ?
+      `).all(orgId, entityType).map(item => item.entity_id).filter(id => !seen.has(id));
+      const remove = db.prepare(`
+        DELETE FROM xero_entity_cache WHERE org_id = ? AND entity_type = ? AND entity_id = ?
+      `);
+      for (let start = 0; start < gone.length; start += CACHE_STEP_ROWS) {
+        db.transaction(() => { for (const id of gone.slice(start, start + CACHE_STEP_ROWS)) remove.run(orgId, entityType, id); })();
+        await pauseForOtherWork();
+      }
+    }
+  } catch (error) {
+    try {
+      db.prepare(`UPDATE xero_entity_cache SET fetched_at = ? WHERE org_id = ? AND entity_type = ? AND fetched_at = ?`)
+        .run(previousWatermark || '1970-01-01T00:00:00.000Z', orgId, entityType, fetchedAt);
+    } catch (resetError) {
+      console.error(`[xero-cache] could not reset the ${entityType} watermark for org ${orgId}:`, resetError.message);
+    }
+    throw error;
+  }
+  queueXeroCacheSave(orgId, entityType, fetchedAt, fullRefresh, written);
+}
+
+async function getCachedEntitiesAsync(orgId, entityType) {
+  const page = getDb().prepare(`
+    SELECT entity_id, json FROM xero_entity_cache WHERE org_id = ? AND entity_type = ? AND entity_id > ?
+    ORDER BY entity_id LIMIT ${CACHE_STEP_ROWS}
+  `);
+  const first = getDb().prepare(`
+    SELECT entity_id, json FROM xero_entity_cache WHERE org_id = ? AND entity_type = ?
+    ORDER BY entity_id LIMIT ${CACHE_STEP_ROWS}
+  `);
+  const out = [];
+  let rows = first.all(orgId, entityType);
+  while (rows.length) {
+    for (const row of rows) out.push(JSON.parse(row.json));
+    if (rows.length < CACHE_STEP_ROWS) break;
+    await pauseForOtherWork();
+    rows = page.all(orgId, entityType, rows[rows.length - 1].entity_id);
+  }
+  return out;
 }
 
 function getEntityCacheWatermark(orgId, entityType) {
@@ -2521,7 +2614,9 @@ module.exports = {
   upsertChartOfAccountsCache, getExpenseAccountsForOrg,
   getAccountCheckConfigurationForOrg, setAccountCheckConfiguration, ensureAccountCodes,
   createSyncRun, finishSyncRun, activateSyncRun, getLastSuccessfulRun,
-  mergeEntityCache, getCachedEntities, getEntityCacheWatermark,
+  mergeEntityCache,
+  mergeEntityCacheAsync,
+  getCachedEntitiesAsync, getCachedEntities, getEntityCacheWatermark,
   createValidationSnapshot, getValidationSnapshots, getActiveValidationRuns,
   getValidationRunForPeriod, getValidationGateAssurances, setValidationGateAssurance,
   getAllStaff, getStaffByMtakpiName, getStaffById, createStaff, createStaffBulk, deactivateStaff, reactivateStaff,

@@ -569,11 +569,29 @@ function findDuplicates(items, windowDays = CHECK_DEFAULTS.duplicateWindowDays, 
   }
 
   const groups = [];
+  // Each document's date, day number and line-description key, worked out once rather than for every pair: a supplier
+  // with hundreds of same-amount bills (a weekly direct debit) made the pair loop below re-read them millions of times.
+  // dayMs gives exactly what daysBetween works with (NaN for an unreadable date, null for none).
+  const facts = new Map();
+  const factsOf = item => {
+    let known = facts.get(item);
+    if (!known) {
+      const date = toDateString(item.date);
+      known = { date, dayMs: date ? new Date(`${date}T00:00:00Z`).getTime() : null, contentKey: null };
+      facts.set(item, known);
+    }
+    return known;
+  };
+  const contentKeyOf = item => {
+    const known = factsOf(item);
+    if (known.contentKey === null) known.contentKey = documentContentKey(item);
+    return known.contentKey;
+  };
   for (const candidates of byGroupKey.values()) {
     // Newest first, with a stable id tie-break so re-runs group identically.
     const remaining = [...candidates].sort((a, b) => {
-      const dateA = toDateString(a.date) || '';
-      const dateB = toDateString(b.date) || '';
+      const dateA = factsOf(a).date || '';
+      const dateB = factsOf(b).date || '';
       if (dateA !== dateB) return dateB.localeCompare(dateA);
       return String(a.invoiceID || '').localeCompare(String(b.invoiceID || ''));
     });
@@ -582,15 +600,26 @@ function findDuplicates(items, windowDays = CHECK_DEFAULTS.duplicateWindowDays, 
       const group = [anchor];
       const anchorReference = requireExactReference ? referenceOf(anchor) : null;
       for (let index = remaining.length - 1; index >= 0; index--) {
-        const age = daysBetween(anchor.date, remaining[index].date);
-        if (!matchOnReference && (!Number.isFinite(age) || age < 0 || age > windowDays)) continue;
+        if (!matchOnReference) {
+          // daysBetween(anchor.date, remaining[index].date), from the stored day numbers. Read only when there is a
+          // pair to compare, as before: a lone document's date is never looked at.
+          const anchorDayMs = factsOf(anchor).dayMs;
+          const otherDayMs = factsOf(remaining[index]).dayMs;
+          const age = anchorDayMs === null || otherDayMs === null ? null : (anchorDayMs - otherDayMs) / 86400000;
+          if (!Number.isFinite(age) || age < 0 || age > windowDays) continue;
+        }
         // A blank reference on both sides is not a "match" — it would let every reference-less
         // document at the same contact/amount/date silently satisfy this filter regardless of the
         // setting's intent, which is to REQUIRE a genuinely shared reference, not the absence of one.
         if (requireExactReference && (!anchorReference || referenceOf(remaining[index]) !== anchorReference)) continue;
         // Two documents that describe different things are two sales, not one entered twice (Perendale, 22 Nov 2026:
         // Gazel's "March 2026 Full Page" and "April 2026 Full Page" adverts, same customer, day and $500).
-        if (!matchOnReference && describeDifferentSupplies(anchor, remaining[index])) continue;
+        // (describeDifferentSupplies, on the stored keys.)
+        if (!matchOnReference) {
+          const keyA = contentKeyOf(anchor);
+          const keyB = contentKeyOf(remaining[index]);
+          if (keyA && keyB && keyA !== keyB) continue;
+        }
         group.push(remaining[index]);
         remaining.splice(index, 1);
       }
@@ -700,20 +729,53 @@ function findDirectMatches(transactions, documents, eligibleAccountCodes, window
   // document wins. Approved documents match on the amount still due; drafts on total.
   const matches = [];
   const usedDocuments = new Set();
-  const ordered = [...transactions].sort((a, b) =>
-    String(toDateString(a.date)).localeCompare(String(toDateString(b.date))));
+  // Documents grouped by contact and amount (in their original order), each with its day number worked out once.
+  // Comparing every bank transaction with every document re-read dates millions of times for a large client; a
+  // transaction now looks only at the documents that could match it. dayMs is what daysBetween works with.
+  // Dates are read only when a pair is compared, as before, and each only once. Contacts are matched by the same ===
+  // test as before (a Map key), amounts as whole pence.
+  const dayMsOf = value => {
+    const date = toDateString(value);
+    return date ? new Date(`${date}T00:00:00Z`).getTime() : null;
+  };
+  let documentsByContact = null;   // contactID -> pence -> [{ document, dayMs }], built at the first transaction that needs it
+  const candidatesFor = (contactId, amount) => {
+    if (!documentsByContact) {
+      documentsByContact = new Map();
+      for (const document of documents) {
+        const documentContact = document.contact?.contactID;
+        if (!documentContact) continue;   // never === a transaction's contact, which is always set
+        const documentAmount = document.status === 'AUTHORISED' ? document.amountDue : document.total;
+        const pence = Math.round((documentAmount || 0) * 100);
+        if (!documentsByContact.has(documentContact)) documentsByContact.set(documentContact, new Map());
+        const byAmount = documentsByContact.get(documentContact);
+        if (!byAmount.has(pence)) byAmount.set(pence, []);
+        byAmount.get(pence).push({ document, dayMs: undefined });
+      }
+    }
+    return documentsByContact.get(contactId)?.get(amount) || [];
+  };
+  const sortKeys = new Map();
+  const sortKeyOf = transaction => {
+    if (!sortKeys.has(transaction)) sortKeys.set(transaction, String(toDateString(transaction.date)));
+    return sortKeys.get(transaction);
+  };
+  const ordered = [...transactions].sort((a, b) => sortKeyOf(a).localeCompare(sortKeyOf(b)));
   for (const transaction of ordered) {
     const contactId = transaction.contact?.contactID;
     if (!contactId || !(transaction.lineItems || []).some(line => eligibleAccountCodes.has(line.accountCode))) continue;
     const amount = Math.round((transaction.total || 0) * 100);
     if (!amount) continue;
     let candidate = null; let candidateGap = null;
-    for (const document of documents) {
+    let transactionDayMs;
+    for (const entry of candidatesFor(contactId, amount)) {
+      const document = entry.document;
       if (usedDocuments.has(document.invoiceID)) continue;
-      if (document.contact?.contactID !== contactId) continue;
-      const documentAmount = document.status === 'AUTHORISED' ? document.amountDue : document.total;
-      if (Math.round((documentAmount || 0) * 100) !== amount) continue;
-      const daysAfterDocument = daysBetween(transaction.date, document.date);
+      // daysBetween(transaction.date, document.date), from day numbers read once.
+      if (transactionDayMs === undefined) transactionDayMs = dayMsOf(transaction.date);
+      if (entry.dayMs === undefined) entry.dayMs = dayMsOf(document.date);
+      const dayMs = entry.dayMs;
+      const daysAfterDocument = transactionDayMs === null || dayMs === null ? null : (transactionDayMs - dayMs) / 86400000;
       if (daysAfterDocument == null || daysAfterDocument < 0 || daysAfterDocument > windowDays) continue;
       if (!candidate || daysAfterDocument < candidateGap) { candidate = document; candidateGap = daysAfterDocument; }
     }
@@ -745,19 +807,31 @@ function contactNameSimilarity(nameA, nameB) {
 // Xenon's own scores for Manchesterhub (21 Nov 2026): Harvey Nichols / Harvey Nicoles 93%, LYDC LONDON / LYD LONDON
 // 95%, LYDC LONDON / YDC ONDON 90%, Ebay UK Limited / EBAYUK 92%, Waste Managed / W Waste Managed 93%,
 // InXpress / Inexpress 94%, Withdrawal / Withdrawa 95%.
+//
+// Same result as PHP's similar_text (longest common run, ties going to the first one found, then the same on the
+// parts before and after it), worked out on index ranges instead of copied strings. Positions that cannot start a
+// run longer than the best one found so far are skipped: not enough letters left in either name, or the run starting
+// there is the tail of one already measured from the position before. Without that, two names sharing a long start
+// ("Faster Payment Received From Customer Ref 1234567890") cost length³ steps each, and a client with thousands of
+// such bank-feed contacts held the server for minutes (22 Nov 2026: the health check failed and ECS replaced it).
 function similarTextCount(a, b) {
-  if (!a.length || !b.length) return 0;
+  return similarTextRange(a, 0, a.length, b, 0, b.length);
+}
+function similarTextRange(a, a0, a1, b, b0, b1) {
+  if (a0 >= a1 || b0 >= b1) return 0;
   let best = 0; let posA = 0; let posB = 0;
-  for (let i = 0; i < a.length; i++) {
-    for (let j = 0; j < b.length; j++) {
+  for (let i = a0; i < a1 && a1 - i > best; i++) {
+    for (let j = b0; j < b1 && b1 - j > best; j++) {
+      // A run starting here continues one starting at (i-1, j-1), which was one longer and already measured.
+      if (i > a0 && j > b0 && a.charCodeAt(i - 1) === b.charCodeAt(j - 1)) continue;
       let k = 0;
-      while (i + k < a.length && j + k < b.length && a[i + k] === b[j + k]) k++;
+      while (i + k < a1 && j + k < b1 && a.charCodeAt(i + k) === b.charCodeAt(j + k)) k++;
       if (k > best) { best = k; posA = i; posB = j; }
     }
   }
   if (!best) return 0;
-  return best + similarTextCount(a.slice(0, posA), b.slice(0, posB))
-    + similarTextCount(a.slice(posA + best), b.slice(posB + best));
+  return best + similarTextRange(a, a0, posA, b, b0, posB)
+    + similarTextRange(a, posA + best, a1, b, posB + best, b1);
 }
 function xenonComparableName(name) {
   return String(name || '').toLowerCase().replace(/\b(ltd|limited)\b\.?/g, ' ').replace(/\s+/g, ' ').trim();
@@ -801,7 +875,31 @@ function contactNamesOverlap(tokensA, tokensB) {
 // for the word rules) so a client with 20,000 contacts takes a fraction of a second, not minutes. The "one name is
 // the other plus extra words" rule is not applied to customer-only contacts: retail clients have thousands of
 // customers named "Emma", "Sarah" or "PayPal buyer", and every one of them would match every other.
+//
+// The search is a generator that pauses every 1,024 pairs, so the sync can let the server answer other requests in
+// between (findDuplicateContactsAsync) and a large client never holds it for long; findDuplicateContacts runs it
+// straight through. Both give exactly the same pairs.
 function findDuplicateContacts(contacts, threshold = CHECK_DEFAULTS.contactSimilarityThreshold) {
+  const search = duplicateContactSearch(contacts, threshold);
+  let step = search.next();
+  while (!step.done) step = search.next();
+  return step.value;
+}
+const DUPLICATE_SEARCH_SLICE_MS = 25;
+async function findDuplicateContactsAsync(contacts, threshold = CHECK_DEFAULTS.contactSimilarityThreshold) {
+  const search = duplicateContactSearch(contacts, threshold);
+  let sliceStart = Date.now();
+  let step = search.next();
+  while (!step.done) {
+    if (Date.now() - sliceStart >= DUPLICATE_SEARCH_SLICE_MS) {
+      await new Promise(resolve => setImmediate(resolve));
+      sliceStart = Date.now();
+    }
+    step = search.next();
+  }
+  return step.value;
+}
+function* duplicateContactSearch(contacts, threshold) {
   const tokens = contacts.map(contact => contactNameTokens(contact.name));
   const comparable = contacts.map(contact => xenonComparableName(contact.name));
   const compact = comparable.map(name => name.replace(/[^a-z0-9]/g, ''));
@@ -837,8 +935,10 @@ function findDuplicateContacts(contacts, threshold = CHECK_DEFAULTS.contactSimil
     const countsA = letterCounts[a]; const countsB = letterCounts[b];
     for (let n = 0; n < 37; n++) shared += countsA[n] < countsB[n] ? countsA[n] : countsB[n];
     if (2 * shared < threshold * total) return false;
-    return xenonNameSimilarity(contacts[a].name, contacts[b].name) >= threshold;
+    // xenonNameSimilarity on the names already made comparable above (both are non-empty here).
+    return (2 * similarTextCount(comparable[a], comparable[b])) / total >= threshold;
   };
+  let pairsSincePause = 0;
   const consider = (i, j, wordRules) => {
     if (i === j) return;
     const [a, b] = i < j ? [i, j] : [j, i];
@@ -854,9 +954,15 @@ function findDuplicateContacts(contacts, threshold = CHECK_DEFAULTS.contactSimil
     if (match) { seen.add(key); found.push([a, b]); }
   };
   for (const map of [byPrefix, bySuffix]) {
-    for (const group of map.values()) for (let x = 0; x < group.length; x++) for (let y = x + 1; y < group.length; y++) consider(group[x], group[y], false);
+    for (const group of map.values()) for (let x = 0; x < group.length; x++) for (let y = x + 1; y < group.length; y++) {
+      consider(group[x], group[y], false);
+      if (++pairsSincePause === 1024) { pairsSincePause = 0; yield; }
+    }
   }
-  for (const group of byFirstWord.values()) for (let x = 0; x < group.length; x++) for (let y = x + 1; y < group.length; y++) consider(group[x], group[y], true);
+  for (const group of byFirstWord.values()) for (let x = 0; x < group.length; x++) for (let y = x + 1; y < group.length; y++) {
+    consider(group[x], group[y], true);
+    if (++pairsSincePause === 1024) { pairsSincePause = 0; yield; }
+  }
   // The same name written with different spacing or "and" / "&" ("K S Food And Wine" / "KS FOOD & WINE") is still a
   // duplicate name, however the words were split.
   const byJoinedName = new Map();
@@ -866,6 +972,7 @@ function findDuplicateContacts(contacts, threshold = CHECK_DEFAULTS.contactSimil
       const [a, b] = group[x] < group[y] ? [group[x], group[y]] : [group[y], group[x]];
       const key = a * contacts.length + b;
       if (!seen.has(key)) { seen.add(key); found.push([a, b]); }
+      if (++pairsSincePause === 1024) { pairsSincePause = 0; yield; }
     }
   }
   return found.sort((p, q) => p[0] - q[0] || p[1] - q[1]).map(([i, j]) => ({
@@ -1428,6 +1535,8 @@ module.exports = {
   normalizeContactKey,
   findDirectMatches,
   findDuplicateContacts,
+  findDuplicateContactsAsync,
+  similarTextCount,
   findDuplicates,
   excludeDuplicateDrafts,
   selectUnapprovedBills,

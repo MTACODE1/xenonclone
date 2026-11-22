@@ -213,6 +213,9 @@ function startListening() {
 
 // bootstrapAdmin needs the staff table (now in MySQL) before anything can log in, so the server
 // only starts accepting connections once it's confirmed done.
+// Logs any stretch where the server could not answer for over 3 seconds, and what it was doing (eventLoopWatch.js).
+require('./src/services/eventLoopWatch').startEventLoopWatch();
+
 bootstrapAdmin().then(() => restoreSettingsFromMysql()
   .then(count => console.log(`[settings] restored ${count} saved setting(s) from MySQL`))
   .catch(err => console.error('[settings] restore from MySQL failed:', err.message))

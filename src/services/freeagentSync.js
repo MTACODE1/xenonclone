@@ -4,13 +4,13 @@ const {
 } = require('./freeagentAdapter');
 const {
   getOrganisationByFreeAgentCompanyId, upsertFreeAgentOrganisation,
-  mergeEntityCache, getCachedEntities, getEntityCacheWatermark,
+  mergeEntityCacheAsync, getCachedEntitiesAsync, getEntityCacheWatermark,
   createSyncRun, finishSyncRun, activateSyncRun,
   insertIssue: insertIssueDb, replaceIssueForCheck, getScoringObservationsForRun,
   upsertHealthScore, upsertTransactionCounts,
 } = require('../db/queries');
 const {
-  NON_SCORED_CHECKS, findDuplicates, excludeDuplicateDrafts, findDuplicateContacts,
+  NON_SCORED_CHECKS, findDuplicates, excludeDuplicateDrafts, findDuplicateContactsAsync,
   isOldDocument, isOverdueMoreThan, selectOldCredits, sumAbsoluteExposure,
   resolveDuplicateInvoiceWindowDays, resolveDuplicateBillWindowDays,
   resolveDuplicateInvoiceRequireExactReference, resolveDuplicateInvoiceIncludeFullyPaid,
@@ -46,15 +46,16 @@ function incrementalSince(orgId, entityType, options) {
 async function refreshCachedEntities(orgId, runId, entityType, fetcher, options) {
   await hydrateOrgIfEmpty(orgId);
   if (options.cacheOnly) {
-    const cached = getCachedEntities(orgId, entityType);
+    const cached = await getCachedEntitiesAsync(orgId, entityType);
     if (!cached.length) throw new Error(`No cached ${entityType} data is available`);
     return cached;
   }
   const since = incrementalSince(orgId, entityType, options);
   const fetched = await fetcher(since);
-  mergeEntityCache(orgId, entityType, fetched, { runId, fullRefresh: !since });
+  // Written and read in steps, so a large client does not hold the server (queries.js).
+  await mergeEntityCacheAsync(orgId, entityType, fetched, { runId, fullRefresh: !since });
   await drainXeroCacheSaves();
-  return getCachedEntities(orgId, entityType);
+  return getCachedEntitiesAsync(orgId, entityType);
 }
 
 const syncsInProgress = new Set();
@@ -328,7 +329,8 @@ async function runFreeAgentSync(companyId, progressCallback, options = {}) {
     const activeContacts = contacts.filter(c =>
       c.contactStatus === 'ACTIVE' && (customerContactIds.has(c.contactID) || supplierContactIds.has(c.contactID))
     );
-    const duplicates = findDuplicateContacts(activeContacts);
+    // Pauses now and then so the server keeps answering while a large contact list is compared.
+    const duplicates = await findDuplicateContactsAsync(activeContacts);
     persistIssue({
       org_id: orgId, check_type: 'duplicate_contacts', importance: 'low',
       count: duplicates.length, potential_value_gbp: 0,

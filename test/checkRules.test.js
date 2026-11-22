@@ -1353,3 +1353,105 @@ test('purchase tax missing: bank charge accounts written with a dash are left ou
   ], { nameByCode, skipName: PURCHASE_TAX_NOISE_ACCOUNT_NAME });
   assert.deepEqual(kept.map(line => line.accountCode), ['7405']);
 });
+
+// 22 Nov 2026: one client's duplicate-contact comparison held the server for minutes and ECS replaced it twice.
+// The faster similar_text and the pausing search must give exactly the same pairs as before.
+test('similarTextCount gives the same count as the original similar_text on random names', () => {
+  const { similarTextCount } = require('../src/services/checkRules');
+  function original(a, b) {
+    if (!a.length || !b.length) return 0;
+    let best = 0; let posA = 0; let posB = 0;
+    for (let i = 0; i < a.length; i++) for (let j = 0; j < b.length; j++) {
+      let k = 0; while (i + k < a.length && j + k < b.length && a[i + k] === b[j + k]) k++;
+      if (k > best) { best = k; posA = i; posB = j; }
+    }
+    if (!best) return 0;
+    return best + original(a.slice(0, posA), b.slice(0, posB)) + original(a.slice(posA + best), b.slice(posB + best));
+  }
+  let seed = 7;
+  const random = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const alphabets = ['ab', 'aab ', 'abcdefghij', 'abcdefghijklmnopqrstuvwxyz0123456789 ()-'];
+  for (let n = 0; n < 20000; n++) {
+    const letters = alphabets[n % alphabets.length];
+    const word = length => Array.from({ length }, () => letters[Math.floor(random() * letters.length)]).join('');
+    let a = word(Math.floor(random() * 25));
+    let b = random() < 0.5 ? a.split('').map(c => (random() < 0.15 ? letters[Math.floor(random() * letters.length)] : c)).join('') : word(Math.floor(random() * 25));
+    if (random() < 0.3) { const start = word(Math.floor(random() * 30)); a = start + a; b = start + b; }
+    assert.equal(similarTextCount(a, b), original(a, b), `${JSON.stringify(a)} / ${JSON.stringify(b)}`);
+  }
+});
+
+test('similarTextCount stays fast on long names that share a long start', () => {
+  const { similarTextCount } = require('../src/services/checkRules');
+  const start = 'Faster Payment Received From Customer Ref '.repeat(20);
+  const began = Date.now();
+  for (let n = 0; n < 20; n++) similarTextCount(`${start}${1000000000 + n * 7919}`, `${start}${2000000000 - n * 104729}`);
+  // The original took several seconds here (length³ per pair); the rewrite takes milliseconds.
+  assert.ok(Date.now() - began < 1500, `took ${Date.now() - began} ms`);
+});
+
+test('findDuplicateContactsAsync finds the same pairs and lets the server answer in between', async () => {
+  const { findDuplicateContacts, findDuplicateContactsAsync } = require('../src/services/checkRules');
+  const contacts = [];
+  for (let n = 0; n < 900; n++) contacts.push({ contactID: `c${n}`, name: `Faster Payment Received From Customer Ref ${String(n * 7919 % 100000).padStart(5, '0')}`, isSupplier: true });
+  contacts.push({ contactID: 'h1', name: 'Harvey Nichols' }, { contactID: 'h2', name: 'Harvey Nicoles' }, { contactID: 'd1', name: 'Deliveroo', isSupplier: true }, { contactID: 'd2', name: 'Deliveroo London', isSupplier: true });
+  const expected = findDuplicateContacts(contacts);
+  let ticks = 0;
+  const timer = setInterval(() => { ticks += 1; }, 1);
+  const actual = await findDuplicateContactsAsync(contacts);
+  clearInterval(timer);
+  assert.deepEqual(actual, expected);
+  assert.ok(expected.some(pair => [pair.name1, pair.name2].sort().join('|') === 'Harvey Nichols|Harvey Nicoles'));
+  assert.ok(expected.some(pair => [pair.name1, pair.name2].sort().join('|') === 'Deliveroo|Deliveroo London'));
+  assert.ok(ticks > 0, 'timers ran while the comparison was going on');
+});
+
+// 22 Nov 2026: the duplicate and statement checks re-read every document's date for every pair. Same results, faster.
+test('duplicate bills stay fast for a supplier with thousands of same-amount bills', () => {
+  const { findDuplicatesWithSameNumber } = require('../src/services/checkRules');
+  const bills = Array.from({ length: 4000 }, (_, n) => ({
+    invoiceID: `b${n}`, contact: { contactID: 'direct-debit' }, total: 49.99, amountDue: 49.99, status: 'AUTHORISED',
+    date: `${2015 + Math.floor(n / 336)}-${String(1 + (n % 12)).padStart(2, '0')}-${String(1 + (n % 28)).padStart(2, '0')}`,
+    lineItems: [{ description: 'Monthly subscription' }],
+  }));
+  const began = Date.now();
+  findDuplicatesWithSameNumber(bills, 3, { requireUnpaidPair: true });
+  assert.ok(Date.now() - began < 1500, `took ${Date.now() - began} ms`);   // about 1.9 s before, 0.1 s now
+});
+
+test('statement matching stays fast when thousands of records share one amount', () => {
+  const { allocateStatementMatches } = require('../src/services/statementEvidence');
+  const pool = Array.from({ length: 24000 }, (_, n) => ({
+    source_id: `p${n}`, bank_account_id: 'A', amount: -10,
+    transaction_date: `${2023 + Math.floor(n / 8000)}-${String(1 + (n % 12)).padStart(2, '0')}-${String(1 + (n % 28)).padStart(2, '0')}`,
+  }));
+  const lines = Array.from({ length: 1000 }, (_, n) => ({
+    id: n, bankAccountId: 'A', amount: -10, transactionDate: `2025-${String(1 + (n % 12)).padStart(2, '0')}-${String(1 + (n % 28)).padStart(2, '0')}`,
+  }));
+  const began = Date.now();
+  const result = allocateStatementMatches(lines, pool);
+  assert.equal(result.length, 1000);
+  assert.ok(Date.now() - began < 3000, `took ${Date.now() - began} ms`);   // about 18.6 s before, 0.14 s now
+});
+
+test('the faster duplicate and direct-match checks read dates only where the old ones did', () => {
+  const { findDuplicates, findDirectMatches } = require('../src/services/checkRules');
+  // A lone document with an unreadable date was never looked at, so it must not fail the check now.
+  assert.deepEqual(findDuplicates([{ invoiceID: 'x', contact: { contactID: 'A' }, total: 10, date: new Date('nope') }], 7, {}), []);
+  const codes = new Set(['200']);
+  const transaction = { contact: { contactID: 'A' }, total: 10, date: '2026-03-02', lineItems: [{ accountCode: '200' }] };
+  // A document for another contact with an unreadable date was never compared.
+  assert.deepEqual(findDirectMatches([transaction], [{ invoiceID: 'z', contact: { contactID: 'Z' }, status: 'DRAFT', total: 10, date: new Date('nope') }], codes, 7), []);
+  // Contacts are matched with ===, as before: two different objects that print the same are not the same contact.
+  const tx = { ...transaction, contact: { contactID: ['A'] } };
+  assert.deepEqual(findDirectMatches([tx], [{ invoiceID: 'd', contact: { contactID: ['A'] }, status: 'DRAFT', total: 10, date: '2026-03-01' }], codes, 7), []);
+});
+
+test('statement matching re-reads a record whose date was changed', () => {
+  const { matchStatementLine } = require('../src/services/statementEvidence');
+  const item = { source_id: 'a', bank_account_id: 'A', amount: 10, transaction_date: '2026-01-01' };
+  const line = { transactionDate: '2026-03-01', amount: 10, bankAccountId: 'A' };
+  assert.equal(matchStatementLine(line, [item]).confidence, 'unmatched');
+  item.transaction_date = '2026-03-01';
+  assert.equal(matchStatementLine(line, [item]).matchedId, 'a');
+});

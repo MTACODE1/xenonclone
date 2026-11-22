@@ -12,7 +12,7 @@ const {
   getXeroBankItemsForOrg, replaceXeroBankItemsCache, updateFiledAccountsXeroBalance,
   updateStatementLineMatches, updateOrganisationAccountingSettings,
   createSyncRun, finishSyncRun, activateSyncRun, getIssuesForRun, getScoringObservationsForRun, registerPeriodView,
-  mergeEntityCache, getCachedEntities, getEntityCacheWatermark,
+  mergeEntityCacheAsync, getCachedEntitiesAsync, getEntityCacheWatermark,
   updateOrganisationCompanyNumber, upsertCompaniesHouseProfile, getCompaniesHouseProfileForOrg,
   upsertFiledAccountsFromCompaniesHouse, recordFiledAccountsExtraction, getFiledAccountsExtractionsForOrg, getReviewFrom
 } = require('../db/queries');
@@ -23,7 +23,7 @@ const {
 const { getDb: getDatabase } = require('../db/schema');
 const {
   CHECK_DEFAULTS, CHECK_DEFINITIONS, ALL_CHECK_DEFINITIONS, NON_SCORED_CHECKS, calculateHealthScore, findDirectMatches,
-  findDuplicateContacts, findDuplicates, selectUnapprovedBills, selectUnapprovedInvoices, findUnexpectedDefaultLines,
+  findDuplicateContactsAsync, findDuplicates, selectUnapprovedBills, selectUnapprovedInvoices, findUnexpectedDefaultLines,
   findMisallocatedLines, resolveCapitalReviewCandidateCodes,
   previousMonthsStart, isWithinPreviousMonths, withPreviousMonths, endOfMonth, ageingDate, countsAsBankProcessed,
   isOldDocument, isOverdueMoreThan, selectOldUnpaidInvoices, amountInBase, isPurchaseTaxExemptAccount, resolvePeriodChecked, resolveSupplierPatternLookbackMonths,
@@ -50,6 +50,10 @@ const {
 } = require('./statementEvidence');
 const { isWithinPeriod, isWithinPatternWindow, resolvePeriod } = require('./periodResolver');
 const { loadReviewBalanceSheet } = require('./reportChecks');
+const { noteActivity } = require('./eventLoopWatch');
+const pauseForOtherWork = () => new Promise(resolve => setImmediate(resolve));
+// A check slower than this is named in the log ([slow-check]).
+const SLOW_CHECK_MS = 3000;
 
 // Paginated invoice fetch — passing page triggers full record mode (with lineItems)
 const pageDelay = () => new Promise(resolve => setTimeout(resolve, 1000));
@@ -296,15 +300,17 @@ async function refreshCachedEntities(orgId, tenantId, runId, entityType, fetcher
   // After a deploy the container's cache is empty; restore this client's saved copy from MySQL first,
   // so a normal sync only fetches what changed in Xero and a cache-only re-analysis has data to read.
   await hydrateOrgIfEmpty(orgId);
+  // The cache is written and read in steps with pauses between them (queries.js), so a large client does not hold
+  // the server while its 100,000+ cached records are saved and read back.
   if (options.cacheOnly) {
-    const cached = getCachedEntities(orgId, entityType);
+    const cached = await getCachedEntitiesAsync(orgId, entityType);
     return storedEntitiesForRecalculation(cached, entityType, Boolean(getEntityCacheWatermark(orgId, 'organisation')));
   }
   const since = incrementalSince(orgId, entityType, options);
   const fetched = await fetcher(since);
-  mergeEntityCache(orgId, entityType, fetched, { runId, fullRefresh: !since });
+  await mergeEntityCacheAsync(orgId, entityType, fetched, { runId, fullRefresh: !since });
   await drainXeroCacheSaves();   // the MySQL copy is saved before this step counts as done
-  return getCachedEntities(orgId, entityType);
+  return getCachedEntitiesAsync(orgId, entityType);
 }
 
 
@@ -329,18 +335,21 @@ async function syncOrganisation(tenantId, progressCallback, options = {}) {
     throw new Error('A period view is always a full recalculation from stored data');
   }
   const runId = await createSyncRun(existing.id, options.view ? 'view' : options.checkType ? `check:${options.checkType}` : 'full');
+  const endActivity = noteActivity(tenantId, `org ${existing.id}: fetching data`);
   try {
-    return await runSync(tenantId, progressCallback, { ...options, runId });
+    return await runSync(tenantId, progressCallback, { ...options, runId, syncActivity: label => noteActivity(tenantId, label) });
   } catch (error) {
     await finishSyncRun(runId, 'failed', error.message);
     throw error;
   } finally {
+    endActivity();
     syncsInProgress.delete(tenantId);
   }
 }
 
 async function runSync(tenantId, progressCallback, options = {}) {
   const emit = progressCallback || (() => {});
+  const syncActivity = options.syncActivity || (() => {});
   emit({ step: 'start', message: 'Starting sync...' });
 
   // 1. Fetch org info
@@ -533,6 +542,17 @@ async function runSync(tenantId, progressCallback, options = {}) {
     if (options.checkType) replaceIssueForCheck(scoped);
     else insertIssueDb(scoped);
     issueResults.push(scoped);
+    noteCheckDone(issue.check_type);
+  };
+  // How long each check took (from the previous one), logged when it is slow, and what the sync is doing for the
+  // event-loop watch (eventLoopWatch.js), so a check that holds the server up names itself in the log.
+  let checkClock = Date.now();
+  const noteCheckDone = checkType => {
+    const now = Date.now();
+    // The time since the previous check finished, Xero calls made in between included.
+    if (now - checkClock > SLOW_CHECK_MS) console.warn(`[slow-check] org ${orgId}: ${checkType} took ${((now - checkClock) / 1000).toFixed(1)} s (Xero calls included)`);
+    checkClock = now;
+    syncActivity(`org ${orgId}: running checks, last finished ${checkType}`);
   };
   const insertIssue = persistIssue;
 
@@ -555,7 +575,7 @@ async function runSync(tenantId, progressCallback, options = {}) {
     if (needsHydration.length > 0) {
       emit({ step: 'hydrate_invoices', message: `Re-fetching ${needsHydration.length} invoice(s) returned without line items...` });
       const hydrated = await fetchInvoicesByIds(tenantId, needsHydration.map(i => i.invoiceID));
-      mergeEntityCache(orgId, 'invoice', hydrated, { runId });
+      await mergeEntityCacheAsync(orgId, 'invoice', hydrated, { runId });
       const hydratedMap = new Map(hydrated.map(i => [i.invoiceID, i]));
       for (let idx = 0; idx < allInvoices.length; idx++) {
         const h = hydratedMap.get(allInvoices[idx].invoiceID);
@@ -761,13 +781,13 @@ async function runSync(tenantId, progressCallback, options = {}) {
     cachedBatchPayments = [];
   }
   const bankTransfers = options.cacheOnly
-    ? getCachedEntities(orgId, 'bank_transfer')
+    ? await getCachedEntitiesAsync(orgId, 'bank_transfer')
     : await apiCall(tenantId, async (xero, tid) => {
       const resp = await xero.accountingApi.getBankTransfers(tid);
       return resp.body.bankTransfers || [];
-    }).then(rows => {
-      mergeEntityCache(orgId, 'bank_transfer', rows, { runId, fullRefresh: true });
-      return getCachedEntities(orgId, 'bank_transfer');
+    }).then(async rows => {
+      await mergeEntityCacheAsync(orgId, 'bank_transfer', rows, { runId, fullRefresh: true });
+      return getCachedEntitiesAsync(orgId, 'bank_transfer');
     });
   const cachedBankItems = [];
   // Statement matching is scoped by the STATEMENT's dates, not by the selected report period, so
@@ -850,26 +870,33 @@ async function runSync(tenantId, progressCallback, options = {}) {
     });
   }
   replaceXeroBankItemsCache(orgId, cachedBankItems.filter(item => item.sourceId && item.bankAccountId));
-  const refreshedCache = getXeroBankItemsForOrg(orgId);
   // Re-match one statement at a time. Allocation is one-to-one WITHIN a statement — that is where
   // two lines competing for one Xero record is a real error — but never across statements, so a
   // superseded re-import of the same month cannot starve the current one of its matches.
-  const linesByImport = new Map();
-  for (const line of getStatementLinesForOrg(orgId)) {
-    if (!linesByImport.has(line.import_id)) linesByImport.set(line.import_id, []);
-    linesByImport.get(line.import_id).push(line);
+  // A client with no imported statement has nothing to re-match, so its 100,000 bank records are not read back for
+  // nothing; between the steps the server is let answer other requests.
+  const statementLines = getStatementLinesForOrg(orgId);
+  if (statementLines.length) {
+    await pauseForOtherWork();
+    const refreshedCache = getXeroBankItemsForOrg(orgId);
+    const linesByImport = new Map();
+    for (const line of statementLines) {
+      if (!linesByImport.has(line.import_id)) linesByImport.set(line.import_id, []);
+      linesByImport.get(line.import_id).push(line);
+    }
+    const rematched = [];
+    for (const lines of linesByImport.values()) {
+      await pauseForOtherWork();
+      const allocated = allocateStatementMatches(lines.map(line => ({
+        id: line.id,
+        transactionDate: line.transaction_date, amount: line.amount,
+        reference: line.reference, description: line.description,
+        bankAccountId: line.bank_account_id,
+      })), refreshedCache);
+      rematched.push(...allocated);
+    }
+    updateStatementLineMatches(orgId, rematched);
   }
-  const rematched = [];
-  for (const lines of linesByImport.values()) {
-    const allocated = allocateStatementMatches(lines.map(line => ({
-      id: line.id,
-      transactionDate: line.transaction_date, amount: line.amount,
-      reference: line.reference, description: line.description,
-      bankAccountId: line.bank_account_id,
-    })), refreshedCache);
-    rematched.push(...allocated);
-  }
-  updateStatementLineMatches(orgId, rematched);
 
   emit({ step: 'fetch_tax_rates', message: 'Fetching tax rates...' });
   // GetTaxRates has no `page` parameter — always returns the full list in one call.
@@ -890,6 +917,8 @@ async function runSync(tenantId, progressCallback, options = {}) {
   console.log(`Data fetched: ${accrecAuthorised?.length ?? 'FAILED'} sales invoices, ${accpayAuthorised?.length ?? 'FAILED'} purchase bills, ${contacts?.length ?? 'FAILED'} contacts, ${chartOfAccounts?.length ?? 'FAILED'} accounts, ${bankSpendTxns?.length ?? 'FAILED'} bank spend txns, ${bankReceiveTxns?.length ?? 'FAILED'} bank receive txns, ${taxRates?.length ?? 'FAILED'} tax rates`);
 
   emit({ step: 'running_checks', message: 'Running bookkeeping checks...' });
+  checkClock = Date.now();
+  syncActivity(`org ${orgId}: running checks`);
 
   const inPeriod = items => items.filter(item => isWithinPeriod(toDateString(item.date), period));
   const sinceLD = inPeriod;
@@ -1773,7 +1802,9 @@ async function runSync(tenantId, progressCallback, options = {}) {
     // those flags once a contact is used on an invoice or bill, so contacts used only on Spend Money
     // (card and bank payments) were skipped and obvious duplicates such as Deliveroo / Deliveroo London missed.
     const activeContacts = contacts.filter(c => c.contactStatus === 'ACTIVE');
-    const duplicates = findDuplicateContacts(activeContacts);
+    // Pauses now and then so the server keeps answering (health checks included) while thousands of contacts are
+    // compared; 22 Nov 2026 one client's comparison held it for minutes and ECS replaced the container.
+    const duplicates = await findDuplicateContactsAsync(activeContacts);
     const issue = {
       org_id: orgId, check_type: 'duplicate_contacts', importance: 'low',
       count: duplicates.length, potential_value_gbp: 0,
@@ -2784,13 +2815,12 @@ async function runSync(tenantId, progressCallback, options = {}) {
     let journalCount = 0;
     let journalsForDaily = null; // stays null when the journal download is skipped or times out
     try {
-      const allJournals = await withTimeout(
-        refreshCachedEntities(
-          orgId, tenantId, runId, 'journal',
-          since => fetchAllJournals(tenantId, since), options
-        ),
-        90000,
-        'Journal fetch'
+      // The limit is on the download itself. Saving and reading back the cache pauses now and then to let the server
+      // answer other requests, and a limit around those steps too could expire during a pause after a download that
+      // had finished in time. A download that times out is never written to the cache.
+      const allJournals = await refreshCachedEntities(
+        orgId, tenantId, runId, 'journal',
+        since => withTimeout(fetchAllJournals(tenantId, since), 90000, 'Journal fetch'), options
       );
       journalCount = allJournals
         .filter(item => isWithinPeriod(toDateString(item.journalDate), period)).length;

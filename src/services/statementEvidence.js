@@ -129,23 +129,66 @@ function normalizeReference(value) {
 // ~108k records — scanning that per line took ~4s for a 500-line statement, and the sync re-matches
 // every stored statement. Neighbouring pence buckets are included so the exact sub-penny tolerance
 // below is still the only thing that decides a match.
+//
+// Inside a bucket the items are also listed by date, so a line only looks at the records near its own date: a common
+// amount (thousands of £10 card payments over the years) made every line re-read every one of them (22 Nov 2026).
+// Each record's date is read once (dayMsOf). What a line gets back is exactly the bucket items the date test below
+// would keep, in the bucket's original order, so the ranking and the allocation are unchanged.
+const DAY_MS = 86400000;
+const itemDayMs = new WeakMap();
+function dayMsOf(item) {
+  const known = itemDayMs.get(item);
+  if (known && known.date === item.transaction_date) return known.ms;   // re-read if the record's date was changed
+  const ms = new Date(`${item.transaction_date}T00:00:00Z`).getTime();
+  itemDayMs.set(item, { date: item.transaction_date, ms });
+  return ms;
+}
+
 function indexCandidatePool(xeroItems) {
   const index = new Map();
   for (const item of xeroItems) {
     const key = `${item.bank_account_id}|${Math.round(Number(item.amount) * 100)}`;
     const bucket = index.get(key);
-    if (bucket) bucket.push(item); else index.set(key, [item]);
+    if (bucket) bucket.items.push(item); else index.set(key, { items: [item], byDate: null });
+  }
+  for (const bucket of index.values()) {
+    // Positions of the items with a readable date, earliest first (an unreadable date never passes the date test).
+    bucket.byDate = bucket.items.map((item, position) => position)
+      .filter(position => Number.isFinite(dayMsOf(bucket.items[position])))
+      .sort((a, b) => dayMsOf(bucket.items[a]) - dayMsOf(bucket.items[b]) || a - b);
   }
   return index;
 }
 
-function poolCandidates(line, pool) {
+// First position in byDate whose day is at or after `ms`.
+function firstOnOrAfter(bucket, ms) {
+  let low = 0; let high = bucket.byDate.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (dayMsOf(bucket.items[bucket.byDate[middle]]) < ms) low = middle + 1; else high = middle;
+  }
+  return low;
+}
+
+function poolCandidates(line, pool, dateWindowDays) {
   if (!(pool instanceof Map)) return pool;
   const pence = Math.round(Number(line.amount) * 100);
+  const lineMs = new Date(`${line.transactionDate}T00:00:00Z`).getTime();
   const found = [];
   for (const offset of [-1, 0, 1]) {
     const bucket = pool.get(`${line.bankAccountId}|${pence + offset}`);
-    if (bucket) found.push(...bucket);
+    if (!bucket) continue;
+    if (!Number.isFinite(lineMs) || !Number.isFinite(dateWindowDays)) { found.push(...bucket.items); continue; }
+    // A day wider on each side than the window; the exact date test in rankCandidates still decides.
+    const from = firstOnOrAfter(bucket, lineMs - (dateWindowDays + 1) * DAY_MS);
+    const near = [];
+    for (let n = from; n < bucket.byDate.length; n++) {
+      const position = bucket.byDate[n];
+      if (dayMsOf(bucket.items[position]) > lineMs + (dateWindowDays + 1) * DAY_MS) break;
+      near.push(position);
+    }
+    near.sort((a, b) => a - b);   // back to the bucket's own order
+    for (const position of near) found.push(bucket.items[position]);
   }
   return found;
 }
@@ -154,10 +197,13 @@ function poolCandidates(line, pool) {
 // reference agreement are the two signals a bank statement actually gives us; date distance
 // breaks ties so the nearest posting wins rather than an arbitrary one.
 function rankCandidates(line, xeroItems, dateWindowDays) {
-  const candidates = poolCandidates(line, xeroItems).filter(item =>
+  const lineMs = new Date(`${line.transactionDate}T00:00:00Z`).getTime();
+  // dayDistance(item.transaction_date, line.transactionDate), with the item's date read once.
+  const distanceOf = item => Math.abs(dayMsOf(item) - lineMs) / DAY_MS;
+  const candidates = poolCandidates(line, xeroItems, dateWindowDays).filter(item =>
     item.bank_account_id === line.bankAccountId &&
     Math.abs(Number(item.amount) - Number(line.amount)) < 0.01 &&
-    item.transaction_date && dayDistance(item.transaction_date, line.transactionDate) <= dateWindowDays
+    item.transaction_date && distanceOf(item) <= dateWindowDays
   );
   const lineRef = normalizeReference(`${line.reference || ''} ${line.description || ''}`);
   return candidates.map(item => {
@@ -170,7 +216,7 @@ function rankCandidates(line, xeroItems, dateWindowDays) {
       score: (sameDate ? 2 : 0) + (refMatch ? 2 : 0),
       sameDate,
       refMatch,
-      distance: dayDistance(item.transaction_date, line.transactionDate),
+      distance: distanceOf(item),
     };
   }).sort((a, b) =>
     b.score - a.score ||
