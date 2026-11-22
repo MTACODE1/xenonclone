@@ -55,9 +55,9 @@ function referenceCounts(data, period) {
   const counts = {
     customer_invoices: docs(data.invoices, 'ACCREC'), supplier_bills: docs(data.invoices, 'ACCPAY'),
     credit_notes_sales: docs(data.credits, 'ACCRECCREDIT'), credit_notes_purchase: docs(data.credits, 'ACCPAYCREDIT'),
-    customer_payments: livePayments.filter(p => p.paymentType === 'ACCRECPAYMENT').length,
-    supplier_payments: livePayments.filter(p => p.paymentType === 'ACCPAYPAYMENT').length,
-    other_payments: livePayments.filter(p => !['ACCRECPAYMENT', 'ACCPAYPAYMENT'].includes(p.paymentType)).length,
+    customer_payments: livePayments.filter(p => /^(ACCREC|AR)/.test(p.paymentType)).length,
+    supplier_payments: livePayments.filter(p => /^(ACCPAY|AP)/.test(p.paymentType)).length,
+    other_payments: livePayments.filter(p => !/^(ACCREC|AR|ACCPAY|AP)/.test(p.paymentType)).length,
     direct_deposits: liveBank.filter(b => /^RECEIVE/.test(b.type) && !/-TRANSFER$/.test(b.type)).length,
     direct_payments: liveBank.filter(b => /^SPEND/.test(b.type) && !/-TRANSFER$/.test(b.type)).length,
     transfers: liveBank.filter(b => /-TRANSFER$/.test(b.type)).length,
@@ -206,16 +206,16 @@ test('Xenon\'s counting rules: drafts counted, payments and transfers inside Ban
   assert.equal(total.credit_notes_sales, 1);
   assert.equal(total.credit_notes_purchase, 0);
   assert.equal(total.turnover, 200);          // only the approved and the paid invoice; the draft credit note takes nothing off
-  assert.equal(total.customer_payments, 2);
+  assert.equal(total.customer_payments, 3);   // two invoice payments and one credit-note refund, as Xenon counts them
   assert.equal(total.supplier_payments, 1);
-  assert.equal(total.other_payments, 1);      // counted apart, not in Bank Processed
+  assert.equal(total.other_payments, 0);
   assert.equal(total.direct_deposits, 2);     // RECEIVE and RECEIVE-OVERPAYMENT
   assert.equal(total.direct_payments, 1);     // the £0.00 and the deleted one are left out
   assert.equal(total.transfers, 2);           // one transfer, once on each side
-  assert.equal(total.bank_processed, 8);
+  assert.equal(total.bank_processed, 9);
   assert.equal(total.manual_journals, 1);
   assert.equal(total.journals, 3);            // system journals: shown nowhere in the total
-  assert.equal(total.total_transactions, 4 + 2 + 1 + 0 + 8 + 1);
+  assert.equal(total.total_transactions, 4 + 2 + 1 + 0 + 9 + 1);
 });
 
 test('per-day rows built with older counting rules are not shown', () => {

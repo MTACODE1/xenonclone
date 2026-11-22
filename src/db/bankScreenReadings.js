@@ -222,6 +222,52 @@ async function getLatestItemTotals({ pool = getPool(), ensure = ensureTables } =
   }]));
 }
 
+// For Client Panorama: every organisation's newest reading (accounts with items to reconcile) and the newest list
+// of lines of each of its bank accounts, as counts per date. Map(orgId -> { reading, lineReads }).
+async function getUnprocessedByDate({ pool = getPool(), ensure = ensureTables } = {}) {
+  await ensure(pool);
+  const [accounts] = await pool.query(
+    `SELECT b.org_id, UNIX_TIMESTAMP(b.read_at) AS read_at_unix, a.account_name, a.items_to_reconcile
+     FROM akrio_bank_screen_batches b
+     JOIN (SELECT org_id, MAX(id) AS id FROM akrio_bank_screen_batches GROUP BY org_id) latest ON latest.id = b.id
+     LEFT JOIN akrio_bank_screen_accounts a ON a.batch_id = b.id AND a.org_id = b.org_id`
+  );
+  const [reads] = await pool.query(
+    `SELECT r.id, r.org_id, r.account_name, r.truncated, UNIX_TIMESTAMP(r.read_at) AS read_at_unix
+     FROM akrio_bank_screen_line_reads r
+     JOIN (SELECT org_id, account_name, MAX(id) AS id FROM akrio_bank_screen_line_reads GROUP BY org_id, account_name) newest
+       ON newest.id = r.id`
+  );
+  const [days] = await pool.query(
+    `SELECT read_id, DATE_FORMAT(line_date, '%Y-%m-%d') AS day, COUNT(*) AS lines
+     FROM akrio_bank_screen_lines GROUP BY read_id, line_date`
+  );
+  const daysByRead = new Map();
+  for (const row of days) {
+    if (!daysByRead.has(Number(row.read_id))) daysByRead.set(Number(row.read_id), new Map());
+    daysByRead.get(Number(row.read_id)).set(row.day, Number(row.lines));
+  }
+  const byOrg = new Map();
+  const entry = orgId => {
+    if (!byOrg.has(orgId)) byOrg.set(orgId, { reading: { readAt: null, accounts: [] }, lineReads: [] });
+    return byOrg.get(orgId);
+  };
+  for (const row of accounts) {
+    const item = entry(Number(row.org_id));
+    item.reading.readAt = new Date(Number(row.read_at_unix) * 1000);
+    if (row.account_name != null) {
+      item.reading.accounts.push({ accountName: row.account_name, itemsToReconcile: row.items_to_reconcile == null ? null : Number(row.items_to_reconcile) });
+    }
+  }
+  for (const row of reads) {
+    entry(Number(row.org_id)).lineReads.push({
+      accountName: row.account_name, truncated: Boolean(row.truncated),
+      readAt: new Date(Number(row.read_at_unix) * 1000), days: daysByRead.get(Number(row.id)) || new Map(),
+    });
+  }
+  return byOrg;
+}
+
 async function getLatestReading(orgId, { pool = getPool(), ensure = ensureTables } = {}) {
   await ensure(pool);
   const [batches] = await pool.query(
@@ -292,5 +338,5 @@ async function getShortCodeIndex({ pool = getPool(), now = Date.now() } = {}) {
 
 module.exports = {
   ensureTables, saveReading, getLatestReading, getLastReadTimes, getActiveBankAccountCount, getShortCodeIndex,
-  saveLines, getLineSummaries, getStoredLines, getLatestItemTotals,
+  saveLines, getLineSummaries, getStoredLines, getLatestItemTotals, getUnprocessedByDate,
 };

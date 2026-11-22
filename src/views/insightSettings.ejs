@@ -272,7 +272,7 @@ const navItems = [
         <tbody>
           <% rateBands.forEach(b => { %>
           <tr>
-            <td><%= b.effective_date %></td>
+            <td><%= typeof ukDate === 'function' ? ukDate(b.effective_date) : b.effective_date %></td>
             <td><%= b.rate_pct %>%</td>
             <td><label style="display:flex;align-items:center;gap:4px;font-size:0.75rem;"><input type="checkbox" name="delete_rate_band" value="<%= b.id %>"> remove</label></td>
           </tr>

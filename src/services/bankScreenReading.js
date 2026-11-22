@@ -147,7 +147,38 @@ function readingFreshness(readAt, now = new Date()) {
   return now.getTime() - time > STALE_AFTER_DAYS * 86400000 ? 'stale' : 'current';
 }
 
+// Unprocessed bank items by date, for counts per period (Client Panorama), as Xenon gives them. Each account the
+// newest reading shows with items to reconcile needs its own list of lines, read no earlier than that reading
+// (allowing a few minutes, as the lines are read straight after it) and complete (not cut off at MAX_LINES).
+// Only then are the dates known for the whole client: { complete: true, days: Map(date -> lines) }.
+// Otherwise { complete: false } and the caller shows the reading's total for all dates.
+const LIST_BEFORE_READING_MS = 10 * 60 * 1000;
+function datedUnprocessed(reading, lineReads) {
+  const accounts = (reading && reading.accounts) || [];
+  const readAt = reading && reading.readAt ? new Date(reading.readAt).getTime() : NaN;
+  const byName = new Map((lineReads || []).map(read => [read.accountName, read]));
+  const days = new Map();
+  for (const account of accounts) {
+    if (!(Number(account.itemsToReconcile) > 0)) continue;
+    const read = byName.get(account.accountName);
+    if (!read || read.truncated || !Number.isFinite(readAt) || new Date(read.readAt).getTime() < readAt - LIST_BEFORE_READING_MS) {
+      return { complete: false };
+    }
+    for (const [day, count] of read.days) days.set(day, (days.get(day) || 0) + count);
+  }
+  return { complete: true, days };
+}
+
+// How many of those dated lines fall in a period (same day rule as every other Panorama figure).
+function unprocessedInPeriod(dated, period, isWithinPeriod) {
+  if (!dated || !dated.complete) return null;
+  let count = 0;
+  for (const [day, lines] of dated.days) if (isWithinPeriod(day, period)) count += lines;
+  return count;
+}
+
 module.exports = {
   ReadingError, validateReading, buildShortCodeIndex, readingFreshness,
   MAX_ACCOUNTS, STALE_AFTER_DAYS, validateLines, summariseLines, MAX_LINES,
+  datedUnprocessed, unprocessedInPeriod,
 };

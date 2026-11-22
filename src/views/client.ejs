@@ -63,7 +63,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
   </div>
 <% } %>
 <% const periodStale = !!(org.period_key && org.period_key !== selectedPeriod.key); %>
-<% const stalePeriodLabel = org.period_label || org.period_key; %>
+<% const stalePeriodLabel = String(org.period_label || org.period_key || '').replace(/\b(\d{4})-(\d{2})-(\d{2})\b/g, '$3/$2/$1'); %>
 <% if (periodStale) { %>
   <div class="alert alert-warning stale-period-banner">
     <span class="stale-period-icon">!</span>
@@ -77,13 +77,14 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
 
 <form method="GET" class="form-row mb-24" id="periodForm" style="align-items:center;flex-wrap:wrap;gap:8px;">
   <select name="period" class="form-select" style="width:auto;" onchange="document.getElementById('customPeriod').style.display=this.value==='custom'?'flex':'none';if(this.value!=='custom')this.form.submit()">
-    <% [
-      ['since_lock_date','Since Xero Lock Date'],['current_month','Current Month'],
-      ['previous_month','Previous Month'],['rolling_12_months','Rolling 12 Months'],
-      ['current_fy','Current Financial Year'],['previous_fy','Previous Financial Year'],
-      ['custom','Custom Date Range']
-    ].forEach(([value,label]) => { %>
-      <option value="<%= value %>" <%= selectedPeriod.type === value ? 'selected' : '' %>><%= label %></option>
+    <%# Xenon's list and order, each option with this client's own dates (hover an option for its full range). %>
+    <% (typeof periodMenu !== 'undefined' && periodMenu ? periodMenu : [
+      { value: 'since_lock_date', label: 'Since Xero Lock Date' }, { value: 'current_month', label: 'Current Month' },
+      { value: 'previous_month', label: 'Previous Month' }, { value: 'rolling_12_months', label: 'Rolling 12 months' },
+      { value: 'current_fy', label: 'Current Financial Year' }, { value: 'previous_fy', label: 'Previous Financial Year' },
+      { value: 'custom', label: 'Custom Date Range' }
+    ]).forEach(option => { %>
+      <option value="<%= option.value %>" <%= selectedPeriod.type === option.value ? 'selected' : '' %><% if (option.title) { %> title="<%= option.title %>"<% } %>><%= option.label %></option>
     <% }) %>
   </select>
   <span id="customPeriod" class="form-row" style="gap:6px;<%= selectedPeriod.type === 'custom' ? 'display:flex' : 'display:none' %>">
@@ -92,7 +93,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
     <input type="date" name="to" class="form-input" value="<%= selectedPeriod.type === 'custom' ? selectedPeriod.end : '' %>">
     <button class="btn btn-primary btn-sm" type="submit">Apply</button>
   </span>
-  <span class="text-muted" style="font-size:.75rem;"><%= selectedPeriod.start %> to <%= selectedPeriod.end %></span>
+  <span class="text-muted" style="font-size:.75rem;"><%= typeof ukDate === 'function' ? ukDate(selectedPeriod.start) : selectedPeriod.start %> to <%= typeof ukDate === 'function' ? ukDate(selectedPeriod.end) : selectedPeriod.end %></span>
   <span style="margin-left:auto;display:flex;gap:8px;align-items:center;">
     <button type="button" onclick="syncThisClient()" id="syncBtn" class="btn btn-secondary btn-sm" title="<%= typeof periodView !== 'undefined' && periodView ? 'Works this period out again from the data of the last sync. To fetch new data from Xero, go back to the normal period and sync.' : 'Sync this client' %>">
       <svg style="width:14px;height:14px;display:inline-block;vertical-align:middle;margin-right:4px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -444,7 +445,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
       </div>
       <div class="card-body" data-bank-screen-body style="padding: 16px;">Loading…</div>
     </div>
-    <script src="<%= basePath %>/bankScreen.js?v=14" defer></script>
+    <script src="<%= basePath %>/bankScreen.js?v=15" defer></script>
     <% } %>
 
     <div class="card" id="statement-evidence" style="margin-top: 24px;">
@@ -493,7 +494,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
           <tbody>
           <% statementImports.forEach(item => { %>
             <tr style="border-top:1px solid #f2f6fa;">
-              <td style="padding:8px 12px;"><strong><%= item.bank_account_name %></strong><div><%= item.original_filename %></div><small style="color:#7C8FAC;"><%= item.file_sha256.slice(0,12) %>… · <%= item.imported_at %></small></td>
+              <td style="padding:8px 12px;"><strong><%= item.bank_account_name %></strong><div><%= item.original_filename %></div><small style="color:#7C8FAC;"><%= item.file_sha256.slice(0,12) %>… · <%= typeof ukDate === 'function' ? ukDate(item.imported_at) : item.imported_at %></small></td>
               <td><%= fmtDisplayDate(item.statement_start_date) %> – <%= fmtDisplayDate(item.statement_end_date) %>
                 <% const evidenceAgeDays = Math.floor((Date.now() - new Date(item.statement_end_date + 'T00:00:00Z')) / 86400000); %>
                 <span class="chip" style="margin-left:4px;background:<%= evidenceAgeDays > 35 ? '#FFF4E5' : '#E6FFFA' %>;color:<%= evidenceAgeDays > 35 ? '#B45309' : '#047857' %>;"><%= evidenceAgeDays > 35 ? 'Stale evidence' : 'Current evidence' %></span>
@@ -549,7 +550,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
               <td style="padding: 10px 16px; font-weight: 500; color: #2A3547;"><%= acc.bank_account_name %></td>
               <td style="padding: 10px 16px; color: #2A3547;">
                 <%= xeroBal !== null ? (xeroBal < 0 ? '-£' + Number(Math.abs(xeroBal)).toLocaleString('en-GB', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '£' + Number(xeroBal).toLocaleString('en-GB', {minimumFractionDigits: 2, maximumFractionDigits: 2})) : '—' %>
-                <% if (acc.xero_balance_as_of) { %><div style="font-size: 0.7rem; color: #7C8FAC;">as of <%= acc.xero_balance_as_of %></div><% } %>
+                <% if (acc.xero_balance_as_of) { %><div style="font-size: 0.7rem; color: #7C8FAC;">as of <%= typeof ukDate === 'function' ? ukDate(acc.xero_balance_as_of) : acc.xero_balance_as_of %></div><% } %>
               </td>
               <td style="padding: 10px 16px;">
                 <form method="POST" action="<%= basePath %>/client/<%= orgIdentifier %>/bank-reconciliation" style="display: flex; gap: 6px; align-items: center;">
@@ -612,7 +613,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
               <span style="font-size:0.7rem;padding:1px 6px;border-radius:3px;background:<%= item.source === 'companies_house' ? '#E1F5EE' : '#F1EFE8' %>;color:<%= item.source === 'companies_house' ? '#0F6E56' : '#5F5E5A' %>;"><%= item.source === 'companies_house' ? 'Companies House (automatic)' : 'Accountant entered' %></span>
               <% if (item.source_note) { %> · <%= item.source_note %><% } %><% if (item.source_document_path) { %> · document stored privately<% } %>
               <% if (item.taxonomy_concept) { %>
-                <div style="color:#7C8FAC;font-size:0.7rem;margin-top:2px;">Read from <code><%= item.taxonomy_concept %></code> · context <%= item.context_ref %> at <%= item.context_date %> · <%= item.extraction_confidence %> confidence<% if (item.ch_document_id) { %> · document <%= item.ch_document_id %><% } %></div>
+                <div style="color:#7C8FAC;font-size:0.7rem;margin-top:2px;">Read from <code><%= item.taxonomy_concept %></code> · context <%= item.context_ref %> at <%= typeof ukDate === 'function' ? ukDate(item.context_date) : item.context_date %> · <%= item.extraction_confidence %> confidence<% if (item.ch_document_id) { %> · document <%= item.ch_document_id %><% } %></div>
               <% } %>
             </div>
           <% }) %>

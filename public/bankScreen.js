@@ -76,12 +76,50 @@
       headers: { 'content-type': 'application/json', accept: 'application/json', 'x-csrf-token': csrfToken },
       body: JSON.stringify({ ...answer.reading, tenantId }),
     });
-    try { return await save(); } catch (error) {
+    let saved;
+    try { saved = await save(); } catch (error) {
       // The figures are already read; a passing server hiccup should not lose them. Try the save once more.
       if (error.code !== 'verify_error' && error.code !== 'verify_unreachable') throw error;
       await new Promise(resolve => setTimeout(resolve, 3000));
-      return save();
+      saved = await save();
     }
+    // Then the unreconciled lines of every account with items to reconcile, so Client Panorama knows their dates and
+    // can count them per period (as Xenon does). The reading above is already saved; a list that cannot be read
+    // only leaves that client's unprocessed count "for all dates".
+    onStage('lines');
+    saved.lines = await readAndSaveLines(base, csrfToken, tenantId, shortCode, answer.reading.accounts || []);
+    return saved;
+  }
+
+  // Reads and saves the lines of each account with items to reconcile. Never throws: returns what happened.
+  async function readAndSaveLines(base, csrfToken, tenantId, shortCode, accounts) {
+    const wanted = accounts.filter(account => Number(account.itemsToReconcile) > 0);
+    const result = { wanted: wanted.length, saved: 0, failed: [] };
+    if (!wanted.length) return result;
+    const version = await extensionVersion();
+    if (!version || !versionAtLeast(version, LINES_VERSION)) {
+      result.failed.push('The extension is too old to read the lines (version ' + (version || 'unknown') + ').');
+      return result;
+    }
+    for (const account of wanted) {
+      const answer = await askExtension({ type: 'READ_BANK_LINES', shortCode, accountName: account.accountName }, 150000);
+      if (!answer || !answer.ok) {
+        result.failed.push(account.accountName + ': ' + ((answer && answer.message) || 'the extension did not answer in time.'));
+        if (answer && answer.error === 'not_signed_in') break; // every further account would fail the same way
+        continue;
+      }
+      try {
+        await getJson(base + '/api/bank-screen/lines', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', accept: 'application/json', 'x-csrf-token': csrfToken },
+          body: JSON.stringify({ ...answer.lines, tenantId }),
+        });
+        result.saved++;
+      } catch (error) {
+        result.failed.push(account.accountName + ': ' + error.message);
+      }
+    }
+    return result;
   }
 
   // A progress bar that follows the real stages of a read. Between stages it creeps forward slowly, so it keeps
@@ -90,7 +128,8 @@
     opening: { at: 8, upTo: 35, label: 'Opening Xero…' },
     loaded: { at: 40, upTo: 55, label: 'Xero is open. Waiting for the bank accounts to load…' },
     reading: { at: 58, upTo: 88, label: 'Reading the bank accounts…' },
-    saving: { at: 92, upTo: 97, label: 'Saving to Akrio Verify…' },
+    saving: { at: 90, upTo: 92, label: 'Saving to Akrio Verify…' },
+    lines: { at: 93, upTo: 99, label: 'Reading the dates of the unreconciled lines…' },
   };
   function progressBar() {
     const wrap = el('div', null, 'padding:14px 16px 0;');
@@ -186,7 +225,7 @@
   }
 
   // ---- "items to reconcile" list: read live from Xero when someone clicks a count ----
-  // The lines are not saved anywhere; each click reads Xero's "Bank statements" tab for that account afresh.
+  // Each click reads Xero's "Bank statements" tab for that account afresh; the lines are also saved after every update.
   const LINES_VERSION = [1, 3, 0]; // the first extension version that can read statement lines
   async function extensionVersion() {
     for (let attempt = 0; attempt < 8; attempt++) {
@@ -497,11 +536,17 @@
         await load();
         progress.done();
         note.style.color = '#0B8F76'; note.textContent = 'Updated just now';
+        if (saved && saved.lines && saved.lines.failed.length) {
+          note.style.color = '#B25E09';
+          note.textContent = 'Updated just now, but the dates of some unreconciled lines could not be read: ' + saved.lines.failed.slice(0, 2).join('; ');
+        }
         // The Bank Balance and Unprocessed Bank checks on this page were recalculated from the new reading;
         // reload so their results and the health score show it, keeping this card in view.
         if (saved && saved.checksUpdated) {
-          note.textContent = 'Updated just now. Refreshing the checks…';
-          setTimeout(() => { window.location.hash = 'bank-screen'; window.location.reload(); }, 800);
+          // A warning about the lines stays readable for a few seconds before the page refreshes.
+          const linesProblem = saved.lines && saved.lines.failed.length;
+          if (!linesProblem) note.textContent = 'Updated just now. Refreshing the checks…';
+          setTimeout(() => { window.location.hash = 'bank-screen'; window.location.reload(); }, linesProblem ? 6000 : 800);
         }
       } catch (error) {
         progress.fail();
@@ -556,7 +601,7 @@
     const head = el('div', null, 'display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;');
     const titles = el('div', null, 'flex:1 1 320px;');
     titles.appendChild(el('div', 'Bank feeds from Xero', 'font-weight:700;font-size:0.95rem;color:#2A3547;'));
-    titles.appendChild(el('div', 'Reads items to reconcile, bank balances and feed status for every client through the browser extension. Stay signed in to Xero and keep this tab open while it runs.', 'font-size:0.75rem;color:#7C8FAC;margin-top:2px;'));
+    titles.appendChild(el('div', 'Reads items to reconcile, bank balances and feed status for every client through the browser extension, then the date of every unreconciled line (so Client Panorama can count them per period). Stay signed in to Xero and keep this tab open while it runs.', 'font-size:0.75rem;color:#7C8FAC;margin-top:2px;'));
     const actions = el('div', null, 'display:flex;gap:8px;align-items:center;');
     const start = el('button', 'Update all clients'); start.type = 'button'; start.className = 'btn btn-primary btn-sm';
     const stop = el('button', 'Stop'); stop.type = 'button'; stop.className = 'btn btn-outlined btn-sm'; show(stop, false);
@@ -593,7 +638,7 @@
       stop.disabled = false; stop.textContent = 'Stop'; show(stop, true);
       stopRequested = false; fill.style.background = '#5D87FF'; setFill(0); show(running, true);
       current.textContent = 'Getting the client list…'; eta.textContent = '';
-      let done = 0, failed = 0, skipped = 0, total = 0, stoppedBy = null;
+      let done = 0, failed = 0, skipped = 0, total = 0, stoppedBy = null, linesIncomplete = 0;
       try {
         const { organisations } = await getJson(base + '/api/bank-screen/organisations');
         total = organisations.length;
@@ -615,7 +660,20 @@
           const read = done + failed;
           eta.textContent = read >= 3 ? duration(((Date.now() - startedAt) / 1000 / read) * (total - position)) + ' left' : '';
           setFill(Math.round((position / total) * 100));
-          try { await updateOne(base, panel.dataset.csrf, org.tenantId, org.shortCode); done++; }
+          try {
+            const saved = await updateOne(base, panel.dataset.csrf, org.tenantId, org.shortCode);
+            done++;
+            // The bank page is saved; if some lines could not be read, Client Panorama shows that client's
+            // unprocessed count for all dates. Listed so it can be read again.
+            if (saved && saved.lines && saved.lines.failed.length) {
+              linesIncomplete++;
+              const row = el('div', null, 'display:flex;gap:10px;padding:6px 0;border-top:1px solid #F7DAD3;font-size:0.78rem;');
+              const link = el('a', org.name, 'flex:0 0 240px;font-weight:600;'); link.href = base + '/client/' + encodeURIComponent(org.tenantId);
+              row.appendChild(link);
+              row.appendChild(el('span', 'Bank figures saved, but the dates of some unreconciled lines could not be read: ' + saved.lines.failed.slice(0, 3).join('; '), 'color:#B25E09;'));
+              failList.appendChild(row);
+            }
+          }
           catch (error) {
             failed++;
             const row = el('div', null, 'display:flex;gap:10px;padding:6px 0;border-top:1px solid #F7DAD3;font-size:0.78rem;');
@@ -640,10 +698,16 @@
           summary.appendChild(badge(done + ' updated', 'good'));
           if (skipped) summary.appendChild(badge(skipped + ' already read in the last hour', 'muted'));
           if (failed) summary.appendChild(badge(failed + ' failed', 'bad'));
+          if (linesIncomplete) summary.appendChild(badge(linesIncomplete + ' without all line dates', 'warn'));
           if (notAttempted) summary.appendChild(badge(notAttempted + ' not attempted', 'warn'));
           show(summary, true);
         }
-        if (failed) { failTitle.textContent = failed + (failed === 1 ? ' client' : ' clients') + ' could not be read'; failBox.open = failed <= 5; show(failBox, true); }
+        if (failed || linesIncomplete) {
+          failTitle.textContent = (failed ? failed + (failed === 1 ? ' client' : ' clients') + ' could not be read' : '')
+            + (failed && linesIncomplete ? '; ' : '')
+            + (linesIncomplete ? linesIncomplete + (linesIncomplete === 1 ? ' client' : ' clients') + ' without all line dates' : '');
+          failBox.open = failed + linesIncomplete <= 5; show(failBox, true);
+        }
       }
     });
   }

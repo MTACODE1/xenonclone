@@ -83,7 +83,7 @@
         <% data.rows.forEach(r => { %>
         <tr>
           <% if (viewScope === 'all') { %><td><%= r.client_name %></td><% } %>
-          <td style="white-space:nowrap;"><%= r.txn_date %></td>
+          <td style="white-space:nowrap;"><%= typeof ukDate === 'function' ? ukDate(r.txn_date) : r.txn_date %></td>
           <td><%= r.contact_name || '' %></td>
           <td><%= r.description || r.reference || '' %></td>
           <td><%= r.bank_account_name || '' %></td>

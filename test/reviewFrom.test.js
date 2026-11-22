@@ -66,7 +66,7 @@ test('the lock date label and the no-date label are unchanged', () => {
 test('other period types ignore the review-from date', () => {
   const period = resolvePeriod({ type: 'custom', from: '2025-07-31', to: '2026-10-20' }, { lockDate: '2025-08-31', lockSource: 'signed_accounts', asOf: ASOF });
   assert.equal(period.start, '2025-07-31');
-  assert.equal(period.label, 'Custom (2025-07-31 to 2026-10-20)');
+  assert.equal(period.label, 'Custom (31/07/2025 to 20/10/2026)');
 });
 
 test('the signed accounts date comes from Companies House or an explicit made-up-to date, for that client only', () => {

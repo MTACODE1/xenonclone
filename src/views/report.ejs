@@ -22,13 +22,13 @@
       <% if (practiceLogo) { %><img class="logo" src="<%= practiceLogo %>" alt=""><% } %>
       <div><strong><%= practiceName %></strong><div class="muted">Bookkeeping health report</div></div>
     </div>
-    <div style="text-align:right"><strong>Generated</strong><br><%= generatedAt.slice(0,10) %><br><span class="muted">Evidence synced <%= org.last_synced_at || 'Not synced' %></span></div>
+    <div style="text-align:right"><strong>Generated</strong><br><%= typeof ukDate === 'function' ? ukDate(generatedAt.slice(0,10)) : generatedAt.slice(0,10) %><br><span class="muted">Evidence synced <%= org.last_synced_at ? (typeof ukDate === 'function' ? ukDate(org.last_synced_at) : org.last_synced_at) : 'Not synced' %></span></div>
   </header>
 
   <h1 style="margin-top:18px"><%= org.name %></h1>
   <div class="muted"><%= org.client_ref ? `Client reference ${org.client_ref} · ` : '' %><%= selectedPeriod.label %></div>
   <% if (org.period_key && org.period_key !== selectedPeriod.key) { %>
-    <div class="note">The selected period has not been synced. The score and findings below are from <%= org.period_label || org.period_key %>.</div>
+    <div class="note">The selected period has not been synced. The score and findings below are from <%= String(org.period_label || org.period_key || '').replace(/\b(\d{4})-(\d{2})-(\d{2})\b/g, '$3/$2/$1') %>.</div>
   <% } %>
 
   <div class="grid">

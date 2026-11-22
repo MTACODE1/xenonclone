@@ -21,6 +21,8 @@ const { isStaffManager, canAccessSettings } = require('./src/services/staffPermi
 getDb();
 
 const app = express();
+// Every view can show a date the UK way (DD/MM/YYYY): <%= ukDate(value) %>.
+app.locals.ukDate = require('./src/services/displayDate').ukDate;
 
 if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) {
   throw new Error('SESSION_SECRET is required in production');

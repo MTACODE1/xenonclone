@@ -206,12 +206,27 @@ router.get('/transactions', async (req, res, next) => {
   // Bank (Unprocessed): items waiting on the bank feed, from each client's latest reading of Xero's Bank accounts
   // page. A page view must never fail because the readings cannot be reached.
   try {
-    const { getLatestItemTotals } = require('../db/bankScreenReadings');
-    const { readingFreshness } = require('../services/bankScreenReading');
+    const { getLatestItemTotals, getUnprocessedByDate } = require('../db/bankScreenReadings');
+    const { readingFreshness, datedUnprocessed, unprocessedInPeriod } = require('../services/bankScreenReading');
+    const { isWithinPeriod } = require('../services/periodResolver');
     const totalsByOrg = await getLatestItemTotals();
+    const byDate = await getUnprocessedByDate();
     rows = rows.map(row => {
       const reading = totalsByOrg.get(row.org_id);
-      return reading ? { ...row, unprocessed_items: reading.items, unprocessed_read_at: reading.readAt.toISOString(), unprocessed_stale: readingFreshness(reading.readAt) !== 'current' } : row;
+      if (!reading) return row;
+      const out = { ...row, unprocessed_items: reading.items, unprocessed_read_at: reading.readAt.toISOString(), unprocessed_stale: readingFreshness(reading.readAt) !== 'current' };
+      // Like Xenon: when every unreconciled line's date is known, count only the lines dated in the period and
+      // include them in Total Transactions. Otherwise the reading's total is shown for all dates, outside the total.
+      const stored = byDate.get(row.org_id);
+      const inPeriod = stored && row.period_start && row.period_end
+        ? unprocessedInPeriod(datedUnprocessed(stored.reading, stored.lineReads), { type: row.period, start: row.period_start, end: row.period_end }, isWithinPeriod)
+        : null;
+      if (inPeriod != null) {
+        out.unprocessed_items = inPeriod;
+        out.unprocessed_dated = true;
+        if (out.total_transactions != null) out.total_transactions += inPeriod;
+      }
+      return out;
     });
   } catch (error) {
     console.error('[transactions] bank readings unavailable:', error.message);
@@ -238,7 +253,14 @@ router.get('/transactions', async (req, res, next) => {
     transfers: rows.reduce((s, r) => s + (r.transfers || 0), 0),
     unprocessed_items: rows.reduce((s, r) => s + (r.unprocessed_stale ? 0 : (r.unprocessed_items || 0)), 0),
   };
-  res.render('transactions', { rows, totals, query: { ...req.query, period: selectedPeriod } });
+  // Every client has its own year end and lock date, so this all-clients list names dates only where they are the
+  // same for everyone (months, quarters); the financial-year options are each client's own year.
+  const { periodMenu } = require('../services/periodResolver');
+  const SHARED_WORDS = { current_fy: 'Current Financial Year (each client)', previous_fy: 'Previous Financial Year (each client)',
+    previous_fy_2: 'Financial Year Before That (each client)', since_lock_date: 'Since Xero Lock Date (each client)' };
+  const periodOptions = periodMenu({}).map(option => SHARED_WORDS[option.value]
+    ? { value: option.value, label: SHARED_WORDS[option.value] } : option);
+  res.render('transactions', { rows, totals, periodOptions, query: { ...req.query, period: selectedPeriod } });
   } catch (error) {
     next(error);
   }

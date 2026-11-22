@@ -17,13 +17,14 @@
   <input type="text" name="search" value="<%= query.search || '' %>" placeholder="Search clients..." class="form-input" style="width: 250px;" oninput="this.form.submit()">
 
   <select name="period" class="form-select" onchange="handlePeriodChange(this)">
-    <option value="previous_fy" <%= query.period==='previous_fy'?'selected':'' %>>Previous Financial Year</option>
-    <option value="current_fy" <%= query.period==='current_fy'?'selected':'' %>>Current Financial Year</option>
-    <option value="rolling_12_months" <%= query.period==='rolling_12_months'?'selected':'' %>>Rolling 12 Months</option>
-    <option value="current_month" <%= query.period==='current_month'?'selected':'' %>>Current Month</option>
-    <option value="previous_month" <%= query.period==='previous_month'?'selected':'' %>>Previous Month</option>
-    <option value="since_lock_date" <%= query.period==='since_lock_date'?'selected':'' %>>Since Xero Lock Date</option>
-    <option value="custom" <%= query.period==='custom'?'selected':'' %>>Custom Date Range</option>
+    <% (typeof periodOptions !== 'undefined' && periodOptions ? periodOptions : [
+      { value: 'previous_fy', label: 'Previous Financial Year' }, { value: 'current_fy', label: 'Current Financial Year' },
+      { value: 'rolling_12_months', label: 'Rolling 12 months' }, { value: 'current_month', label: 'Current Month' },
+      { value: 'previous_month', label: 'Previous Month' }, { value: 'since_lock_date', label: 'Since Xero Lock Date' },
+      { value: 'custom', label: 'Custom Date Range' }
+    ]).forEach(option => { %>
+    <option value="<%= option.value %>" <%= query.period===option.value?'selected':'' %><% if (option.title) { %> title="<%= option.title %>"<% } %>><%= option.label %></option>
+    <% }) %>
   </select>
 
   <div id="customDates" class="form-row" style="<%= query.period==='custom' ? 'display: flex;' : 'display: none;' %>">
@@ -59,7 +60,7 @@
           <th class="bank-split text-right" style="display: none; background: var(--primary-light);">└ Direct Deposits</th>
           <th class="bank-split text-right" style="display: none; background: var(--primary-light);">└ Direct Payments</th>
           <th class="bank-split text-right" style="display: none; background: var(--primary-light);">└ Transfers</th>
-          <th class="text-right"><span title="Items waiting on the bank feed, from the latest reading of Xero's Bank accounts page (browser extension). Not tied to the period.">Bank (Unprocessed)</span></th>
+          <th class="text-right"><span title="Unreconciled bank statement lines dated in the period, read from Xero by the browser extension, and included in Total Transactions. Where a client's line dates have not been read yet, it shows every unreconciled line (marked 'all dates') and leaves it out of the total.">Bank (Unprocessed)</span></th>
           <th class="text-right"><span title="Posted manual journals">Journals</span></th>
         </tr>
       </thead>
@@ -132,7 +133,8 @@
           <td class="text-right">
             <% if (row.unprocessed_items != null) { %>
               <div style="<%= row.unprocessed_stale ? 'color: var(--text-muted);' : '' %>"><%= fmtN(row.unprocessed_items) %></div>
-              <div class="text-muted" style="font-size: 0.7rem;"><%= row.unprocessed_stale ? 'old reading, ' : '' %>read <%= row.unprocessed_read_at.slice(0, 10).split('-').reverse().join('/') %></div>
+              <% if (row.unprocessed_dated) { %><div class="text-muted" style="font-size: 0.75rem;"><%= perMth(row.unprocessed_items, mth) %></div><% } %>
+              <div class="text-muted" style="font-size: 0.7rem;" title="<%= row.unprocessed_dated ? 'Unreconciled statement lines dated in this period, from the lines read from Xero. Included in Total Transactions.' : 'The dates of the unreconciled lines have not all been read yet, so this is every unreconciled line, whatever its date, and it is not in Total Transactions. Update the client from Xero to read them.' %>"><%= row.unprocessed_stale ? 'old reading, ' : '' %><%= row.unprocessed_dated ? '' : 'all dates, ' %>read <%= row.unprocessed_read_at.slice(0, 10).split('-').reverse().join('/') %></div>
             <% } else { %><span class="text-muted" title="Not read from Xero yet">—</span><% } %>
           </td>
           <% const journalCount = row.manual_journals != null ? row.manual_journals : row.journals; %>

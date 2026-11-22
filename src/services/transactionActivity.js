@@ -98,14 +98,17 @@ function buildDailyActivity({ invoices = [], credits = [], bankTransactions = []
       day.turnover += -net; // a credit (negative) to a revenue account is revenue
     }
   }
-  // Payments against invoices and bills. Other payment kinds (refunds of credit notes, prepayments and
-  // overpayments) are counted apart, so they can be compared with Xenon before deciding where they belong.
+  // Payments against invoices and bills, and cash refunds of credit notes, overpayments and prepayments: each is
+  // a line on the bank statement. Xenon counts a customer refund (ARCREDITPAYMENT) as a Customer Payment (checked
+  // against Xenon's Client Panorama, 22 Nov 2026); supplier-side refunds (AP...) follow the same rule. Anything
+  // else is still counted apart.
   for (const payment of payments) {
     if (payment.status !== 'AUTHORISED') continue;
     const day = at(payment.date);
     if (!day) continue;
-    if (payment.paymentType === 'ACCRECPAYMENT') day.customer_payments += 1;
-    else if (payment.paymentType === 'ACCPAYPAYMENT') day.supplier_payments += 1;
+    const kind = paymentSide(payment.paymentType);
+    if (kind === 'customer') day.customer_payments += 1;
+    else if (kind === 'supplier') day.supplier_payments += 1;
     else day.other_payments += 1;
   }
   // Payments made out of a revenue account: the sync's own rule, applied one day at a time.
@@ -133,6 +136,15 @@ function buildDailyActivity({ invoices = [], credits = [], bankTransactions = []
   return { rows, journalsKnown: Array.isArray(journals) };
 }
 
+// Which side of the business a Xero payment is on: customer (money in from, or refunded to, a customer) or supplier.
+const CUSTOMER_PAYMENT_TYPES = new Set(['ACCRECPAYMENT', 'ARCREDITPAYMENT', 'AROVERPAYMENTPAYMENT', 'ARPREPAYMENTPAYMENT']);
+const SUPPLIER_PAYMENT_TYPES = new Set(['ACCPAYPAYMENT', 'APCREDITPAYMENT', 'APOVERPAYMENTPAYMENT', 'APPREPAYMENTPAYMENT']);
+function paymentSide(type) {
+  if (CUSTOMER_PAYMENT_TYPES.has(type)) return 'customer';
+  if (SUPPLIER_PAYMENT_TYPES.has(type)) return 'supplier';
+  return 'other';
+}
+
 const bankProcessedOf = row => (Number(row.customer_payments) || 0) + (Number(row.supplier_payments) || 0)
   + (Number(row.direct_deposits) || 0) + (Number(row.direct_payments) || 0) + (Number(row.transfers) || 0);
 
@@ -156,4 +168,4 @@ function sumActivity(rows, period, { journalsKnown = true } = {}) {
   };
 }
 
-module.exports = { buildDailyActivity, sumActivity, COUNT_FIELDS, bankProcessedOf };
+module.exports = { buildDailyActivity, sumActivity, COUNT_FIELDS, bankProcessedOf, paymentSide };

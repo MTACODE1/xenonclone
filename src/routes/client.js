@@ -35,7 +35,7 @@ const { resolveCheckDisplayStatus, isCapitalDefaultAccount, NON_SCORED_CHECKS } 
 const { calculateScoreBreakdown } = require('../services/scoreProfile');
 const { fetchCompanyProfile, normalizeCompanyNumber } = require('../services/companiesHouse');
 const {
-  periodInput, resolvePeriod, shouldUseCacheOnlyForReanalysis,
+  periodInput, resolvePeriod, shouldUseCacheOnlyForReanalysis, periodMenu, storedPeriodLabel,
   isNormalPeriod, periodKeyLabel,
 } = require('../services/periodResolver');
 const { startJob } = require('../services/syncJobs');
@@ -72,18 +72,28 @@ function selectedPeriodFor(org, query = {}) {
       start: org.period_start,
       end: org.period_end,
       key: org.period_key,
-      label: org.period_label || `${org.period_start} to ${org.period_end}`,
+      label: storedPeriodLabel(org),
       monthsCovered: 1,
     });
   }
   const fallback = org.period_type || getSetting('default_sync_period') || 'since_lock_date';
+  return resolvePeriod(periodInput(query, fallback), periodContextFor(org));
+}
+
+// What a client's periods are worked out from: its review start (lock date or signed accounts) and year end.
+function periodContextFor(org) {
   const reviewFrom = getReviewFrom(org);
-  return resolvePeriod(periodInput(query, fallback), {
+  return {
     lockDate: reviewFrom.date,
     lockSource: reviewFrom.source,
     financialYearEndDay: org.financial_year_end_day,
     financialYearEndMonth: org.financial_year_end_month,
-  });
+  };
+}
+
+// The period dropdown with this client's own dates; never lets a bad year end break the page.
+function periodMenuFor(org) {
+  try { return periodMenu(periodContextFor(org)); } catch (error) { return null; }
 }
 
 // "Show data up to" on the Insight tab: a real date, not in the future. Anything else means "latest".
@@ -156,9 +166,9 @@ function clientViewData(liveOrg, query = {}) {
     return { ...merged, displayStatus: resolveCheckDisplayStatus(merged) };
   });
   return {
-    org, issues, checkDefs, selectedPeriod, periodQuery,
+    org, issues, checkDefs, selectedPeriod, periodQuery, periodMenu: periodMenuFor(liveOrg),
     // Set while another period is on screen: what the client's normal period is, and when the view was worked out.
-    periodView: view ? { normalLabel: liveOrg.period_label || liveOrg.period_key, builtAt: view.builtAt } : null,
+    periodView: view ? { normalLabel: storedPeriodLabel(liveOrg), builtAt: view.builtAt } : null,
     isStale: !org.last_successful_sync_at ||
       Date.now() - new Date(org.last_successful_sync_at).getTime() > 36 * 60 * 60 * 1000,
     // Any period, added up from the per-day figures; the last sync's stored totals only if there are none yet.
@@ -579,11 +589,11 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
     // While another period is on screen every link and form on the page carries it, so paging, filtering and
     // reviewing stay in that period.
     viewQuery: viewQueryString(viewedPeriod, view),
-    periodView: view ? { label: viewedPeriod.label, normalLabel: org.period_label || org.period_key } : null,
+    periodView: view ? { label: viewedPeriod.label, normalLabel: storedPeriodLabel(org) } : null,
     // "Period checked" in words: the label of the period that key belongs to, else the key's dates.
     periodCheckedLabel: !issue?.period_checked ? null
       : issue.period_checked === viewedPeriod.key ? viewedPeriod.label
-        : issue.period_checked === org.period_key && org.period_label ? org.period_label
+        : issue.period_checked === org.period_key && org.period_label ? storedPeriodLabel(org)
           : periodKeyLabel(issue.period_checked),
     org, issue, def, items, pagination, previousItems, previousPagination, summary, status, contact, checkType, checkDescriptions, groupSupplierTransactions,
     displayStatus: issue ? resolveCheckDisplayStatus(issue) : null, ...extraData,

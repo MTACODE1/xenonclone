@@ -1,12 +1,23 @@
 const PERIOD_TYPES = Object.freeze([
   'since_lock_date',
+  'all_transactions',
   'current_month',
   'previous_month',
+  'previous_month_and_earlier',
   'rolling_12_months',
+  'rolling_24_months',
+  // Xenon's three "Quarter Ended" options: the three months ending this month, last month and the month before.
+  'quarter_ended_0',
+  'quarter_ended_1',
+  'quarter_ended_2',
   'current_fy',
   'previous_fy',
+  'previous_fy_2',
   'custom',
 ]);
+
+// The earliest date any period reaches back to ("All transactions", or no Xero lock date).
+const EARLIEST = '2000-01-01';
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -52,31 +63,47 @@ function resolvePeriod(input = {}, context = {}) {
   let label;
 
   if (type === 'since_lock_date') {
-    start = isoDate(context.lockDate) || '2000-01-01';
+    start = isoDate(context.lockDate) || EARLIEST;
     // Xenon's wording and UK date order ("Since Xero Lock Date (31/10/2025)"). Where Abdur's rule starts the review at
     // the last signed accounts instead (later than Xero's lock date), the label says so rather than naming a date
     // that is not Xero's lock date.
     label = !context.lockDate ? `All transactions to ${ukDate(end)} (no Xero lock date)`
       : context.lockSource === 'signed_accounts' ? `Since last signed accounts (${ukDate(start)})` : `Since Xero Lock Date (${ukDate(start)})`;
+  } else if (type === 'all_transactions') {
+    start = EARLIEST;
+    label = `All transactions (to ${ukDate(end)})`;
   } else if (type === 'current_month') {
     start = `${asOf.slice(0, 7)}-01`;
-    label = `Current month (${start} to ${end})`;
-  } else if (type === 'previous_month') {
+    label = `Current month (${ukDate(start)} to ${ukDate(end)})`;
+  } else if (type === 'previous_month' || type === 'previous_month_and_earlier') {
     const previous = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-    start = formatDate(previous);
     end = monthEnd(previous.getUTCFullYear(), previous.getUTCMonth());
-    label = `Previous month (${start} to ${end})`;
-  } else if (type === 'rolling_12_months') {
-    const prior = new Date(Date.UTC(now.getUTCFullYear() - 1, now.getUTCMonth(), now.getUTCDate()));
+    if (type === 'previous_month') {
+      start = formatDate(previous);
+      label = `Previous month (${ukDate(start)} to ${ukDate(end)})`;
+    } else {
+      start = EARLIEST;
+      label = `Previous month and earlier (to ${ukDate(end)})`;
+    }
+  } else if (type === 'rolling_12_months' || type === 'rolling_24_months') {
+    const years = type === 'rolling_12_months' ? 1 : 2;
+    const prior = new Date(Date.UTC(now.getUTCFullYear() - years, now.getUTCMonth(), now.getUTCDate()));
     start = addDays(formatDate(prior), 1);
-    label = `Rolling 12 months (${start} to ${end})`;
+    label = `Rolling ${years * 12} months (${ukDate(start)} to ${ukDate(end)})`;
+  } else if (type.startsWith('quarter_ended_')) {
+    // Like Xenon: "Quarter Ended 30/11/2026" while November is still running covers September up to today.
+    const back = Number(type.slice(-1));
+    const quarterEnd = monthEnd(now.getUTCFullYear(), now.getUTCMonth() - back);
+    start = formatDate(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - back - 2, 1)));
+    end = quarterEnd < asOf ? quarterEnd : asOf;
+    label = `Quarter ended ${ukDate(quarterEnd)} (${ukDate(start)} to ${ukDate(end)})`;
   } else if (type === 'custom') {
     start = isoDate(input.from);
     end = isoDate(input.to);
     if (!start || !end) throw new Error('Custom period requires valid YYYY-MM-DD start and end dates');
     if (start > end) throw new Error('Custom period start date must not be after its end date');
     if (end > asOf) throw new Error('Custom period end date must not be in the future');
-    label = `Custom (${start} to ${end})`;
+    label = `Custom (${ukDate(start)} to ${ukDate(end)})`;
   } else {
     const month = Math.min(12, Math.max(1, Number(context.financialYearEndMonth) || 3));
     const day = Math.min(31, Math.max(1, Number(context.financialYearEndDay) || 31));
@@ -91,12 +118,14 @@ function resolvePeriod(input = {}, context = {}) {
     if (type === 'current_fy') {
       start = currentStart;
       end = asOf < currentEnd ? asOf : currentEnd;
-      label = `Current financial year (${start} to ${end})`;
+      label = `Year ended ${ukDate(currentEnd)} (${ukDate(start)} to ${ukDate(end)})`;
     } else {
-      const previousPriorEnd = clampFinancialYearEnd(currentEndYear - 2, month, day);
-      start = addDays(previousPriorEnd, 1);
-      end = priorEnd;
-      label = `Previous financial year (${start} to ${end})`;
+      // previous_fy: the year that ended last; previous_fy_2: the one before it.
+      const back = type === 'previous_fy' ? 1 : 2;
+      const yearEnd = back === 1 ? priorEnd : clampFinancialYearEnd(currentEndYear - 2, month, day);
+      start = addDays(clampFinancialYearEnd(currentEndYear - back - 1, month, day), 1);
+      end = yearEnd;
+      label = `Year ended ${ukDate(yearEnd)} (${ukDate(start)} to ${ukDate(end)})`;
     }
   }
 
@@ -107,15 +136,53 @@ function resolvePeriod(input = {}, context = {}) {
     end,
     key: `${type}:${start}:${end}`,
     label,
-    monthsCovered: Math.max(1 / 31, (utcDate(end) - utcDate(start) + 86400000) / (365.2425 / 12 * 86400000)),
+    // Whole months, as Xenon's "/mth" figures use: a year is 12 (not 11.99), a month that has only started is 1.
+    // Checked against Xenon's Client Panorama, 22 Nov 2026.
+    monthsCovered: Math.max(1, Math.round((utcDate(end) - utcDate(start) + 86400000) / (365.2425 / 12 * 86400000))),
   });
 }
 
 // A stored period key ("since_lock_date:2025-09-30:2026-11-21") in words, for screens that only have the key.
 const KEY_WORDS = {
-  current_month: 'Current month', previous_month: 'Previous month', rolling_12_months: 'Rolling 12 months',
-  current_fy: 'Current financial year', previous_fy: 'Previous financial year', custom: 'Custom',
+  all_transactions: 'All transactions', current_month: 'Current month', previous_month: 'Previous month',
+  previous_month_and_earlier: 'Previous month and earlier', rolling_12_months: 'Rolling 12 months',
+  rolling_24_months: 'Rolling 24 months', quarter_ended_0: 'Quarter', quarter_ended_1: 'Quarter',
+  quarter_ended_2: 'Quarter', current_fy: 'Current financial year', previous_fy: 'Previous financial year',
+  previous_fy_2: 'Financial year', custom: 'Custom',
 };
+
+// The period dropdown in Xenon's order, each option naming this client's own dates where Xenon does
+// ("Quarter Ended 30/11/2026", "Year Ended 30/09/2026", "Since Xero Lock Date (30/09/2025)"). The full date range
+// of every option is in `title` (shown on hover). `context` is what resolvePeriod takes.
+const MENU_ORDER = ['all_transactions', 'current_month', 'previous_month', 'previous_month_and_earlier',
+  'rolling_12_months', 'rolling_24_months', 'quarter_ended_0', 'quarter_ended_1', 'quarter_ended_2',
+  'current_fy', 'previous_fy', 'previous_fy_2', 'since_lock_date', 'custom'];
+const MENU_WORDS = {
+  all_transactions: 'All transactions', current_month: 'Current Month', previous_month: 'Previous Month',
+  previous_month_and_earlier: 'Previous Month (and Earlier)', rolling_12_months: 'Rolling 12 months',
+  rolling_24_months: 'Rolling 24 months',
+};
+// Any YYYY-MM-DD in a label written as DD/MM/YYYY. Labels saved by syncs before 22 Nov 2026 can hold YYYY-MM-DD.
+const ukDatesIn = text => String(text == null ? '' : text).replace(/\b(\d{4})-(\d{2})-(\d{2})\b/g, '$3/$2/$1');
+
+// A client's normal period in words, from what its last sync saved.
+function storedPeriodLabel(org) {
+  if (!org) return '';
+  return org.period_label ? ukDatesIn(org.period_label) : periodKeyLabel(org.period_key);
+}
+
+function periodMenu(context = {}) {
+  return MENU_ORDER.map(type => {
+    if (type === 'custom') return { value: type, label: 'Custom Date Range', title: 'Choose the start and end dates' };
+    const period = resolvePeriod({ type }, context);
+    let label = MENU_WORDS[type];
+    if (!label) {
+      const ended = /^(Quarter|Year) ended (\S+)/.exec(period.label);
+      label = ended ? `${ended[1]} Ended ${ended[2]}` : period.label;
+    }
+    return { value: type, label, title: period.label };
+  });
+}
 function periodKeyLabel(key) {
   const match = /^([a-z_0-9]+):(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$/.exec(String(key || ''));
   if (!match) return String(key || '').replace(/_/g, ' ');
@@ -184,6 +251,10 @@ function firstCountedDay(period) {
 
 module.exports = {
   firstCountedDay,
+  periodMenu,
+  storedPeriodLabel,
+  ukDate,
+  ukDatesIn,
   periodKeyLabel,
   PERIOD_TYPES,
   isWithinPatternWindow,
