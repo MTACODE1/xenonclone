@@ -1,0 +1,875 @@
+// The checks a Zoho Books client gets on top of the shared document checks (ledgerChecks.js), worked out from
+// the accounting data the Zoho sync reads (docs/zoho-data-contract.md): the chart of accounts, tax rates, manual
+// journals, invoice and bill line items, expenses and bank details. Xero clients never come here, so their checks
+// and pages stay exactly as they were.
+//
+// The Xero check logic is reused wherever it is a function (journalChecks, checkRules). Zoho lines name their
+// account by accountID (Zoho account codes are usually blank), while those functions key accounts by `code`, so
+// they are given a copy of the chart and the lines keyed by accountID ("rekeyed"), and the rows they return are
+// given back the account's real code and name for the page.
+//
+// region 'AE' (a UAE company, see uaeRules.regionOf) swaps every UK-specific rule for its UAE version: AED
+// thresholds, the FTA instead of HMRC, UAE VAT exemptions and reverse charge, no UK VAT schemes. Checks the UAE
+// rules say do not apply are marked 'not_applicable_uae'.
+//
+// Nothing here reads a database or calls Zoho: ledgerChecks passes everything in, and persists what comes back.
+const {
+  isUnderMinimumItem, isExpenseAccountLine, grossLineAmount, netLineAmount, toDateString, sumAbsoluteExposure,
+  findDirectMatches, findMisallocatedLines, isVagueAccountName, monitoredMisallocatedExpenseCodes,
+  monitoredMisallocatedRevenueCodes, effectiveMisallocatedThreshold, resolveMisallocatedItemsDefaultThreshold,
+  isCapitalDefaultAccount, effectiveCapitalThreshold, resolveCapitalReviewDefaultThreshold, isLowCostFixedAssetLine,
+  isPurchaseTaxExemptAccount, dropTaxMissingNoise, PURCHASE_TAX_NOISE_ACCOUNT_NAME, INTEREST_INCOME_ACCOUNT_NAME,
+  previousMonthsStart, isWithinPreviousMonths, withPreviousMonths, resolveSupplierPatternLookbackMonths,
+  resolveMultiAccountSuppliersMinValue, resolveMultiTaxSuppliersMinValue, PRACTICE_POLICY,
+} = require('./checkRules');
+const journalChecks = require('./journalChecks');
+const { isWithinPeriod, isWithinPatternWindow, resolvePeriod } = require('./periodResolver');
+const uae = require('./uaeRules');
+const { bankFeedOf, STALE_AFTER_DAYS } = require('./zohoBankScreenReading');
+const { NOT_APPLICABLE_PERIODS } = require('./periodStatus');
+
+// Reserved period_checked labels these checks use (periodStatus.js).
+const LABELS = Object.freeze({
+  unavailable: 'unavailable_zoho',            // Zoho's API cannot give the data (no reports, no balances)
+  bankAccess: 'needs_zoho_bank_access',       // the connection does not allow Zoho's banking data
+  expenseAccess: 'needs_zoho_expense_access', // the connection does not allow Zoho's expenses
+  notApplicableUae: 'not_applicable_uae',     // a UK-only rule, for a UAE company
+  notApplicableZoho: 'not_applicable_zoho',   // Zoho has no such data (e.g. contact defaults)
+});
+
+const ISSUE_DEFAULTS = Object.freeze({
+  bank_balance: 'critical', unreconciled_bank_items: 'critical', unprocessed_bank: 'critical',
+  opening_balance_differences: 'high', invoice_or_direct: 'medium', bill_or_direct: 'medium',
+  low_cost_fixed_assets: 'medium', capital_item_review: 'medium', misallocated_items: 'medium',
+  multi_account_suppliers: 'medium', multi_tax_suppliers: 'medium', unexpected_account_used: 'medium',
+  unexpected_tax_code_used: 'medium', sales_tax_missing: 'medium', purchase_tax_missing: 'medium',
+  sales_tax_on_bills: 'medium', purchase_tax_on_invoices: 'medium', inactive_contacts: 'low',
+  journal_revenue_vs_expense: 'medium', journal_vat_control: 'critical', journal_to_bank: 'critical',
+  journal_fixed_asset_to_expense: 'medium', suspense_open_balance: 'critical', tax_review_by_code: 'medium',
+  vat_scheme_threshold: 'critical', directors_loan_overdrawn: 'critical', dividend_status: 'medium',
+  historical_changes: 'medium', motor_vehicle_expenses: 'medium', bank_statements_review: 'high',
+});
+
+const round2 = value => Math.round((Number(value) || 0) * 100) / 100;
+const lower = value => String(value || '').trim().toLowerCase();
+
+function runZohoChecks({
+  org = {}, period, region = null, taxProfile = null, accounting, invoices = [], credits = [], contacts = [],
+  bankReading = null, money, now = new Date(),
+}) {
+  const issues = [];
+  const notes = [];
+  const isUae = region === 'AE';
+  const importanceOf = checkType => (isUae && checkType === 'directors_loan_overdrawn' ? 'medium' : ISSUE_DEFAULTS[checkType]);
+  const push = (checkType, { count, value = 0, items = [], periodChecked }) => issues.push({
+    check_type: checkType, importance: importanceOf(checkType),
+    count, potential_value_gbp: value, detail_json: JSON.stringify(items), period_checked: periodChecked,
+  });
+  // Not applicable carries 0 (it ran, nothing applies); unavailable and "needs set-up" carry null, as in Xero.
+  const mark = (checkType, label) => push(checkType, { count: NOT_APPLICABLE_PERIODS.has(label) ? 0 : null, periodChecked: label });
+  // A check that throws leaves no result, so the page shows "Not synced" rather than a false OK (as in xeroSync.js).
+  const attempt = (name, fn) => {
+    try { fn(); } catch (error) { console.error(`[zohoChecks] ${name} failed — skipping (will show as "Not synced"):`, error.message); }
+  };
+
+  const accounts = Array.isArray(accounting?.accounts) ? accounting.accounts : [];
+  const taxRates = Array.isArray(accounting?.taxRates) ? accounting.taxRates : [];
+  const allJournals = Array.isArray(accounting?.manualJournals) ? accounting.manualJournals : [];
+  const bankRows = Array.isArray(accounting?.bankTransactions) ? accounting.bankTransactions : [];
+  const readStatus = accounting?.readStatus || null;
+  const permissions = readStatus?.permissions || {};
+
+  // ---- Accounts, keyed by Zoho's accountID ----
+  const accountById = new Map();
+  const idByCode = new Map();
+  for (const account of accounts) {
+    if (!account || account.accountID == null) continue;
+    accountById.set(String(account.accountID), account);
+    if (account.code) idByCode.set(String(account.code).toUpperCase(), String(account.accountID));
+  }
+  // A line's account id: its accountID, else the account its code names (bills can carry only a code).
+  const idOfLine = line => {
+    if (!line) return null;
+    if (line.accountID != null && line.accountID !== '') return String(line.accountID);
+    return line.accountCode ? idByCode.get(String(line.accountCode).toUpperCase()) || null : null;
+  };
+  // What a row shows: the account's code when it has one, else its name (Zoho codes are usually blank).
+  const shown = id => {
+    const account = id ? accountById.get(String(id)) : null;
+    if (!account) return { accountCode: null, accountName: null, accountID: id || null };
+    return account.code
+      ? { accountCode: account.code, accountName: account.name || null, accountID: account.accountID }
+      : { accountCode: account.name || null, accountName: null, accountID: account.accountID };
+  };
+  const nameOf = id => accountById.get(String(id))?.name || '';
+  const idsWhere = test => new Set([...accountById.values()].filter(test).map(account => String(account.accountID)));
+  const revenueIds = idsWhere(a => a._class === 'REVENUE');
+  const expenseIds = idsWhere(a => a._class === 'EXPENSE');
+  const fixedIds = idsWhere(a => a.type === 'FIXED');
+  const classById = new Map([...accountById].map(([id, a]) => [id.toUpperCase(), a._class]));
+  const nameById = Object.fromEntries([...accountById].map(([id, a]) => [id, a.name || '']));
+  // The chart as the Xero helpers expect it: code = accountID. VAT accounts are marked as Xero marks its own
+  // ("GST") so the VAT journal check finds them; Zoho does not mark them, and "Input VAT" is an asset there.
+  const rekeyedAccounts = [...accountById.values()].map(account => ({
+    ...account, code: String(account.accountID),
+    systemAccount: uae.VAT_ACCOUNT_NAME.test(account.name || '') ? 'GST' : (account.systemAccount || ''),
+  }));
+  const rekeyLines = lines => (lines || []).map(line => ({ ...line, accountCode: idOfLine(line) }));
+  const rekeyDoc = doc => ({ ...doc, lineItems: rekeyLines(doc.lineItems) });
+
+  // ---- Documents ----
+  const isOpening = doc => Boolean(doc && doc.isOpeningBalance);
+  const posted = doc => ['AUTHORISED', 'PAID'].includes(doc.status);
+  const accrec = invoices.filter(doc => doc.type === 'ACCREC' && posted(doc) && !isOpening(doc));
+  const accpay = invoices.filter(doc => doc.type === 'ACCPAY' && posted(doc) && !isOpening(doc));
+  const expenses = bankRows.filter(row => row && row.source === 'zoho_expense' && row.status === 'AUTHORISED');
+  const statementLines = bankRows.filter(row => row && row.source === 'zoho_uncategorized');
+  const journals = allJournals.filter(journal => journal && journal.status === 'POSTED');
+  const dateOf = item => toDateString(item.date);
+  const inPeriod = items => items.filter(item => isWithinPeriod(dateOf(item), period));
+  const previousStart = previousMonthsStart(period);
+  const inPrevious = items => items.filter(item => isWithinPreviousMonths(dateOf(item), period, previousStart));
+  const scopes = {
+    period: { docs: inPeriod, label: 'period' },
+    previous: { docs: inPrevious, label: 'previous' },
+  };
+  // Expenses are only there when the connection allows them; refused, the checks that need them say so.
+  const expensesRefused = permissions.expenses === false;
+  const bankingRefused = permissions.banking === false;
+
+  // Documents in the period whose lines have not been read yet (the per-sync read cap): the line checks cannot
+  // see them this time. Said once, so a low count is never taken for a clean result without explanation.
+  const unreadInPeriod = inPeriod([...accrec, ...accpay]).filter(doc => doc.lineItemsRead === false).length
+    + inPeriod(expenses).filter(doc => doc.lineItemsRead === false).length
+    + inPeriod(journals).filter(journal => journal.linesRead === false).length;
+  if (unreadInPeriod) notes.push(`${unreadInPeriod} Zoho Books document(s) in the period have no line items read yet (read cap); the line checks will include them after the next sync.`);
+
+  // ---- Money ----
+  // A line's net amount in the document's own currency (Xero's convention: Inclusive lines hold the gross).
+  const docNet = (doc, line) => (doc.lineAmountTypes === 'Inclusive'
+    ? (Number(line.lineAmount) || 0) - (Number(line.taxAmount) || 0)
+    : Number(line.lineAmount) || 0);
+  const hasRate = doc => Number(doc && doc.currencyRate) > 0;
+  const cannotConvert = doc => Boolean(money.foreignCode(doc)) && !hasRate(doc);
+  // The same net in the client's currency (null when it cannot be converted): compared against thresholds.
+  const baseNet = (doc, line) => (cannotConvert(doc) ? null : netLineAmount(doc, line));
+  const baseGross = (doc, line) => (cannotConvert(doc) ? null : grossLineAmount(doc, line));
+  // A row's figure: its own currency, with the converted figure beside it (as the document checks show it).
+  const lineRow = (doc, line, extra = {}) => {
+    const amount = round2(docNet(doc, line));
+    return { amount, ...money.currencyFields(doc, amount), ...extra };
+  };
+  const rowValue = row => (row.noExchangeRate ? 0 : typeof row.baseAmount === 'number' ? row.baseAmount : Number(row.amount) || 0);
+  const exposure = rows => sumAbsoluteExposure(rows.filter(row => !row.displayOnly), rowValue);
+  const docRef = doc => doc.invoiceID
+    ? { invoiceId: doc.invoiceID, number: doc.invoiceNumber || null, type: doc.type, source: doc.type === 'ACCREC' ? 'invoice' : 'bill' }
+    : { bankTransactionId: doc.bankTransactionID, number: doc.reference || null, source: 'expense' };
+  const taxNameById = new Map(taxRates.map(rate => [String(rate.taxType), rate.name || rate.taxType]));
+  const taxLabel = line => {
+    if (!line.taxType || line.taxType === 'NONE') return uae.isExemptLine(line) ? 'Exempt / out of scope' : 'No VAT';
+    return line.taxName || taxNameById.get(String(line.taxType)) || String(line.taxType);
+  };
+  const ratePercent = line => {
+    if (line.taxPercentage != null && Number.isFinite(Number(line.taxPercentage))) return Number(line.taxPercentage);
+    const rate = taxRates.find(r => String(r.taxType) === String(line.taxType));
+    return rate && rate.effectiveRate != null ? Number(rate.effectiveRate) : null;
+  };
+  const vatRegistered = uae.isVatRegistered(taxProfile, taxRates);
+  const accountsKnown = accountById.size > 0;
+  const todayIso = now.toISOString().slice(0, 10);
+
+  // =============================== Coding checks (line items) ===============================
+
+  // Multi-Account Suppliers: the same rule as xeroSync.js (expense accounts only, items under 1 ignored, gross,
+  // the review period only, value = the in-period amount outside the supplier's main account), on bills and
+  // expenses. Vendor credits are not included: Zoho's vendor credit list has no lines.
+  attempt('multi_account_suppliers', () => {
+    if (!accountsKnown) throw new Error('chart of accounts not read');
+    const lookback = PRACTICE_POLICY.multiAccountLookbackMonths;
+    const floor = new Date(`${period.start}T00:00:00Z`);
+    floor.setUTCMonth(floor.getUTCMonth() - lookback);
+    const patternStart = [period.start, floor.toISOString().slice(0, 10)].filter(Boolean).sort()[0];
+    const inWindow = items => items.filter(item => isWithinPatternWindow(dateOf(item), period, patternStart));
+    const suppliers = new Map();
+    const record = (doc, line, inScope) => {
+      const contactId = doc.contact?.contactID;
+      const id = idOfLine(line);
+      if (!contactId || !id || !isExpenseAccountLine(id, classById)) return;
+      const gross = baseGross(doc, line);
+      if (gross == null || isUnderMinimumItem(gross)) return;
+      const amount = Math.abs(gross);
+      const entry = suppliers.get(contactId) || { name: doc.contact?.name || null, amounts: {}, inPeriod: {}, transactions: [] };
+      if (inScope) {
+        entry.amounts[id] = (entry.amounts[id] || 0) + amount;
+        if (isWithinPeriod(dateOf(doc), period)) entry.inPeriod[id] = (entry.inPeriod[id] || 0) + amount;
+      }
+      entry.transactions.push({
+        date: dateOf(doc), reference: doc.reference || doc.invoiceNumber || null, description: line.description || null,
+        ...docRef(doc), inPeriod: inScope && isWithinPeriod(dateOf(doc), period), ...shown(id), amount,
+      });
+      suppliers.set(contactId, entry);
+    };
+    for (const doc of inWindow([...accpay, ...expenses])) for (const line of doc.lineItems || []) record(doc, line, true);
+    const minValue = resolveMultiAccountSuppliersMinValue(org, 0);
+    const flagged = [];
+    for (const [contactId, entry] of suppliers) {
+      const ids = Object.keys(entry.amounts);
+      if (ids.length <= 1 || !Object.keys(entry.inPeriod).length) continue;
+      const dominant = ids.reduce((a, b) => (entry.amounts[a] >= entry.amounts[b] ? a : b));
+      const value = Object.entries(entry.inPeriod).reduce((sum, [id, amount]) => (id !== dominant ? sum + amount : sum), 0);
+      if (value < minValue) continue;
+      flagged.push({ contactId, entry, ids, value });
+    }
+    // The 3 months before the period, listed for context for the flagged suppliers only.
+    const flaggedIds = new Set(flagged.map(f => f.contactId));
+    for (const doc of inPrevious([...accpay, ...expenses]).filter(d => !isWithinPatternWindow(dateOf(d), period, patternStart))) {
+      if (flaggedIds.has(doc.contact?.contactID)) for (const line of doc.lineItems || []) record(doc, line, false);
+    }
+    const items = flagged.map(({ contactId, entry, ids, value }) => ({
+      contactId, name: entry.name, accountCodes: ids.map(id => shown(id).accountCode), potentialValue: round2(value),
+      transactions: [...entry.transactions].sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))),
+    }));
+    push('multi_account_suppliers', {
+      count: items.length, value: items.reduce((sum, item) => sum + item.potentialValue, 0), items,
+      periodChecked: `supplier_pattern_from_${patternStart}_value_since_lock_date`,
+    });
+  });
+
+  // Multi-Tax Code Suppliers: as xeroSync.js (net, items under 1 ignored, a "No VAT" line counts as a code but adds
+  // no value, the client's supplier lookback), on bills and expenses. "Exempt / out of scope" is a code of its own.
+  attempt('multi_tax_suppliers', () => {
+    const lookbackMonths = resolveSupplierPatternLookbackMonths(org);
+    const floor = new Date(`${period.start}T00:00:00Z`);
+    floor.setUTCMonth(floor.getUTCMonth() - lookbackMonths);
+    const patternStart = [period.start, floor.toISOString().slice(0, 10)].filter(Boolean).sort()[0];
+    const inWindow = items => items.filter(item => { const d = dateOf(item); return d && d >= patternStart && d <= period.end; });
+    const isMileage = name => /^mileage(\s+expense)?$/i.test(String(name || '').trim());
+    const suppliers = new Map();
+    for (const doc of inWindow([...accpay, ...expenses])) {
+      const contactId = doc.contact?.contactID;
+      if (!contactId || isMileage(doc.contact?.name)) continue;
+      const entryInPeriod = isWithinPeriod(dateOf(doc), period);
+      for (const line of doc.lineItems || []) {
+        if (isUnderMinimumItem(line.lineAmount)) continue;
+        const net = baseNet(doc, line);
+        if (net == null) continue;
+        const code = taxLabel(line);
+        const amount = Math.abs(net);
+        const entry = suppliers.get(contactId) || { name: doc.contact?.name || null, amounts: {}, inPeriod: {}, transactions: [] };
+        entry.amounts[code] = (entry.amounts[code] || 0) + amount;
+        if (entryInPeriod) entry.inPeriod[code] = (entry.inPeriod[code] || 0) + amount;
+        entry.transactions.push({
+          date: dateOf(doc), reference: doc.reference || doc.invoiceNumber || null, ...docRef(doc),
+          inPeriod: entryInPeriod, taxCode: code, ...shown(idOfLine(line)), description: line.description || null, amount,
+        });
+        suppliers.set(contactId, entry);
+      }
+    }
+    const minValue = resolveMultiTaxSuppliersMinValue(org, 0);
+    const noValue = new Set(['No VAT', 'Exempt / out of scope']);
+    const items = [];
+    for (const [contactId, entry] of suppliers) {
+      const codes = Object.keys(entry.amounts);
+      if (codes.length <= 1 || !Object.keys(entry.inPeriod).length) continue;
+      const dominant = codes.reduce((a, b) => (entry.amounts[a] >= entry.amounts[b] ? a : b));
+      const value = Object.entries(entry.inPeriod).reduce((sum, [code, amount]) => (code !== dominant && !noValue.has(code) ? sum + amount : sum), 0);
+      if (value < minValue) continue;
+      items.push({
+        contactId, name: entry.name, taxCodes: codes, dominantTax: dominant, nonDominantValue: round2(value),
+        transactions: [...entry.transactions].sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))),
+      });
+    }
+    push('multi_tax_suppliers', {
+      count: items.length, value: items.reduce((sum, item) => sum + item.nonDominantValue, 0), items,
+      periodChecked: `supplier_pattern_from_${patternStart}_value_since_lock_date`,
+    });
+  });
+
+  // Purchase Tax Missing / Sales Tax Missing: a line with no VAT rate, a positive amount and an expense (or fixed
+  // asset) / income account, counted per line, items under 1 dropped (as xeroSync.js). A line exempt or out of
+  // scope on purpose, or under reverse charge, is not missing anything. UK names (payroll, bank fees, rent,
+  // mileage, interest) are skipped as in Xero; a UAE client uses the UAE list instead, which keeps rent and bank
+  // fees (both normally carry 5% in the UAE).
+  const missingTax = (doc, line) => (!line.taxType || line.taxType === 'NONE') && (Number(line.lineAmount) || 0) > 0
+    && !uae.isExemptLine(line) && !uae.isReverseChargeLine(doc, line);
+  attempt('purchase_tax_missing', () => {
+    if (!accountsKnown) throw new Error('chart of accounts not read');
+    if (!vatRegistered) return mark('purchase_tax_missing', 'not_vat_registered');
+    const inScope = id => id && (expenseIds.has(id) || fixedIds.has(id))
+      && (isUae ? !uae.UAE_PURCHASE_TAX_EXCLUDED_NAME.test(nameOf(id)) : !isPurchaseTaxExemptAccount(nameOf(id), new Set(), id));
+    const linesFor = scope => {
+      const rows = [];
+      for (const doc of scope.docs([...accpay, ...expenses])) {
+        // UAE: a supplier that is not VAT-registered charges no VAT, so its bills rightly carry none.
+        if (isUae && uae.isUnregisteredSupplier(doc)) continue;
+        // An import from outside the GCC with no VAT and no reverse charge is right for goods whose VAT was paid at
+        // customs, but not for services (they should be under reverse charge). Zoho does not say which, so these
+        // lines are listed for review and add no value.
+        const importReview = isUae && uae.isNonGccImport(doc);
+        for (const line of doc.lineItems || []) {
+          const id = idOfLine(line);
+          if (!missingTax(doc, line) || !inScope(id)) continue;
+          // Keyed by account id while the noise filter runs (it looks names up by accountCode), then shown.
+          rows.push(lineRow(doc, line, {
+            ...docRef(doc), contact: doc.contact?.name || null, date: dateOf(doc), accountCode: id, description: line.description || null,
+            ...(importReview ? {
+              level: 'review', rule: 'uae_import_no_vat', potentialValue: 0,
+              note: 'Import from outside the GCC with no VAT and no reverse charge: correct for goods if VAT was paid at customs; services should be under reverse charge.',
+            } : {}),
+          }));
+        }
+      }
+      return dropTaxMissingNoise(rows, {
+        minAmount: 1, nameByCode: new Map(Object.entries(nameById)),
+        skipName: isUae ? null : PURCHASE_TAX_NOISE_ACCOUNT_NAME, keepCodes: fixedIds,
+      }).map(row => ({ ...row, ...shown(row.accountCode) }));
+    };
+    const rows = linesFor(scopes.period);
+    push('purchase_tax_missing', {
+      count: rows.length, value: exposure(rows.filter(row => row.rule !== 'uae_import_no_vat')), items: withPreviousMonths(rows, linesFor(scopes.previous)), periodChecked: period.key,
+    });
+  });
+  attempt('sales_tax_missing', () => {
+    if (!accountsKnown) throw new Error('chart of accounts not read');
+    if (!vatRegistered) return mark('sales_tax_missing', 'not_vat_registered');
+    const linesFor = scope => {
+      const rows = [];
+      for (const doc of scope.docs(accrec)) {
+        for (const line of doc.lineItems || []) {
+          const id = idOfLine(line);
+          if (!missingTax(doc, line) || !id || !revenueIds.has(id)) continue;
+          rows.push(lineRow(doc, line, { ...docRef(doc), contact: doc.contact?.name || null, date: dateOf(doc), accountCode: id, description: line.description || null }));
+        }
+      }
+      return dropTaxMissingNoise(rows, {
+        minAmount: 1, nameByCode: new Map(Object.entries(nameById)),
+        skipName: isUae ? null : INTEREST_INCOME_ACCOUNT_NAME,
+      }).map(row => ({ ...row, ...shown(row.accountCode) }));
+    };
+    const rows = linesFor(scopes.period);
+    push('sales_tax_missing', {
+      count: rows.length, value: exposure(rows), items: withPreviousMonths(rows, linesFor(scopes.previous)), periodChecked: period.key,
+    });
+  });
+
+  // Sales Tax on Bills / Purchase Tax on Invoices compare Xero's sales-only and purchase-only tax codes. Zoho's
+  // tax rates are not split into sales and purchase rates (a UAE organisation uses the same 5% and 0% on both),
+  // so there is nothing to compare.
+  for (const checkType of ['sales_tax_on_bills', 'purchase_tax_on_invoices']) {
+    mark(checkType, isUae ? LABELS.notApplicableUae : LABELS.notApplicableZoho);
+  }
+  // Unexpected Account / Tax Code Used compare a line with the contact's default account or tax rate. Zoho Books
+  // contacts have none (the same reason Contact Defaults is not applicable).
+  for (const checkType of ['unexpected_account_used', 'unexpected_tax_code_used']) mark(checkType, LABELS.notApplicableZoho);
+
+  // Low Cost Fixed Assets and Capital Item Review: the practice's capitalisation threshold, GBP 2,000 for a UK
+  // client and AED 10,000 for a UAE one (no UAE law sets one; practice default, to be confirmed).
+  const capitalPolicy = isUae ? uae.UAE_POLICY.capitalisationThresholdAed : PRACTICE_POLICY.capitalisationThresholdGbp;
+  attempt('low_cost_fixed_assets', () => {
+    if (!accountsKnown) throw new Error('chart of accounts not read');
+    const itemsFor = scope => {
+      const rows = [];
+      for (const doc of scope.docs([...accpay, ...expenses])) {
+        for (const line of doc.lineItems || []) {
+          const id = idOfLine(line);
+          const net = baseNet(doc, line);
+          if (!id || !fixedIds.has(id) || net == null) continue;
+          const amount = Math.abs(net);
+          if (amount > 0 && amount <= capitalPolicy) {
+            rows.push(lineRow(doc, line, { ...docRef(doc), contact: doc.contact?.name || null, date: dateOf(doc), ...shown(id), description: line.description || null }));
+          }
+        }
+      }
+      return rows;
+    };
+    const rows = itemsFor(scopes.period);
+    push('low_cost_fixed_assets', {
+      count: rows.length, value: exposure(rows), items: withPreviousMonths(rows, itemsFor(scopes.previous)),
+      periodChecked: `fixed_asset_accounts_lte_${capitalPolicy}_since_lock_date`,
+    });
+  });
+  attempt('capital_item_review', () => {
+    if (!accountsKnown) throw new Error('chart of accounts not read');
+    // The practice default watch list (expense accounts that are not wages, rent, tax and so on), as for an
+    // unconfigured Xero client: Zoho accounts have no codes for the per-account settings page to key on yet.
+    const candidates = new Set([...accountById.values()].filter(a => isCapitalDefaultAccount(a)).map(a => String(a.accountID)));
+    if (!candidates.size) return mark('capital_item_review', 'not_configured');
+    const threshold = effectiveCapitalThreshold(null, resolveCapitalReviewDefaultThreshold(org, null), capitalPolicy);
+    const itemsFor = scope => {
+      const rows = [];
+      for (const doc of scope.docs([...accpay, ...expenses])) {
+        for (const line of doc.lineItems || []) {
+          const id = idOfLine(line);
+          const net = baseNet(doc, line);
+          if (!id || !candidates.has(id) || net == null) continue;
+          const amount = Math.abs(net);
+          if (amount >= threshold && !isLowCostFixedAssetLine(id, amount, fixedIds, capitalPolicy)) {
+            rows.push(lineRow(doc, line, { ...docRef(doc), contact: doc.contact?.name || null, date: dateOf(doc), ...shown(id), description: line.description || null }));
+          }
+        }
+      }
+      return rows;
+    };
+    const rows = itemsFor(scopes.period);
+    push('capital_item_review', { count: rows.length, value: exposure(rows), items: withPreviousMonths(rows, itemsFor(scopes.previous)), periodChecked: period.key });
+  });
+
+  // Misallocated Items: lines on catch-all accounts ("General Expenses", "Sundry"), with the same vague-name rule
+  // and the same 1 threshold as an unconfigured Xero client, on bills, expenses and invoices.
+  attempt('misallocated_items', () => {
+    if (!accountsKnown) throw new Error('chart of accounts not read');
+    const threshold = effectiveMisallocatedThreshold(null, resolveMisallocatedItemsDefaultThreshold(org, 1));
+    const expenseWatch = monitoredMisallocatedExpenseCodes([], expenseIds, nameById);
+    const revenueWatch = monitoredMisallocatedRevenueCodes([], revenueIds, nameById, true);
+    const byId = new Map([...accpay, ...accrec, ...expenses].map(doc => [doc.invoiceID || doc.bankTransactionID, doc]));
+    const itemsFor = scope => {
+      const usable = docs => scope.docs(docs).filter(doc => !cannotConvert(doc)).map(rekeyDoc);
+      return [
+        ...findMisallocatedLines(usable(accpay), expenseWatch, () => threshold, 'bill'),
+        ...findMisallocatedLines(usable(accrec), revenueWatch, () => threshold, 'invoice'),
+        ...findMisallocatedLines(usable(expenses), expenseWatch, () => threshold, 'expense'),
+      ].map(row => {
+        const doc = byId.get(row.invoiceId);
+        return { ...row, ...shown(row.accountCode), ...(doc && doc.bankTransactionID ? { bankTransactionId: doc.bankTransactionID } : {}) };
+      });
+    };
+    const rows = itemsFor(scopes.period);
+    push('misallocated_items', {
+      count: rows.length, value: exposure(rows), items: withPreviousMonths(rows, itemsFor(scopes.previous)),
+      periodChecked: `vague_account_fallback_gte_${threshold}_since_lock_date`,
+    });
+  });
+
+  // Invoice or Direct needs bank deposits coded straight to an income account. Zoho's API gives only the bank
+  // lines still waiting to be categorised (not coded yet), so there is nothing to match.
+  mark('invoice_or_direct', LABELS.unavailable);
+  // Bill or Direct: an expense (Zoho's "spend money") coded to an expense account while an unpaid bill from the same
+  // supplier for the same amount exists up to 30 days earlier: findDirectMatches, as for Xero's bank payments.
+  attempt('bill_or_direct', () => {
+    if (expensesRefused && !expenses.length) return mark('bill_or_direct', LABELS.expenseAccess);
+    if (!accountsKnown) throw new Error('chart of accounts not read');
+    const unpaidBills = invoices.filter(doc => doc.type === 'ACCPAY' && ((doc.status === 'AUTHORISED' && (doc.amountDue || 0) > 0) || doc.status === 'DRAFT'));
+    const matchesFor = scope => findDirectMatches(scope.docs(expenses).map(rekeyDoc), unpaidBills, expenseIds)
+      .map(({ transaction, document }) => ({
+        bankTransactionId: transaction.bankTransactionID, contact: transaction.contact?.name || null, date: dateOf(transaction),
+        amount: transaction.total, ...money.currencyFields(transaction, transaction.total),
+        invoiceId: document.invoiceID, invoiceNumber: document.invoiceNumber,
+      }));
+    const rows = matchesFor(scopes.period);
+    push('bill_or_direct', { count: rows.length, value: exposure(rows), items: withPreviousMonths(rows, matchesFor(scopes.previous)), periodChecked: 'since_lock_date' });
+  });
+
+  // =============================== Journal checks ===============================
+  // journalChecks.detectUnusualJournals on the posted manual journals, the chart keyed by accountID.
+  attempt('unusual journals', () => {
+    if (!accountsKnown) throw new Error('chart of accounts not read');
+    const rekeyJournals = list => list.map(journal => ({ ...journal, journalLines: rekeyLines(journal.journalLines) }));
+    const detect = list => journalChecks.detectUnusualJournals({ journals: rekeyJournals(list), accounts: rekeyedAccounts });
+    const back = item => ({
+      ...item, ...shown(item.accountCode),
+      ...(item.counterAccountCode ? { counterAccountCode: shown(item.counterAccountCode).accountCode } : {}),
+      ...(item.taxOnAccountCode ? { taxOnAccountCode: shown(item.taxOnAccountCode).accountCode, taxOnAccountName: nameOf(item.taxOnAccountCode) || null } : {}),
+      ...(item.taxType ? { taxType: taxNameById.get(String(item.taxType)) || item.taxType } : {}),
+      // Zoho's journal number, which is what the client sees in Zoho Books (Xero's has none).
+      number: allJournals.find(j => j.manualJournalID === item.documentId)?.entryNumber || item.number,
+    });
+    const current = detect(inPeriod(journals));
+    const previous = detect(inPrevious(journals));
+    for (const [checkType, items] of Object.entries(current)) {
+      const rows = items.map(back);
+      push(checkType, {
+        count: rows.length, value: sumAbsoluteExposure(rows),
+        items: withPreviousMonths(rows, (previous[checkType] || []).map(back)), periodChecked: 'since_lock_date',
+      });
+    }
+  });
+
+  // Suspense, the Director's (Shareholder's) Loan and Opening Balance Differences need account balances at a date.
+  // Zoho Books' API has no balance sheet or trial balance, and journals alone are not a balance, so no figure is
+  // made up: they are marked unavailable.
+  for (const checkType of ['suspense_open_balance', 'directors_loan_overdrawn', 'opening_balance_differences']) {
+    mark(checkType, LABELS.unavailable);
+  }
+  // Unreconciled Bank (Xero: posted transactions not yet reconciled). Zoho does not say which recorded
+  // transactions are reconciled; its bank lines waiting to be categorised are under Unprocessed Bank.
+  mark('unreconciled_bank_items', LABELS.unavailable);
+
+  // Dividends Status needs the year's profit (a P&L, which Zoho's API cannot give). For a UAE company it is not
+  // applicable anyway: no withholding tax and no filing on dividends.
+  mark('dividend_status', isUae ? LABELS.notApplicableUae : LABELS.unavailable);
+  // Historical Changes needs the date the accounts were filed (Companies House) or, in the UAE, the date a VAT
+  // return was filed or the accounts approved. Zoho's API does not give either date.
+  mark('historical_changes', LABELS.unavailable);
+
+  // Tax Review by Code: every line in the period grouped by VAT rate. A UAE client is also split by sales and
+  // purchases, exempt / out of scope and reverse charge, as the VAT return needs, with three review flags.
+  attempt('tax_review_by_code', () => {
+    const itemsFor = scope => {
+      const groups = new Map();
+      const add = (side, doc, line, net, tax) => {
+        const reverse = uae.isReverseChargeLine(doc, line);
+        const key = isUae ? `${side}|${taxLabel(line)}|${reverse ? 'rc' : ''}` : taxLabel(line);
+        const group = groups.get(key) || {
+          key, side, label: taxLabel(line), reverse, count: 0, net: 0, tax: 0,
+          taxType: line.taxType || 'NONE', flags: new Set(), emirates: new Map(),
+        };
+        group.count += 1;
+        group.net += Math.abs(net);
+        group.tax += Math.abs(tax);
+        if (isUae && side === 'sales') {
+          const pct = ratePercent(line);
+          if (pct === 5 && line.taxType && line.taxType !== 'NONE') {
+            if (!doc.placeOfSupply) group.flags.add('Standard-rated sales with no place of supply (emirate) on the invoice');
+            const emirate = doc.placeOfSupply || 'not set';
+            group.emirates.set(emirate, (group.emirates.get(emirate) || 0) + Math.abs(net));
+          }
+          if (pct === 0 && line.taxType && line.taxType !== 'NONE' && lower(doc.taxTreatment) === 'vat_registered') {
+            group.flags.add('Zero-rated sales to a UAE VAT-registered customer (domestic: zero rate is unusual)');
+          }
+        }
+        if (isUae && side === 'purchases' && reverse && lower(doc.taxTreatment) === 'vat_registered') {
+          group.flags.add('Reverse charge on a bill from a UAE VAT-registered supplier');
+        }
+        groups.set(key, group);
+      };
+      for (const [side, docs] of [['sales', accrec], ['purchases', [...accpay, ...expenses]]]) {
+        for (const doc of scope.docs(docs)) {
+          if (cannotConvert(doc)) continue;
+          const rate = hasRate(doc) ? Number(doc.currencyRate) : 1;
+          for (const line of doc.lineItems || []) add(side, doc, line, netLineAmount(doc, line), (Number(line.taxAmount) || 0) / rate);
+        }
+      }
+      for (const journal of scope.docs(journals)) {
+        for (const line of journal.journalLines || []) {
+          if (!line.taxType || line.taxType === 'NONE') continue;
+          add('journals', journal, line, Number(line.lineAmount) || 0, Number(line.taxAmount) || 0);
+        }
+      }
+      const unit = isUae ? 'AED ' : money.base === 'GBP' ? '£' : `${money.base} `;
+      return [...groups.values()].sort((a, b) => b.net - a.net).map(group => {
+        const flags = [...group.flags];
+        const bySide = isUae ? `${group.side === 'sales' ? 'Sales' : group.side === 'purchases' ? 'Purchases' : 'Journals'}: ` : '';
+        const emirates = group.emirates.size > 1 || (group.emirates.size === 1 && !group.emirates.has('not set'))
+          ? ` By emirate: ${[...group.emirates].map(([e, v]) => `${e} ${unit}${v.toFixed(2)}`).join(', ')}.` : '';
+        return {
+          documentId: `tax-code:${group.key}`, number: null, date: null, source: 'tax_review',
+          accountCode: group.label + (group.reverse ? ' (reverse charge)' : ''), accountName: bySide ? bySide.slice(0, -2) : group.label,
+          description: `${bySide}${group.count} line(s), net ${unit}${group.net.toFixed(2)}, VAT ${unit}${group.tax.toFixed(2)}.${emirates}${flags.length ? ` Review: ${flags.join('; ')}.` : ''}`,
+          amount: round2(group.net), lineCount: group.count, taxAmount: round2(group.tax),
+          ...(flags.length ? { level: 'review', rule: 'uae_tax_treatment_review' } : {}),
+        };
+      });
+    };
+    const rows = itemsFor(scopes.period);
+    push('tax_review_by_code', { count: rows.length, value: 0, items: withPreviousMonths(rows, itemsFor(scopes.previous)), periodChecked: 'since_lock_date' });
+  });
+
+  // VAT thresholds. UAE: the AED 375,000 / 187,500 VAT registration tests and Corporate Tax Small Business Relief.
+  // A UK Zoho client: Zoho does not say which VAT scheme (flat rate, cash, annual) the client uses, which is what
+  // the UK check is about, so it is not applicable.
+  attempt('vat_scheme_threshold', () => {
+    if (!isUae) return mark('vat_scheme_threshold', LABELS.notApplicableZoho);
+    if (!accountsKnown) throw new Error('chart of accounts not read');
+    const to = period.end < todayIso ? period.end : todayIso;
+    const fromDate = new Date(`${to}T00:00:00Z`);
+    fromDate.setUTCFullYear(fromDate.getUTCFullYear() - 1);
+    fromDate.setUTCDate(fromDate.getUTCDate() + 1);
+    const from = fromDate.toISOString().slice(0, 10);
+    const within = (doc, a, b) => { const d = dateOf(doc); return d && d >= a && d <= b; };
+    let unconverted = 0;
+    const lineNet = (doc, line) => { const v = baseNet(doc, line); if (v == null) unconverted += 1; return v || 0; };
+    // A document whose lines have not been read yet (the per-sync read cap) is counted at its net total from
+    // Zoho's list (the gross total when the list gives no net), so a backlog never hides turnover. Counted and said
+    // on the finding, because that figure cannot tell taxable from exempt lines.
+    const estimated = new Set();
+    const unreadNet = doc => {
+      if (cannotConvert(doc)) { unconverted += 1; return 0; }
+      estimated.add(doc.invoiceID);
+      const amount = doc.subTotal != null ? Number(doc.subTotal) : Number(doc.total) || 0;
+      return amount / (hasRate(doc) ? Number(doc.currencyRate) : 1);
+    };
+    const unread = doc => doc.lineItemsRead === false && !(doc.lineItems || []).length;
+    // Taxable supplies. A registered client: standard- (5%) and zero-rated (0%) sales lines, never exempt or
+    // out-of-scope ones. A client that is not registered has no VAT rates in Zoho at all, so every sales line on an
+    // income account that is not marked exempt or out of scope counts (its rate would be 5% or 0% once registered).
+    const taxableLine = line => {
+      if (uae.isExemptLine(line)) return false;
+      if (!vatRegistered) return revenueIds.has(idOfLine(line));
+      if (!line.taxType || line.taxType === 'NONE') return false;
+      const pct = ratePercent(line);
+      return pct === 5 || pct === 0;
+    };
+    let supplies = 0;
+    for (const doc of accrec.filter(d => within(d, from, to))) {
+      if (unread(doc)) { supplies += unreadNet(doc); continue; }
+      for (const line of doc.lineItems || []) if (taxableLine(line)) supplies += lineNet(doc, line);
+    }
+    // Sales credit notes, less: Zoho's credit note list has no lines, so its net total (or the gross total when
+    // Zoho gives no net figure) is taken off in full. A credit against an exempt sale should not be, so the amount
+    // taken off is shown on the finding for staff to check.
+    const creditNet = list => list.filter(c => c.type === 'ACCRECCREDIT' && posted(c)).reduce((sum, c) => {
+      const amount = c.subTotal != null ? Number(c.subTotal) : Number(c.total) || 0;
+      if (cannotConvert(c)) { unconverted += 1; return sum; }
+      return sum + amount / (hasRate(c) ? Number(c.currencyRate) : 1);
+    }, 0);
+    const rollingCredits = creditNet(credits.filter(c => within(c, from, to)));
+    supplies -= rollingCredits;
+    // Imports: bills from outside the UAE or under reverse charge.
+    for (const doc of accpay.filter(d => within(d, from, to) && uae.isImportDocument(d))) {
+      if (unread(doc)) { supplies += unreadNet(doc); continue; }
+      for (const line of doc.lineItems || []) supplies += lineNet(doc, line);
+    }
+    // Revenue for a financial year: income-account sales lines less credit notes.
+    const revenueBetween = (start, end) => {
+      let total = 0;
+      for (const doc of accrec.filter(d => within(d, start, end))) {
+        if (unread(doc)) { total += unreadNet(doc); continue; }
+        for (const line of doc.lineItems || []) if (revenueIds.has(idOfLine(line))) total += lineNet(doc, line);
+      }
+      return total - creditNet(credits.filter(c => within(c, start, end)));
+    };
+    let revenue = null;
+    let fy = null;
+    const priorRevenue = [];
+    try {
+      // The year end saved by the sync, else the one Zoho's fiscal_year_start_month gives (0 = January, so a year
+      // starting in month n ends in month n; 0 ends in December, as zoho/index.js financialYearEnd reads it).
+      const startMonth = taxProfile?.fiscalYearStartMonth == null ? null : Number(taxProfile.fiscalYearStartMonth);
+      const endMonth = Number(org.financial_year_end_month) || (Number.isInteger(startMonth) && startMonth >= 1 && startMonth <= 11 ? startMonth : 12);
+      const endDay = Number(org.financial_year_end_day) || new Date(Date.UTC(2001, endMonth, 0)).getUTCDate();
+      fy = resolvePeriod({ type: 'current_fy' }, { asOf: todayIso, financialYearEndMonth: endMonth, financialYearEndDay: endDay });
+      revenue = revenueBetween(fy.start, fy.end);
+      // Earlier years, as far back as the relief goes (tax periods starting on or after 1 June 2023), from the
+      // invoices Zoho Books holds: one year over AED 3m ends the relief for every later year.
+      let yearEnd = new Date(`${fy.start}T00:00:00Z`);
+      for (let guard = 0; guard < 10; guard += 1) {
+        yearEnd.setUTCDate(yearEnd.getUTCDate() - 1);
+        const end = yearEnd.toISOString().slice(0, 10);
+        const startDate = new Date(yearEnd);
+        startDate.setUTCFullYear(startDate.getUTCFullYear() - 1);
+        startDate.setUTCDate(startDate.getUTCDate() + 1);
+        const start = startDate.toISOString().slice(0, 10);
+        if (start < uae.SBR_FIRST_PERIOD_START) break;
+        priorRevenue.push({ fyEnd: end, revenue: revenueBetween(start, end) });
+        yearEnd = new Date(`${start}T00:00:00Z`);
+      }
+    } catch (error) {
+      revenue = null;
+    }
+    const items = uae.evaluateUaeThresholds({
+      taxableSupplies: supplies, registered: vatRegistered, revenue, priorRevenue, periodEnd: period.end,
+      isFreeZone: taxProfile?.isFreeZone ?? null, to, fyEnd: fy ? fy.end : null,
+    });
+    // Coverage notes on each finding: sales recorded only as bank deposits cannot be seen without bank access,
+    // documents not read yet are estimates, credit notes are taken off in full, and documents with no exchange
+    // rate are left out.
+    const caveats = [];
+    if (bankingRefused || !statementLines.length) caveats.push('Sales recorded only as bank deposits are not visible to Akrio, so turnover may be understated.');
+    if (estimated.size) caveats.push(`${estimated.size} invoice(s) or bill(s) whose lines Akrio has not read yet were counted at their total from Zoho Books (an estimate: exempt lines cannot be told apart until they are read at the next sync).`);
+    if (rollingCredits) caveats.push(`Sales credit notes of ${uae.aed(rollingCredits)} were taken off in full; check none of them were for exempt or out-of-scope sales.`);
+    if (unconverted) caveats.push(`${unconverted} line(s) in another currency with no exchange rate were left out.`);
+    caveats.push('The "next 30 days" test cannot be checked automatically.');
+    const rows = items.map(item => ({ ...item, description: `${item.description} ${caveats.join(' ')}` }));
+    push('vat_scheme_threshold', { count: rows.length, value: 0, items: rows, periodChecked: 'rolling_12_months' });
+  });
+
+  // Motor Vehicle Expenses: journalChecks.motorVehicleExpenses on bills, expenses and journals (no balance sheet,
+  // so a vehicle asset counts if it was ever posted to). UAE: also input VAT claimed on entertainment or on hiring,
+  // leasing or buying a car (blocked under the VAT Executive Regulation), as review items.
+  attempt('motor_vehicle_expenses', () => {
+    if (!accountsKnown) throw new Error('chart of accounts not read');
+    const docs = [...accpay, ...expenses].filter(doc => !cannotConvert(doc)).map(rekeyDoc);
+    const rekeyedJournals = journals.map(journal => ({ ...journal, journalLines: rekeyLines(journal.journalLines) }));
+    const vehicle = journalChecks.motorVehicleExpenses({
+      accounts: rekeyedAccounts, documents: docs, journals: rekeyedJournals, from: period.start, to: period.end, balanceSheet: null,
+    }).map(item => {
+      const doc = docs.find(d => (d.invoiceID || d.bankTransactionID) === item.id);
+      return {
+        ...item, ...shown(item.accountCode), source: doc && doc.bankTransactionID ? 'expense' : 'bill',
+        ...(doc && doc.bankTransactionID ? { bankTransactionId: doc.bankTransactionID } : { invoiceId: item.id }),
+      };
+    });
+    const blocked = [];
+    if (isUae) {
+      const blockedName = id => uae.UAE_ENTERTAINMENT_NAME.test(nameOf(id)) || uae.UAE_VEHICLE_NAME.test(nameOf(id));
+      const recoverable = line => !line.itcEligibility || lower(line.itcEligibility) === 'eligible';
+      for (const doc of inPeriod([...accpay, ...expenses])) {
+        if (cannotConvert(doc)) continue;
+        const rate = hasRate(doc) ? Number(doc.currencyRate) : 1;
+        (doc.lineItems || []).forEach((line, index) => {
+          const id = idOfLine(line);
+          const tax = Math.abs(Number(line.taxAmount) || 0) / rate;
+          if (!id || !blockedName(id) || !(tax > 0) || ratePercent(line) !== 5 || !recoverable(line)) return;
+          blocked.push({
+            documentId: `${doc.invoiceID || doc.bankTransactionID}:vat:${index}`, ...docRef(doc), date: dateOf(doc),
+            contactName: doc.contact?.name || null, ...shown(id), description: line.description || null,
+            amount: round2(tax), level: 'review', rule: 'uae_blocked_input_vat',
+            note: `Input VAT of AED ${tax.toFixed(2)} claimed on ${nameOf(id)}. It cannot be recovered on entertainment for non-employees or on a car available for personal use.`,
+          });
+        });
+      }
+      for (const journal of inPeriod(journals)) {
+        (journal.journalLines || []).forEach((line, index) => {
+          const id = idOfLine(line);
+          const tax = Math.abs(Number(line.taxAmount) || 0);
+          if (!id || !blockedName(id) || !(tax > 0) || ratePercent(line) !== 5) return;
+          blocked.push({
+            documentId: `${journal.manualJournalID}:vat:${index}`, id: journal.manualJournalID, number: journal.entryNumber || null,
+            source: 'manual_journal', date: dateOf(journal), ...shown(id), description: line.description || journal.narration || null,
+            amount: round2(tax), level: 'review', rule: 'uae_blocked_input_vat',
+            note: `Input VAT of AED ${tax.toFixed(2)} on a manual journal to ${nameOf(id)}.`,
+          });
+        });
+      }
+    }
+    const rows = [...vehicle, ...blocked].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    push('motor_vehicle_expenses', { count: rows.length, value: sumAbsoluteExposure(rows), items: rows, periodChecked: 'since_lock_date' });
+  });
+
+  // Inactive Contacts: as xeroSync.js, from the documents Akrio holds (invoices, bills, credit notes, journals,
+  // expenses and bank lines). Zoho's word is "Mark as Inactive". The window is 24 months, not 18, because
+  // contacts used only through banking are not visible while bank access is missing.
+  attempt('inactive_contacts', () => {
+    const months = uae.UAE_POLICY.inactiveContactMonths;
+    const last = new Map();
+    const note = (contactId, date) => { if (contactId && date && (!last.has(contactId) || date > last.get(contactId))) last.set(contactId, date); };
+    for (const doc of [...invoices, ...credits]) if (doc.status !== 'VOIDED' && doc.status !== 'DELETED') note(doc.contact?.contactID, dateOf(doc));
+    for (const row of bankRows) note(row.contact?.contactID, dateOf(row));
+    for (const journal of journals) for (const line of journal.journalLines || []) note(line.contact?.contactID, dateOf(journal));
+    const cutoffDate = new Date(`${period.end}T00:00:00.000Z`);
+    cutoffDate.setUTCMonth(cutoffDate.getUTCMonth() - months);
+    const cutoff = cutoffDate.toISOString().slice(0, 10);
+    const rows = [];
+    for (const contact of contacts) {
+      if (contact.contactStatus !== 'ACTIVE') continue;
+      const seen = last.get(contact.contactID) || null;
+      if (seen && seen >= cutoff) continue;
+      rows.push({ id: contact.contactID, name: contact.name, lastTransaction: seen || 'Never', basis: seen ? 'last transaction' : 'no transactions in Zoho Books' });
+    }
+    push('inactive_contacts', { count: rows.length, items: rows, periodChecked: `no_transaction_in_${months}_months_before_${period.end}` });
+  });
+
+  // =============================== Bank checks ===============================
+  // The bank figures come from Zoho's banking data when the connection allows it, else from the latest reading of
+  // Zoho Books' Banking page by the browser extension if it is under 7 days old. With neither, the check asks for
+  // Zoho to be reconnected with bank access (or the page to be read) rather than showing a false OK.
+  const bankAccounts = [...accountById.values()].filter(a => a.type === 'BANK' && a.status !== 'ARCHIVED');
+  const apiBank = !bankingRefused && bankAccounts.some(a => a.bank && !a.bank.stale);
+  const readingAgeDays = bankReading?.readAt ? (now.getTime() - new Date(bankReading.readAt).getTime()) / 86400000 : null;
+  const freshReading = Boolean(bankReading && Array.isArray(bankReading.accounts) && readingAgeDays != null && readingAgeDays <= STALE_AFTER_DAYS);
+  const asOfLabel = freshReading && !apiBank ? new Date(bankReading.readAt).toISOString().slice(0, 10) : todayIso;
+  const accountByName = new Map(bankAccounts.map(a => [lower(a.name), a]));
+  // The Banking page shows a foreign account's currency as Zoho prefixes it, often a symbol ("$", "US$", "£"),
+  // never converted. Its ISO code is taken from the matching account in the chart when there is one, else from the
+  // prefix when that is a code or an unambiguous symbol. Anything else stays as shown and counts as foreign, so a
+  // foreign difference is never added to the base-currency total as if it were the same money.
+  const SYMBOL_CODES = { '£': 'GBP', '€': 'EUR', '₹': 'INR', 'US$': 'USD' };
+  const readingCurrency = (r, account) => {
+    if (account && account.currencyCode) return String(account.currencyCode).toUpperCase();
+    const shownAs = String(r.currency || '').trim();
+    if (!shownAs) return null;
+    if (/^[A-Za-z]{3}$/.test(shownAs)) return shownAs.toUpperCase();
+    if (SYMBOL_CODES[shownAs]) return SYMBOL_CODES[shownAs];
+    if (shownAs === '$' && ['USD', 'AUD', 'CAD', 'NZD', 'SGD', 'HKD'].includes(money.base)) return money.base;
+    if (shownAs === '$') return 'USD';
+    return shownAs;
+  };
+  // One record per bank account: its book balance, bank (feed) balance, uncategorised count, currency.
+  const bankFacts = apiBank
+    ? bankAccounts.filter(a => a.bank).map(a => ({
+      accountId: a.accountID, name: a.name, currency: a.bank.currencyCode || a.currencyCode || null,
+      isCard: a.bankAccountType === 'CREDITCARD', book: a.bank.bookBalance, bookBase: a.bank.bookBalanceBase,
+      bank: a.bank.bankBalance, hasFeed: a.bank.feedsActive === true || (a.bank.feedsActive == null && Number(a.bank.bankBalance) !== 0),
+      uncategorised: Number.isFinite(Number(a.bank.uncategorizedCount)) ? Number(a.bank.uncategorizedCount) : null, source: 'zoho_api',
+    }))
+    : freshReading ? bankReading.accounts.map(r => {
+      const account = accountByName.get(lower(r.accountName));
+      return {
+        accountId: account ? account.accountID : null, name: r.accountName, currency: readingCurrency(r, account),
+        isCard: account ? account.bankAccountType === 'CREDITCARD' : false, book: r.amountInBooks, bookBase: null,
+        bank: r.amountInBank, hasFeed: bankFeedOf(r).state === 'shown', uncategorised: Number(r.uncategorised) || 0, source: 'zoho_banking_page',
+      };
+    }) : null;
+  // No currency means the organisation's own; any other currency, code or symbol, is foreign unless it is the base.
+  const sameAsBase = currency => !currency || String(currency).toUpperCase() === money.base;
+
+  attempt('bank_balance', () => {
+    if (!bankFacts) return mark('bank_balance', LABELS.bankAccess);
+    const rows = [];
+    for (const fact of bankFacts) {
+      if (fact.hasFeed && fact.book != null && fact.bank != null) {
+        const difference = round2(Number(fact.book) - Number(fact.bank));
+        if (Math.abs(difference) > 0.01) {
+          rows.push({
+            accountId: fact.accountId, name: fact.name, xeroBalance: fact.book, ledgerBalance: fact.book, statementBalance: fact.bank,
+            discrepancy: Math.abs(difference), amount: Math.abs(difference), rule: 'bank_feed_difference', source: fact.source,
+            ...(fact.currency && !sameAsBase(fact.currency) ? { currency: fact.currency, potentialValue: 0 } : {}),
+            description: `${fact.name}: balance in Zoho Books ${Number(fact.book).toFixed(2)} against the bank feed's ${Number(fact.bank).toFixed(2)}.`,
+          });
+        }
+      }
+      // An ordinary bank account overdrawn in the books (a credit card is normally negative): often a receipt
+      // that has not been recorded.
+      if (!fact.isCard && fact.book != null && Number(fact.book) < -0.005) {
+        rows.push({
+          accountId: fact.accountId, name: fact.name, ledgerBalance: fact.book, amount: Math.abs(Number(fact.book)),
+          discrepancy: 0, rule: 'negative_bank_balance', level: 'review', source: fact.source, potentialValue: 0,
+          ...(fact.currency && !sameAsBase(fact.currency) ? { currency: fact.currency } : {}),
+          description: `${fact.name} is overdrawn in Zoho Books (${Number(fact.book).toFixed(2)}). Check for missing receipts or a wrong account.`,
+        });
+      }
+    }
+    if (!rows.length && !bankFacts.some(fact => fact.hasFeed)) return mark('bank_balance', 'not_configured');
+    const value = rows.filter(row => row.rule === 'bank_feed_difference' && row.potentialValue !== 0).reduce((sum, row) => sum + row.discrepancy, 0);
+    push('bank_balance', { count: rows.length, value, items: rows, periodChecked: `statement_comparison_as_of_${asOfLabel}` });
+  });
+
+  // Unprocessed Bank: bank lines waiting to be categorised in Zoho, one row per line from the API, or one row per
+  // account (with its count) from the Banking page reading. Counted in lines, as Xero's is.
+  attempt('unprocessed_bank', () => {
+    if (apiBank) {
+      const rows = statementLines.map(line => ({
+        bankTransactionId: line.bankTransactionID, date: dateOf(line), reference: line.reference || null,
+        description: line.description || null, contact: line.contact?.name || null, type: line.type,
+        accountName: line.bankAccount?.name || null, accountId: line.bankAccount?.accountID || null, amount: line.total,
+        ...(line.currencyCode && !sameAsBase(line.currencyCode) ? { currency: line.currencyCode, potentialValue: 0 } : {}),
+      }));
+      push('unprocessed_bank', { count: rows.length, value: exposure(rows), items: rows, periodChecked: `zoho_uncategorised_as_of_${asOfLabel}` });
+      return;
+    }
+    if (!bankFacts) return mark('unprocessed_bank', LABELS.bankAccess);
+    // One finding per account carrying its number of items (itemsToReconcile), as for Xero's Bank accounts page:
+    // the check counts accounts and the page shows the items next to it (getLiveScreenItemTotal).
+    const rows = bankFacts.filter(fact => fact.uncategorised > 0).map(fact => ({
+      documentId: `zoho-bank:${fact.name}`, accountId: fact.accountId, name: fact.name, accountName: fact.name,
+      itemsToReconcile: fact.uncategorised, amount: 0, source: fact.source,
+      description: `${fact.uncategorised} uncategorised transaction(s) on ${fact.name} in Zoho Books' Banking page.`,
+    }));
+    push('unprocessed_bank', { count: rows.length, value: 0, items: rows, periodChecked: `zoho_uncategorised_as_of_${asOfLabel}` });
+  });
+
+  // Bank Statements Review: one reminder per bank, card or cash account in Zoho, cleared when the count of
+  // uncategorised transactions is known to be 0 (from the API or the Banking page reading).
+  attempt('bank_statements_review', () => {
+    if (!accountsKnown) throw new Error('chart of accounts not read');
+    const countFor = account => {
+      const fact = (bankFacts || []).find(f => (f.accountId && f.accountId === account.accountID) || lower(f.name) === lower(account.name));
+      return fact && fact.uncategorised != null ? fact.uncategorised : null;
+    };
+    const rows = bankAccounts.map(account => ({ account, count: countFor(account) }))
+      .filter(({ count }) => count == null || count > 0)
+      .map(({ account, count }) => ({
+        documentId: `bank-statements-${account.accountID}`, number: null, date: null, source: 'bank_statements',
+        ...shown(account.accountID),
+        description: count == null
+          ? `Open Banking in Zoho Books and confirm ${account.name} shows no Uncategorized transactions.`
+          : `${account.name} has ${count} Uncategorized transaction(s) in Zoho Books. Open Banking and categorise or match them.`,
+        amount: 0, level: 'review', rule: 'bank_statements_review', limit: null, uncategorised: count,
+      }));
+    push('bank_statements_review', { count: rows.length, value: 0, items: rows, periodChecked: 'since_lock_date' });
+  });
+
+  return { issues, notes };
+}
+
+module.exports = { runZohoChecks, LABELS };

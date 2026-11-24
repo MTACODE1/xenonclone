@@ -12,6 +12,8 @@
 // bills, credit-notes, vendor-credits, contacts, organizations, transaction-locking), 24 Nov 2026.
 const client = require('./client');
 const { amountInBase } = require('../../checkRules');
+const mapping = require('./mapping');
+const accounting = require('./accounting');
 
 // exchangeRates: every document carries currencyRate (Xero's convention), so the checks convert.
 const ledger = { key: 'zoho', purchaseCredits: true, drafts: true, exchangeRates: true };
@@ -165,7 +167,16 @@ function mapInvoice(invoice) {
     currencyRate: currencyRateFrom(invoice.exchange_rate),
     hasAttachments: Boolean(invoice.has_attachment),
     lineItems: [],
+    ...lineFields(invoice),
   };
+}
+
+// Line items. The list rows have none: accounting.fetchLineItems reads them one document at a time,
+// only for documents new or changed since the cached copy (detailKey, from last_modified_time). A
+// one-document answer (opening balances) already has them, so they are mapped straight away.
+function lineFields(raw) {
+  if (Array.isArray(raw.line_items)) return mapping.documentDetail(raw);
+  return { lineItemsRead: false, lineItemsStale: false, detailKey: mapping.changeKey(raw) };
 }
 
 // Bills and invoices share one cache table keyed by invoiceID, so bills carry a prefix (as for
@@ -193,6 +204,7 @@ function mapBill(bill) {
     // The bill list carries has_attachment, so Undocumented Bills works without a call per bill.
     hasAttachments: Boolean(bill.has_attachment),
     lineItems: [],
+    ...lineFields(bill),
   };
 }
 
@@ -591,6 +603,9 @@ async function fetchCompanyInfo(externalId) {
     lockDate: await fetchLockDate(externalId),
     ...financialYearEnd(organization.fiscal_year_start_month),
     baseCurrency: organization.currency_code || null,
+    // The organisation's VAT registration and zone flags (UAE: TRN, free zone), for the UAE checks
+    // and the UAE Tax Registration card. Read from the same answer, so it costs no call.
+    taxProfile: mapping.taxProfileOf(organization),
   };
 }
 
@@ -623,6 +638,10 @@ module.exports = {
   completeConnection,
   fetchCompanyInfo,
   fetchDocuments,
+  // Accounting data and line items for the checks (accounting.js; called by ledgerSync after fetchDocuments).
+  createReadBudget: accounting.createReadBudget,
+  fetchAccounting: accounting.fetchAccounting,
+  fetchLineItems: accounting.fetchLineItems,
   // For tests and support scripts.
   mapInvoice, mapBill, mapSalesCredit, mapVendorCredit, mapContact, financialYearEnd, fetchAllPages,
   currencyRateFrom, vendorCreditRates, openingBalanceCandidates, fetchOpeningBalances,

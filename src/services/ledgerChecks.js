@@ -14,6 +14,8 @@ const {
 } = require('./checkRules');
 const { calculateScoreBreakdown } = require('./scoreProfile');
 const { isWithinPeriod } = require('./periodResolver');
+const { runZohoChecks } = require('./zohoChecks');
+const { regionOf } = require('./uaeRules');
 
 // The checks every non-Xero ledger (FreeAgent, QuickBooks, Zoho Books) runs on its documents.
 // Moved out of freeagentSync.js on 24 Nov 2026 so QuickBooks and Zoho run exactly the same checks
@@ -25,7 +27,11 @@ const { isWithinPeriod } = require('./periodResolver');
 //           drafts: has draft invoices/bills (unapproved_* run, else not applicable),
 //           exchangeRates: its documents carry a usable currencyRate (Zoho, QuickBooks; not FreeAgent) }
 // A check the ledger cannot supply gets period_checked "not_applicable_<key>" (periodStatus.js).
-async function runLedgerChecks({ org, runId, period, invoices, contacts, credits: allCredits, options = {}, emit = () => {}, ledger, saveOrganisation, lockDate = null, baseCurrency = null }) {
+// accounting (Zoho only; null for QuickBooks, and absent in older callers): the chart of accounts, tax rates, manual
+// journals, bank details and expenses read by the Zoho sync (docs/zoho-data-contract.md). With it, zohoChecks.js adds
+// the coding, journal, VAT and bank checks; without it nothing changes. taxProfile: Zoho's VAT registration and zone
+// flags from this sync (null on a cache-only run, which uses the stored copy).
+async function runLedgerChecks({ org, runId, period, invoices, contacts, credits: allCredits, options = {}, emit = () => {}, ledger, saveOrganisation, lockDate = null, baseCurrency = null, accounting = null, taxProfile = null }) {
   const orgId = org.id;
   // A document raised in another currency (a USD invoice on an AED client) is converted to the
   // client's own currency for every total, with the same amountInBase the Xero checks use: each
@@ -408,6 +414,25 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
     period_checked: notApplicable,
   });
 
+  // Zoho Books: the checks worked out from its accounting data (zohoChecks.js), with the UAE rules for a UAE company.
+  if (ledger.key === 'zoho' && accounting) {
+    const profile = await zohoTaxProfile(orgId, taxProfile);
+    const region = regionOf({ baseCurrency: knownBase, taxRates: accounting.taxRates || [], taxProfile: profile });
+    if (taxProfile) {
+      // Kept so a cache-only re-run and the client page know the client's region and registration.
+      await require('../db/zohoTaxProfile').saveZohoTaxProfile(orgId, { region, profile: taxProfile })
+        .catch(error => console.error(`[ledgerChecks] tax profile not saved for organisation ${orgId}: ${error.message}`));
+    }
+    const bankReading = await require('../db/zohoBankScreenReadings').getLatestZohoReading(orgId)
+      .catch(error => { console.error(`[ledgerChecks] Zoho Banking page reading not read for organisation ${orgId}: ${error.message}`); return null; });
+    const { issues, notes } = runZohoChecks({
+      org, period, region, taxProfile: profile, accounting, invoices, credits: allCredits, contacts, bankReading,
+      money: { inBase, converted, noRate, foreignCode, currencyFields, base, converts },
+    });
+    for (const message of notes) emit({ step: 'running_checks', message });
+    for (const issue of issues) persistIssue({ org_id: orgId, ...issue });
+  }
+
   emit({ step: 'score', message: 'Calculating health score...' });
   const scoreBreakdown = calculateScoreBreakdown(
     getScoringObservationsForRun(orgId, runId, options.checkType || null), {
@@ -492,6 +517,18 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
   emit({ step: 'done', message: 'Sync complete!' });
 
   return { score: scoreBreakdown.score, totalIssues, totalPotentialErrors, period };
+}
+
+// This sync's tax profile, else the one the last full sync stored; null when neither is known.
+async function zohoTaxProfile(orgId, fresh) {
+  if (fresh) return fresh;
+  try {
+    const stored = await require('../db/zohoTaxProfile').getZohoTaxProfile(orgId);
+    return stored ? stored.profile : null;
+  } catch (error) {
+    console.error(`[ledgerChecks] stored tax profile not read for organisation ${orgId}: ${error.message}`);
+    return null;
+  }
 }
 
 module.exports = { runLedgerChecks };

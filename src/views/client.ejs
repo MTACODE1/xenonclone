@@ -195,9 +195,14 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
       // a statement CSV or a typed closing balance still works and takes priority.
       // Only Xero clients have the "Bank feeds from Xero" card; anything else keeps the statement/typed-balance set-up.
       const fromXeroScreen = check => !!org.xero_tenant_id && ['unprocessed_bank', 'bank_balance'].includes(check.type);
-      const setupAnchor = check => check.type === 'opening_balance_differences' ? '#filed-accounts' : fromXeroScreen(check) ? '#bank-screen' : check.type === 'unprocessed_bank' ? '#statement-evidence' : '#bank-reconciliation';
-      const setupPill = check => check.period_checked === 'needs_bank_update' ? 'Needs Xero update' : check.period_checked === 'needs_sync' ? 'Needs sync' : 'Not configured';
-      const setupLink = check => fromXeroScreen(check) ? 'Update from Xero →' : 'Configure evidence →';
+      // Zoho Books clients whose connection does not allow bank or expense data: reconnect Zoho Books (the bank checks
+      // can also use the extension's reading of Zoho's Banking page, on the card further down).
+      const zohoAccess = check => ['needs_zoho_bank_access', 'needs_zoho_expense_access'].includes(check.period_checked);
+      // Bank access: a reading of Zoho's Banking page (the card below) works without reconnecting, and is what a
+      // client whose reading went out of date needs, so the link goes to that card and names both actions.
+      const setupAnchor = check => check.period_checked === 'needs_zoho_bank_access' ? '#zoho-bank-screen' : zohoAccess(check) ? basePath + '/auth/zoho/connect' : check.type === 'opening_balance_differences' ? '#filed-accounts' : fromXeroScreen(check) ? '#bank-screen' : check.type === 'unprocessed_bank' ? '#statement-evidence' : '#bank-reconciliation';
+      const setupPill = check => check.period_checked === 'needs_zoho_bank_access' ? 'Needs Zoho bank reading' : zohoAccess(check) ? 'Reconnect Zoho Books' : check.period_checked === 'needs_bank_update' ? 'Needs Xero update' : check.period_checked === 'needs_sync' ? 'Needs sync' : 'Not configured';
+      const setupLink = check => check.period_checked === 'needs_zoho_bank_access' ? 'Update from Zoho Books (or reconnect Zoho Books to allow bank access) →' : check.period_checked === 'needs_zoho_expense_access' ? 'Reconnect Zoho Books to allow expense access →' : fromXeroScreen(check) ? 'Update from Xero →' : 'Configure evidence →';
     %>
     <section class="overview" aria-label="Overview">
       <div class="overview-tile overview-<%= scoreTone %> period-data">
@@ -352,7 +357,16 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
           const isNotApplicable = status === 'not_applicable';
           const unavailableReason = check.period_checked === 'unavailable'
             ? 'Xero holds no bookkeeping at the filed accounts date, so there is nothing to compare'
-            : 'Required data is outside the connected APIs';
+            : check.period_checked === 'unavailable_zoho'
+              ? ({ suspense_open_balance: "Zoho Books' API gives no account balances (no balance sheet or trial balance)",
+                   directors_loan_overdrawn: "Zoho Books' API gives no account balances (no balance sheet or trial balance)",
+                   opening_balance_differences: "Zoho Books' API gives no balance sheet to compare with the accounts",
+                   unreconciled_bank_items: 'Zoho Books does not say which recorded transactions are reconciled; see Unprocessed Bank',
+                   invoice_or_direct: "Zoho Books' API does not give bank deposits coded straight to income",
+                   dividend_status: "needs the year's profit, and Zoho Books' API has no profit and loss report",
+                   historical_changes: "needs a filing or approval date, which Zoho Books' API does not give" }[check.type]
+                || "Zoho Books' API does not give the data this check needs")
+              : 'Required data is outside the connected APIs';
           // Only sales_tax_missing/purchase_tax_missing use this status today (see periodStatus.js);
           // this map is what a future not_applicable check would extend, not a VAT-specific branch.
           const notApplicableReason = {
@@ -363,12 +377,21 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
             not_a_company: 'only applies to UK limited companies (this client is a sole trader, partnership or non-UK)',
             no_filed_accounts_yet: 'this company has not filed any accounts at Companies House yet',
             flat_rate_scheme: 'this client is on the VAT Flat Rate Scheme, so VAT on purchases is not reclaimed',
+            not_applicable_uae: { dividend_status: 'a UK check: UAE dividends carry no withholding tax and need no filing',
+              sales_tax_on_bills: 'a UAE company uses the same VAT rates for sales and purchases',
+              purchase_tax_on_invoices: 'a UAE company uses the same VAT rates for sales and purchases' }[check.type]
+              || 'this check is UK-specific and does not apply to a UAE company',
             ...Object.fromEntries([['freeagent', 'FreeAgent'], ['quickbooks', 'QuickBooks'], ['zoho', 'Zoho Books']].map(([key, name]) => [
               `not_applicable_${key}`,
               { old_purchase_credits: `${name} has no supplier credit notes`,
                 contact_defaults: `${name} contacts have no default account or tax code`,
                 unapproved_invoices: `${name} has no draft invoices`,
-                unapproved_bills: `${name} has no draft bills` }[check.type] || `${name} does not have this`,
+                unapproved_bills: `${name} has no draft bills`,
+                unexpected_account_used: `${name} contacts have no default account to compare with`,
+                unexpected_tax_code_used: `${name} contacts have no default tax rate to compare with`,
+                sales_tax_on_bills: `${name} tax rates are not split into sales and purchase rates`,
+                purchase_tax_on_invoices: `${name} tax rates are not split into sales and purchase rates`,
+                vat_scheme_threshold: `${name} does not say which VAT scheme the client uses` }[check.type] || `${name} does not have this`,
             ])),
           }[check.period_checked];
           const desc = checkDescriptions[check.type] || {};
@@ -457,6 +480,25 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
       <div class="card-body" data-bank-screen-body style="padding: 16px;">Loading…</div>
     </div>
     <script src="<%= basePath %>/bankScreen.js?v=16" defer></script>
+    <% } else if (/^zoho-\d{5,20}$/.test(String(org.freeagent_company_id || ''))) { %>
+    <%# Zoho Books clients: the same extension reads Zoho Books' Banking page instead (public/zohoBankScreen.js). %>
+    <div class="card" id="zoho-bank-screen" style="margin-top: 24px;" data-zoho-bank-screen-card
+         data-base-path="<%= basePath %>" data-tenant-id="<%= org.freeagent_company_id %>" data-csrf="<%= csrfToken %>">
+      <div class="card-header" style="background: var(--grey-100); display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap;">
+        <div style="flex: 1 1 320px;">
+          <h5>Bank feed (read from Zoho Books)</h5>
+          <p style="font-size: 0.75rem; color: #7C8FAC; margin-top: 4px;">
+            Uncategorised transactions and bank balances, as shown on Zoho Books' Banking page. Read by the Akrio Verify browser extension while you are signed in to Zoho Books. A reading over 7 days old is marked as out of date.
+          </p>
+        </div>
+        <div style="text-align: right;">
+          <button type="button" class="btn btn-primary btn-sm" data-zoho-bank-screen-update>Update from Zoho Books</button>
+          <div data-zoho-bank-screen-note style="font-size: 0.72rem; margin-top: 6px; max-width: 260px;"></div>
+        </div>
+      </div>
+      <div class="card-body" data-zoho-bank-screen-body style="padding: 16px;">Loading…</div>
+    </div>
+    <script src="<%= basePath %>/zohoBankScreen.js?v=2" defer></script>
     <% } %>
 
     <div class="card" id="statement-evidence" style="margin-top: 24px;">
@@ -662,7 +704,33 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
       <% } %>
     </div>
 
-    <div class="card" id="companies-house" style="margin-top:24px;">
+    <% if (typeof uaeTaxCard !== 'undefined' && uaeTaxCard) { const uaeTax = uaeTaxCard.profile || {}; const uaeFmt = d => d ? String(d).slice(0, 10).split('-').reverse().join('/') : '—'; const uaeFlag = v => v === true ? 'Yes' : v === false ? 'No' : 'Not known'; %><%# A UAE company has no Companies House record: this card shows what Zoho Books holds about its UAE tax registration instead. %>
+    <div class="card" id="uae-tax-registration" style="margin-top:24px;">
+      <div class="card-header" style="background:var(--grey-100);">
+        <h5>UAE Tax Registration</h5>
+        <p style="font-size:0.75rem;color:#7C8FAC;margin-top:4px;">From the organisation settings in Zoho Books, updated at each sync. Informational only — not part of the health score.</p>
+      </div>
+      <div style="border-top:1px solid #e5eaef;padding:16px 20px;font-size:0.85rem;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;">
+        <div>
+          <div style="font-size:0.7rem;color:#7C8FAC;text-transform:uppercase;">VAT registered</div>
+          <div style="font-weight:600;"><%= uaeFlag(uaeTax.isTaxRegistered) %></div>
+          <div style="color:#7C8FAC;"><%= uaeTax.taxRegNoLabel || 'TRN' %>: <%= uaeTax.taxRegNo || '—' %></div>
+        </div>
+        <div>
+          <div style="font-size:0.7rem;color:#7C8FAC;text-transform:uppercase;">VAT registered since</div>
+          <div style="font-weight:600;"><%= uaeFmt(uaeTax.taxRegisteredDate) %></div>
+          <div style="color:#7C8FAC;">VAT returns from <%= uaeFmt(uaeTax.taxReturnStartDate) %></div>
+        </div>
+        <div>
+          <div style="font-size:0.7rem;color:#7C8FAC;text-transform:uppercase;">Free zone / designated zone</div>
+          <div style="font-weight:600;"><%= uaeFlag(uaeTax.isFreeZone) %> / <%= uaeFlag(uaeTax.isDesignatedZone) %></div>
+          <div style="color:#7C8FAC;">A Qualifying Free Zone Person cannot claim Small Business Relief.</div>
+        </div>
+        <div style="grid-column:1/-1;color:#7C8FAC;font-size:0.8rem;">
+          Corporate Tax: Zoho Books does not hold the Corporate Tax TRN or tax period, so check them with the client. Audited financial statements are required for Corporate Tax where revenue is over AED 50m or the client is a Qualifying Free Zone Person (Ministerial Decision 84 of 2025). Late Corporate Tax registration carries an AED 10,000 penalty. The UAE has no public register of filed accounts, so there is no Companies House check for this client.
+        </div>
+      </div>
+    </div><% } else { %><div class="card" id="companies-house" style="margin-top:24px;">
       <div class="card-header" style="background:var(--grey-100);">
         <h5>Companies House</h5>
         <p style="font-size:0.75rem;color:#7C8FAC;margin-top:4px;">Public-register status and filing deadlines. Informational only — not part of the health score.</p>
@@ -720,7 +788,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
           </div>
         <% } %>
       <% } %>
-    </div>
+    </div><% } %>
 
     <%# Check settings (accountant, 4 Nov 2026: "remove all the parameters at the bottom of the health check page to keep it clean").
         Folded away instead of deleted: the saved values still drive the checks, and staff can open this to change them. %>

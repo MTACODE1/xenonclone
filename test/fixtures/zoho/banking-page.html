@@ -1,0 +1,21 @@
+<!-- Zoho Books Banking overview (#/banking), shaped like the live page seen on 24 Nov 2026.
+     Every name, number and amount here is invented. -->
+<div class="banking-overview ember-view">
+  <div class="summary-block">
+    <div>Cash In Hand <span>AED1,048.59</span></div>
+    <div>Bank Balance <span>AED96,265.43</span></div>
+    <div>Card Balance <span>AED2,150.25</span></div>
+    <div><span>16</span> Uncategorized Transactions <a class="ember-view">Categorize now</a></div>
+  </div>
+  <div class="dropdown ember-view"><button class="btn">Active Accounts</button></div>
+  <table class="table zb-txn-table">
+    <thead><tr><th>Account Details</th> <th class="text-center">Uncategorized</th> <th class="text-end">Amount in Bank</th> <th class="text-end">Amount in Zoho Books</th> <th class="text-end"><button class="icon-button btn p-0"></button></th></tr></thead>
+    <tbody>
+      <tr class="bank-account-row"><td><div class="bank-icon-circle"></div> <div class="user-details-row account-details-row"><a class="ember-view overflow ">Sample Bank - USD Account</a> <br> <p class="text-muted fw-light font-xxs">xxxx0001 </p></div></td> <td class="text-center"><!----></td> <td class="text-end">$0.00</td> <td class="text-end">$-12,345.67</td> <td><div class="dropdown ember-view btn-group float-end"><button class="dropdown-toggle no-caret btn btn-text shadow-none"></button></div></td></tr>
+      <tr class="bank-account-row"><td><div class="bank-icon-circle"></div> <div class="user-details-row account-details-row"><a class="ember-view overflow ">Sample Bank Current Acct -AED</a> <br> <p class="text-muted fw-light font-xxs">xxxx0002 </p> </div> </td> <td class="text-center"><a class="ember-view uncat-txn">1 transaction</a></td> <td class="text-end">AED1,250.00</td> <td class="text-end">AED98,765.43</td> <td><div class="dropdown ember-view btn-group float-end"><button class="dropdown-toggle no-caret btn btn-text shadow-none"></button></div></td></tr>
+      <tr class="bank-account-row"><td><div class="bank-icon-circle"></div> <div class="user-details-row account-details-row"><a class="ember-view overflow ">Sample Savings &amp; Deposits</a> <br> <p class="text-muted fw-light font-xxs">xxxx0003 </p> </div> </td> <td class="text-center"><a class="ember-view uncat-txn">12 transactions</a></td> <td class="text-end">AED0.00</td> <td class="text-end">AED-500.00</td> <td></td></tr>
+      <tr class="bank-account-row"><td><div class="bank-icon-circle"></div> <div class="user-details-row account-details-row"><a class="ember-view overflow ">Petty Cash</a> <br> </div> </td> <td class="text-center"></td> <td class="text-end">AED0.00</td> <td class="text-end">AED1,048.59</td> <td></td></tr>
+      <tr class="bank-account-row"><td><div class="bank-icon-circle"></div> <div class="user-details-row account-details-row"><a class="ember-view overflow ">Sample Credit Card 0000***0000</a> <br> <p class="text-muted fw-light font-xxs">xxxx0000 </p> </div> </td> <td class="text-center"><a class="ember-view uncat-txn">3 transactions</a></td> <td class="text-end">AED-2,000.00</td> <td class="text-end">AED-2,150.25</td> <td></td></tr>
+    </tbody>
+  </table>
+</div>

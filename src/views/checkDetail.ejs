@@ -85,17 +85,30 @@ function isNoRateRow(item) {
          no_filed_accounts_yet: 'this company has not filed any accounts at Companies House yet',
          flat_rate_scheme: 'this client is on the VAT Flat Rate Scheme, so VAT on purchases is not reclaimed',
          not_vat_registered: 'this client is not VAT registered',
+         not_applicable_uae: { dividend_status: 'a UK check: UAE dividends carry no withholding tax and need no filing',
+           sales_tax_on_bills: 'a UAE company uses the same VAT rates for sales and purchases',
+           purchase_tax_on_invoices: 'a UAE company uses the same VAT rates for sales and purchases' }[checkType]
+           || 'this check is UK-specific and does not apply to a UAE company',
          ...Object.fromEntries([['freeagent', 'FreeAgent'], ['quickbooks', 'QuickBooks'], ['zoho', 'Zoho Books']].map(([key, name]) => [
            `not_applicable_${key}`,
            { old_purchase_credits: `${name} has no supplier credit notes`,
              contact_defaults: `${name} contacts have no default account or tax code`,
              unapproved_invoices: `${name} has no draft invoices`,
-             unapproved_bills: `${name} has no draft bills` }[checkType] || `${name} does not have this`,
+             unapproved_bills: `${name} has no draft bills`,
+             unexpected_account_used: `${name} contacts have no default account to compare with`,
+             unexpected_tax_code_used: `${name} contacts have no default tax rate to compare with`,
+             sales_tax_on_bills: `${name} tax rates are not split into sales and purchase rates`,
+             purchase_tax_on_invoices: `${name} tax rates are not split into sales and purchase rates`,
+             vat_scheme_threshold: `${name} does not say which VAT scheme the client uses` }[checkType] || `${name} does not have this`,
          ])),
        }; %>
     <% if (issue && typeof displayStatus !== 'undefined' && displayStatus === 'not_applicable') { %>
       <div class="check-stats">
         <div class="check-stat"><strong>Not applicable</strong><span><%= notApplicableReasons[issue.period_checked] || 'not applicable to this client' %></span></div>
+      </div>
+    <% } else if (issue && ['unavailable_zoho', 'needs_zoho_bank_access', 'needs_zoho_expense_access'].includes(issue.period_checked)) { %><%# Zoho Books: why there is no result, instead of "null issues found". %>
+      <div class="check-stats">
+        <div class="check-stat"><strong><%= issue.period_checked === 'unavailable_zoho' ? 'Unavailable' : 'Reconnect Zoho Books' %></strong><span><%= issue.period_checked === 'unavailable_zoho' ? "Zoho Books' API does not give the data this check needs" : issue.period_checked === 'needs_zoho_bank_access' ? 'the Zoho Books connection does not allow bank access: reconnect Zoho Books, or read the Banking page with the extension' : 'the Zoho Books connection does not allow expense access: reconnect Zoho Books' %></span></div>
       </div>
     <% } else if (issue) { %>
       <div class="check-stats">

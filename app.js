@@ -165,6 +165,10 @@ app.use(BASE_PATH + '/client', clientRoutes);
 app.use(BASE_PATH + '/settings', requireSettingsAccess, settingsRoutes);
 app.use(BASE_PATH + '/staff', requireStaffManager, staffRoutes);
 app.use(BASE_PATH + '/validation', validationRoutes);
+// Zoho Books clients' Banking page readings: their own routes and tables, so the Xero readings below are unchanged.
+app.use(BASE_PATH + '/api/bank-screen/zoho', require('./src/routes/zohoBankScreen').createZohoBankScreenRouter({
+  ...require('./src/db/queries'), ...require('./src/db/zohoBankScreenReadings'),
+}));
 app.use(BASE_PATH + '/api/bank-screen', createBankScreenRouter({
   ...require('./src/db/queries'), ...require('./src/db/bankScreenReadings'),
   recomputeEvidenceIssues: require('./src/services/statementEvidence').recomputeEvidenceIssues,

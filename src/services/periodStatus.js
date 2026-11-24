@@ -26,11 +26,18 @@
 //   - ok / issues    : none of the above, a real period key — count === 0 is "ok", count > 0 is
 //                       "issues".
 //   - not_synced     : none of the above, but count is null — this sync attempt failed or never ran.
-const NOT_APPLICABLE_PERIODS = Object.freeze(new Set(['not_vat_registered', 'not_applicable_freeagent', 'not_applicable_quickbooks', 'not_applicable_zoho', 'not_a_company', 'no_filed_accounts_yet', 'flat_rate_scheme']));
+// not_applicable_uae: a UK-only rule (UK VAT schemes, dividends, sales/purchase tax codes) on a Zoho Books client
+// that is a UAE company; the UAE version of the check runs in its slot where there is one (zohoChecks.js).
+const NOT_APPLICABLE_PERIODS = Object.freeze(new Set(['not_vat_registered', 'not_applicable_freeagent', 'not_applicable_quickbooks', 'not_applicable_zoho', 'not_applicable_uae', 'not_a_company', 'no_filed_accounts_yet', 'flat_rate_scheme']));
 // needs_bank_update: the only evidence is a reading of Xero's Bank accounts page that is too old to use;
 // someone has to click "Update from Xero" (browser extension) before the check can say anything.
-const NOT_CONFIGURED_PERIODS = Object.freeze(new Set(['not_configured', 'needs_sync', 'needs_bank_update']));
-const UNAVAILABLE_PERIODS = Object.freeze(new Set(['out_of_scope', 'unavailable']));
+// needs_zoho_bank_access / needs_zoho_expense_access: the Zoho Books connection was made without bank or expense
+// access (and, for the bank checks, there is no recent reading of Zoho's Banking page either); reconnecting Zoho
+// Books fixes it. Not an error and not a clean result, so it is kept out of the score like the others here.
+const NOT_CONFIGURED_PERIODS = Object.freeze(new Set(['not_configured', 'needs_sync', 'needs_bank_update', 'needs_zoho_bank_access', 'needs_zoho_expense_access']));
+// unavailable_zoho: Zoho Books' API cannot give what the check needs (no balance sheet, trial balance or P&L, no
+// coded bank deposits, no filing dates), so no figure is made up.
+const UNAVAILABLE_PERIODS = Object.freeze(new Set(['out_of_scope', 'unavailable', 'unavailable_zoho']));
 const RESERVED_PERIOD_LABELS = Object.freeze(new Set([
   ...NOT_CONFIGURED_PERIODS, ...UNAVAILABLE_PERIODS, ...NOT_APPLICABLE_PERIODS,
 ]));

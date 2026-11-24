@@ -42,6 +42,9 @@ const { startJob } = require('../services/syncJobs');
 const { accessChanges } = require('../services/staffAccess');
 const { hydrateOrgIfEmpty } = require('../db/xeroCacheStore');
 const checkDescriptions = require('../data/checkDescriptions');
+const { checkDescriptionsFor, checkLabelFor } = require('../data/checkDescriptionsUae');
+const { getZohoTaxProfile } = require('../db/zohoTaxProfile');
+const { regionOf } = require('../services/uaeRules');
 const { buildBankEvidence, loadLatestBankScreenReading } = require('../services/bankEvidence');
 const { getOrgCurrency } = require('../db/orgCurrency');
 const {
@@ -160,7 +163,26 @@ async function currencyForOrg(org) {
   }
 }
 
-function clientViewData(liveOrg, query = {}, clientCurrency = 'GBP') {
+// A Zoho Books client's wording, check names and UAE tax details, or null for every other client (whose pages are
+// then built exactly as before). The region is the one the last sync stored, else told from the client's currency.
+async function zohoCopyFor(org, clientCurrency) {
+  if (!/^zoho-/.test(String(org.freeagent_company_id || ''))) return null;
+  let stored = null;
+  try { stored = await getZohoTaxProfile(org.id); } catch (error) {
+    console.error(`[client] Zoho tax profile look-up failed for organisation ${org.id}: ${error.message}`);
+  }
+  const profile = stored ? stored.profile : null;
+  const region = (stored && stored.region) || regionOf({ baseCurrency: clientCurrency, taxProfile: profile });
+  const scope = { ledger: 'zoho', region };
+  return {
+    region,
+    descriptions: checkDescriptionsFor(scope),
+    labelFor: type => checkLabelFor(type, scope),
+    uaeTaxCard: region === 'AE' ? { profile: profile || {} } : null,
+  };
+}
+
+function clientViewData(liveOrg, query = {}, clientCurrency = 'GBP', zohoCopy = null) {
   const { selectedPeriod, view } = periodViewFor(liveOrg, query);
   const viewIssues = view ? getIssuesForView(view) : null;
   const org = view ? orgAsViewed(liveOrg, view, selectedPeriod, viewIssues) : liveOrg;
@@ -174,6 +196,7 @@ function clientViewData(liveOrg, query = {}, clientCurrency = 'GBP') {
     const issue = issues.find(i => i.check_type === def.type);
     const merged = { ...def, ...(issue || { count: null, potential_value_gbp: 0 }) };
     if (issue && def.type === 'unprocessed_bank') merged.screenItems = getLiveScreenItemTotal(issue.id);
+    if (zohoCopy && zohoCopy.labelFor(def.type)) merged.label = zohoCopy.labelFor(def.type);
     // Single source of truth for what this check's state means — the template must never re-derive
     // this from its own period_checked string comparisons (see checkRules.js/periodStatus.js).
     return { ...merged, displayStatus: resolveCheckDisplayStatus(merged) };
@@ -205,7 +228,8 @@ function clientViewData(liveOrg, query = {}, clientCurrency = 'GBP') {
     insightKv: getInsightSettingsKv(org.id),
     insightMappings: getInsightAccountMappings(org.id),
     insightWidgetVisibility: getInsightWidgetVisibility(org.id),
-    checkDescriptions,
+    checkDescriptions: zohoCopy ? zohoCopy.descriptions : checkDescriptions,
+    ...(zohoCopy ? { uaeTaxCard: zohoCopy.uaeTaxCard } : {}),
     formatTurnoverGbp,
     clientCurrency,
   };
@@ -252,7 +276,8 @@ router.get('/:tenantId', async (req, res) => {
   const org = await getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   try {
-    res.render('client', clientViewData(org, req.query, await currencyForOrg(org)));
+    const clientCurrency = await currencyForOrg(org);
+    res.render('client', clientViewData(org, req.query, clientCurrency, await zohoCopyFor(org, clientCurrency)));
   } catch (error) {
     res.status(400).send(error.message);
   }
@@ -511,7 +536,10 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
   if (!org) return res.status(404).send('Organisation not found');
   const { selectedPeriod: viewedPeriod, view } = safePeriodView(org, req.query);
   const issue = view ? getIssueByCheckTypeForView(view, checkType) : getIssueByCheckType(org.id, checkType);
-  const def = CHECK_DEFINITIONS.find(d => d.type === checkType);
+  const clientCurrency = await currencyForOrg(org);
+  const zohoCopy = await zohoCopyFor(org, clientCurrency);
+  const baseDef = CHECK_DEFINITIONS.find(d => d.type === checkType);
+  const def = baseDef && zohoCopy && zohoCopy.labelFor(checkType) ? { ...baseDef, label: zohoCopy.labelFor(checkType) } : baseDef;
   let pagination = { items: [], page: 1, pageSize: 50, total: 0, totalPages: 1 };
   let summary = { active: 0, dismissed: 0, ignored: 0, ok: 0, previous: 0 };
   // The 3 months before the review period, listed after the period's findings (context only, never counted).
@@ -610,8 +638,9 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
       : issue.period_checked === viewedPeriod.key ? viewedPeriod.label
         : issue.period_checked === org.period_key && org.period_label ? storedPeriodLabel(org)
           : periodKeyLabel(issue.period_checked),
-    org, issue, def, items, pagination, previousItems, previousPagination, summary, status, contact, checkType, checkDescriptions, groupSupplierTransactions,
-    clientCurrency: await currencyForOrg(org),
+    org, issue, def, items, pagination, previousItems, previousPagination, summary, status, contact, checkType,
+    checkDescriptions: zohoCopy ? zohoCopy.descriptions : checkDescriptions, groupSupplierTransactions,
+    clientCurrency,
     displayStatus: issue ? resolveCheckDisplayStatus(issue) : null, ...extraData,
   });
 });
@@ -1084,7 +1113,8 @@ router.get('/:tenantId/report', async (req, res) => {
   const org = await getOrganisationByTenantId(req.params.tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   try {
-    const data = clientViewData(org, req.query, await currencyForOrg(org));
+    const clientCurrency = await currencyForOrg(org);
+    const data = clientViewData(org, req.query, clientCurrency, await zohoCopyFor(org, clientCurrency));
     const reportFindings = getReportFindings(org.id, 50);
     res.render('report', {
       ...data,

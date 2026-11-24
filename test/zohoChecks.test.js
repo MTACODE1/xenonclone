@@ -1,0 +1,566 @@
+// The Zoho Books checks (zohoChecks.js) and the UAE rules (uaeRules.js), on made-up Zoho data mapped through the
+// real Zoho mappers (zoho/mapping.js), so the fixtures have exactly the shapes the sync hands the checks.
+// No ledger, Zoho or database is called here. Every name and figure is invented.
+const test = require('node:test');
+const assert = require('node:assert/strict');
+
+const mapping = require('../src/services/ledgers/zoho/mapping');
+const zoho = require('../src/services/ledgers/zoho');
+const { runZohoChecks, LABELS } = require('../src/services/zohoChecks');
+const uae = require('../src/services/uaeRules');
+const { resolvePeriod } = require('../src/services/periodResolver');
+const { resolveCheckDisplayStatus } = require('../src/services/checkRules');
+const { checkDescriptionsFor, checkLabelFor } = require('../src/data/checkDescriptionsUae');
+const baseDescriptions = require('../src/data/checkDescriptions');
+
+const NOW = new Date('2026-11-10T12:00:00.000Z');
+const PERIOD = resolvePeriod({ type: 'since_lock_date' }, { lockDate: '2026-06-30', asOf: '2026-11-10', ledgerName: 'Zoho Books' });
+
+// ---------------- fixtures (invented) ----------------
+const RAW_ACCOUNTS = [
+  ['a-bank', 'Main Bank Account', 'bank'], ['a-card', 'Company Card', 'credit_card'], ['a-cash', 'Petty Cash', 'cash'],
+  ['a-sales', 'Sales', 'income'], ['a-geninc', 'General Income', 'income'],
+  ['a-office', 'Office Supplies', 'expense'], ['a-general', 'General Expenses', 'expense'], ['a-rent', 'Office Rent', 'expense'],
+  ['a-salary', 'Salaries and Wages', 'expense'], ['a-meals', 'Meals and Entertainment', 'expense'],
+  ['a-vehicle', 'Vehicle Running Costs', 'expense'], ['a-repairs', 'Repairs and Maintenance', 'expense'],
+  ['a-equip', 'Office Equipment', 'fixed_asset'], ['a-input', 'Input VAT', 'other_current_asset'],
+  ['a-output', 'Output VAT', 'other_current_liability'], ['a-suspense', 'Suspense', 'other_current_liability'],
+];
+const rawAccount = ([id, name, type], extra = {}) => ({ account_id: id, account_name: name, account_type: type, is_active: true, account_code: '', ...extra });
+const ACCOUNTS = RAW_ACCOUNTS.map(row => mapping.mapAccount(rawAccount(row)));
+const TAX_RATES = [
+  mapping.mapTaxRate({ tax_id: 't-std', tax_name: 'Standard Rate', tax_percentage: 5, tax_type: 'tax', country_code: 'AE', tax_authority_name: 'FTA' }),
+  mapping.mapTaxRate({ tax_id: 't-zero', tax_name: 'Zero Rate', tax_percentage: 0, tax_type: 'tax', country_code: 'AE', tax_authority_name: 'FTA' }),
+];
+const UK_RATES = [mapping.mapTaxRate({ tax_id: 'u-20', tax_name: 'Standard 20%', tax_percentage: 20, tax_type: 'tax', country_code: 'GB' })];
+
+const line = (account, amount, { tax = null, pct = null, taxAmount = null, ...extra } = {}) => ({
+  line_item_id: `${account}-${amount}`, account_id: account, item_total: amount, description: `${account} line`,
+  tax_id: tax || '', tax_percentage: pct, ...(taxAmount != null ? { tax_amount: taxAmount } : {}), ...extra,
+});
+// A bill or invoice mapped from its list row plus its one-document read (with lines).
+function bill(id, date, vendor, lines, extra = {}) {
+  const raw = { bill_id: id, bill_number: `B-${id}`, status: 'paid', date, due_date: date, total: 1, balance: 0, vendor_id: vendor,
+    vendor_name: `Supplier ${vendor}`, currency_code: 'AED', exchange_rate: 1, has_attachment: true, last_modified_time: `${date}T10:00:00+0400`, ...extra };
+  return { ...zoho.mapBill(raw), ...mapping.documentDetail({ ...raw, line_items: lines }) };
+}
+function invoice(id, date, customer, lines, extra = {}) {
+  const raw = { invoice_id: id, invoice_number: `I-${id}`, status: 'paid', date, due_date: date, total: 1, balance: 0, customer_id: customer,
+    customer_name: `Customer ${customer}`, currency_code: 'AED', exchange_rate: 1, last_modified_time: `${date}T10:00:00+0400`, ...extra };
+  return { ...zoho.mapInvoice(raw), ...mapping.documentDetail({ ...raw, line_items: lines }) };
+}
+function journal(id, date, lines) {
+  return mapping.mapManualJournal({ journal_id: id, entry_number: `MJ-${id}`, journal_date: date, status: 'published', currency_code: 'AED',
+    exchange_rate: 1, last_modified_time: `${date}T10:00:00+0400`, line_items: lines });
+}
+const jl = (account, side, amount, extra = {}) => ({ line_id: `${account}-${side}`, account_id: account, debit_or_credit: side, amount, bcy_amount: amount, ...extra });
+function expense(id, date, vendor, account, amount, extra = {}) {
+  return mapping.mapExpense({ expense_id: id, date, vendor_id: vendor, vendor_name: `Supplier ${vendor}`, account_id: account,
+    amount, total: amount, currency_code: 'AED', exchange_rate: 1, paid_through_account_id: 'a-bank', paid_through_account_name: 'Main Bank Account',
+    last_modified_time: `${date}T10:00:00+0400`, ...extra }, { detail: true });
+}
+
+// The money helpers ledgerChecks hands over, for an AED client with conversion on (same rules as ledgerChecks.js).
+function money(base = 'AED') {
+  const foreignCode = doc => { const c = String(doc?.currencyCode || '').toUpperCase(); return /^[A-Z]{3}$/.test(c) && c !== base ? c : null; };
+  const hasRate = doc => Number(doc?.currencyRate) > 0;
+  const converted = (amount, doc) => (foreignCode(doc) ? Math.round((amount / doc.currencyRate) * 100) / 100 : amount);
+  return {
+    base, converts: true, foreignCode, noRate: doc => Boolean(foreignCode(doc)) && !hasRate(doc), converted,
+    inBase: (amount, doc) => (foreignCode(doc) && !hasRate(doc) ? 0 : converted(amount, doc)),
+    currencyFields: (doc, amount) => {
+      const code = foreignCode(doc);
+      if (!code) return {};
+      if (!hasRate(doc)) return { currency: code, noExchangeRate: true, potentialValue: 0 };
+      const value = converted(amount, doc);
+      return { currency: code, baseAmount: value, potentialValue: value };
+    },
+  };
+}
+
+function run({ invoices = [], credits = [], contacts = [], accounts = ACCOUNTS, taxRates = TAX_RATES, journals = [], bankTransactions = [],
+  readStatus = { permissions: { banking: true, expenses: true } }, region = 'AE', taxProfile = { isTaxRegistered: true }, bankReading = null,
+  org = { id: 1 }, base = 'AED' } = {}) {
+  const { issues, notes } = runZohoChecks({
+    org, period: PERIOD, region, taxProfile, invoices, credits, contacts, bankReading, now: NOW, money: money(base),
+    accounting: { accounts, taxRates, manualJournals: journals, bankTransactions, readStatus },
+  });
+  const byType = Object.fromEntries(issues.map(issue => [issue.check_type, { ...issue, items: JSON.parse(issue.detail_json) }]));
+  return { byType, issues, notes };
+}
+const counted = check => check.items.filter(item => !item.displayOnly);
+const status = check => resolveCheckDisplayStatus(check);
+
+// ---------------- UAE rules ----------------
+
+test('regionOf: AED, an AE/FTA tax rate or the TRN label make a UAE client; a GBP client with UK rates is not', () => {
+  assert.equal(uae.regionOf({ baseCurrency: 'AED' }), 'AE');
+  assert.equal(uae.regionOf({ baseCurrency: 'GBP', taxRates: TAX_RATES }), 'AE', 'FTA rates');
+  assert.equal(uae.regionOf({ taxProfile: { taxRegNoLabel: 'TRN' } }), 'AE');
+  assert.equal(uae.regionOf({ baseCurrency: 'GBP', taxRates: UK_RATES }), null);
+  assert.equal(uae.regionOf({}), null, 'nothing known: not guessed');
+});
+
+test('VAT registration: Zoho\'s flag wins; unknown falls back to an active rate above 0%, never to "registered" from nothing', () => {
+  assert.equal(uae.isVatRegistered({ isTaxRegistered: false }, TAX_RATES), false);
+  assert.equal(uae.isVatRegistered({ isTaxRegistered: true }, []), true);
+  assert.equal(uae.isVatRegistered(null, TAX_RATES), true);
+  assert.equal(uae.isVatRegistered(null, [TAX_RATES[1]]), false, 'a zero rate only');
+  assert.equal(uae.isVatRegistered(null, []), false);
+});
+
+test('UAE thresholds: mandatory, amber, voluntary and deregistration bands at their exact edges', () => {
+  const rules = (supplies, registered) => uae.evaluateUaeThresholds({ taxableSupplies: supplies, registered }).map(i => `${i.rule}:${i.level}`);
+  assert.deepEqual(rules(375000.01, false), ['uae_vat_mandatory:red']);
+  assert.deepEqual(rules(375000, false), ['uae_vat_mandatory:amber'], 'at the limit is not over it');
+  assert.deepEqual(rules(337500, false), ['uae_vat_mandatory:amber'], '90% starts amber');
+  assert.deepEqual(rules(337499.99, false), ['uae_vat_voluntary:info']);
+  assert.deepEqual(rules(187500, false), ['uae_vat_voluntary:info']);
+  assert.deepEqual(rules(187499.99, false), []);
+  assert.deepEqual(rules(187499.99, true), ['uae_vat_deregistration:info']);
+  assert.deepEqual(rules(187500, true), []);
+  const item = uae.evaluateUaeThresholds({ taxableSupplies: 342100, registered: false })[0];
+  assert.match(item.description, /AED 342,100 against the AED 375,000 mandatory registration limit/);
+});
+
+test('Small Business Relief: amber from 90% of AED 3m, red over it; "review" for a free zone company; not after 2029', () => {
+  const sbr = extra => uae.evaluateUaeThresholds({ taxableSupplies: 500000, registered: true, periodEnd: '2026-11-10', ...extra })
+    .filter(i => i.rule === 'uae_sbr_revenue').map(i => i.level);
+  assert.deepEqual(sbr({ revenue: 3000000.01 }), ['red']);
+  assert.deepEqual(sbr({ revenue: 3000000 }), ['amber']);
+  assert.deepEqual(sbr({ revenue: 2700000 }), ['amber']);
+  assert.deepEqual(sbr({ revenue: 2699999 }), []);
+  // Only a Qualifying Free Zone Person is excluded, and not every free zone company is one: shown for review.
+  assert.deepEqual(sbr({ revenue: 3500000, isFreeZone: true }), ['review']);
+  assert.deepEqual(sbr({ revenue: 3500000, periodEnd: '2030-03-31' }), [], 'after the last period the relief covers');
+  // The tax period is the financial year: a year ending after 2029 is out even while the review period is in 2029.
+  assert.deepEqual(sbr({ revenue: 3500000, periodEnd: '2029-11-30', fyEnd: '2030-03-31' }), []);
+  assert.deepEqual(sbr({ revenue: 3500000, periodEnd: '2029-11-30', fyEnd: '2029-12-31' }), ['red']);
+  // Relief is lost for good once an earlier year went over AED 3m (Ministerial Decision 73 of 2023, Art. 2).
+  const earlier = uae.evaluateUaeThresholds({ taxableSupplies: 500000, registered: true, revenue: 1000000, fyEnd: '2026-12-31',
+    priorRevenue: [{ fyEnd: '2025-12-31', revenue: 3200000 }, { fyEnd: '2024-12-31', revenue: 900000 }] }).find(i => i.rule === 'uae_sbr_revenue');
+  assert.equal(earlier.level, 'red');
+  assert.match(earlier.description, /earlier financial year to 31\/12\/2025 .*not available for this or any later tax period/);
+  const over = uae.evaluateUaeThresholds({ taxableSupplies: 500000, registered: true, revenue: 3100000 }).find(i => i.rule === 'uae_sbr_revenue');
+  assert.match(over.description, /that tax period or any later one/);
+  assert.deepEqual(sbr({ revenue: null }), [], 'revenue not known: nothing said');
+});
+
+test('exempt / out of scope and reverse charge lines are told apart from a missing rate', () => {
+  assert.equal(uae.isExemptLine({ taxExemptionID: 'x1' }), true);
+  assert.equal(uae.isExemptLine({ taxExemptionCode: 'EXEMPT' }), true);
+  assert.equal(uae.isExemptLine({ taxTreatmentCode: 'out_of_scope' }), true);
+  assert.equal(uae.isExemptLine({ taxType: 'NONE' }), false);
+  assert.equal(uae.isReverseChargeLine({ isReverseChargeApplied: true }, {}), true);
+  assert.equal(uae.isReverseChargeLine({}, { isReverseCharge: true }), true);
+  assert.equal(uae.isImportDocument({ taxTreatment: 'non_gcc' }), true);
+  assert.equal(uae.isImportDocument({ taxTreatment: 'gcc_vat_registered' }), true);
+  assert.equal(uae.isImportDocument({ taxTreatment: 'vat_registered' }), false);
+});
+
+test('the Zoho mappers keep the UAE fields the checks need (exemption, ITC eligibility, treatment, emirate)', () => {
+  const doc = bill('m1', '2026-08-01', 'v1', [line('a-office', 100, { tax_exemption_id: 'x1', tax_exemption_code: 'EXEMPT', itc_eligibility: 'eligible' })],
+    { tax_treatment: 'non_gcc', place_of_supply: 'DU', filed_in_vat_return_id: '' });
+  assert.equal(doc.lineItems[0].taxExemptionID, 'x1');
+  assert.equal(doc.lineItems[0].itcEligibility, 'eligible');
+  assert.equal(doc.taxTreatment, 'non_gcc');
+  assert.equal(doc.placeOfSupply, 'DU');
+  assert.equal(doc.filedInVatReturnID, null, 'an empty id is "not filed"');
+  assert.ok(mapping.DETAIL_FIELDS.includes('taxTreatment'), 'carried forward with the cached lines');
+  const profile = mapping.taxProfileOf({ currency_code: 'AED', is_free_zone: false, tax_settings: { is_tax_registered: true, tax_reg_no: '100000000000003', tax_reg_no_label: 'TRN', tax_registered_date: '2020-01-01' } });
+  assert.deepEqual([profile.isTaxRegistered, profile.taxRegNoLabel, profile.isFreeZone, profile.isDesignatedZone], [true, 'TRN', false, null]);
+});
+
+// ---------------- coding checks ----------------
+
+test('Purchase Tax Missing (UAE): flags a blank rate on an expense account; exempt, reverse charge, payroll and tiny lines are left out; rent stays in', () => {
+  const { byType } = run({ invoices: [
+    bill('p1', '2026-08-01', 'v1', [
+      line('a-office', 100),                                        // flagged
+      line('a-rent', 5000),                                         // flagged: commercial rent is standard-rated in the UAE
+      line('a-office', 80, { tax: 't-std', pct: 5 }),               // has a rate
+      line('a-office', 70, { tax_exemption_id: 'x1' }),             // exempt on purpose
+      line('a-salary', 9000),                                       // payroll: no VAT
+      line('a-office', 0.99),                                       // under 1
+    ]),
+    bill('p2', '2026-08-02', 'v2', [line('a-office', 60)], { is_reverse_charge_applied: true }),
+    bill('p3', '2026-06-30', 'v1', [line('a-office', 55)]),         // the lock date itself is outside the period
+  ] });
+  const check = byType.purchase_tax_missing;
+  assert.equal(check.count, 2);
+  assert.deepEqual(counted(check).map(i => [i.accountCode, i.amount]), [['Office Supplies', 100], ['Office Rent', 5000]]);
+  assert.equal(check.potential_value_gbp, 5100);
+  assert.ok(check.items.some(i => i.displayOnly && i.amount === 55), 'the lock-date bill is listed with the previous months only');
+});
+
+test('Purchase Tax Missing (UK Zoho client) keeps the Xero noise rules: rent and bank fees are skipped', () => {
+  const accounts = [...ACCOUNTS, mapping.mapAccount(rawAccount(['a-fees', 'Bank Fees', 'expense']))];
+  const { byType } = run({ region: null, base: 'GBP', taxRates: UK_RATES, accounts, invoices: [
+    bill('k1', '2026-08-01', 'v1', [line('a-rent', 500), line('a-fees', 20), line('a-office', 30)], { currency_code: 'GBP' }),
+  ] });
+  assert.deepEqual(counted(byType.purchase_tax_missing).map(i => i.accountCode), ['Office Supplies']);
+});
+
+test('Sales / Purchase Tax Missing: not VAT registered is "not applicable"; no chart read leaves them "Not synced"', () => {
+  const docs = [invoice('s1', '2026-08-01', 'c1', [line('a-sales', 100)])];
+  const off = run({ invoices: docs, taxProfile: { isTaxRegistered: false } }).byType;
+  assert.equal(off.sales_tax_missing.period_checked, 'not_vat_registered');
+  assert.equal(status(off.sales_tax_missing), 'not_applicable');
+  const noChart = run({ invoices: docs, accounts: [] }).byType;
+  assert.equal(noChart.sales_tax_missing, undefined, 'never a false OK');
+  assert.equal(noChart.purchase_tax_missing, undefined);
+});
+
+test('Sales Tax Missing (UAE): a blank-rate export is a finding (it should carry Zero Rate); zero-rated and exempt lines are not', () => {
+  const { byType } = run({ invoices: [
+    invoice('s1', '2026-08-01', 'c1', [line('a-sales', 1000)], { tax_treatment: 'non_gcc' }),
+    invoice('s2', '2026-08-02', 'c1', [line('a-sales', 900, { tax: 't-zero', pct: 0 })], { tax_treatment: 'non_gcc' }),
+    invoice('s3', '2026-08-03', 'c1', [line('a-sales', 800, { tax_treatment_code: 'out_of_scope' })]),
+    invoice('s4', '2026-08-04', 'c1', [line('a-office', 700)]),   // not an income account
+  ] });
+  assert.deepEqual(counted(byType.sales_tax_missing).map(i => [i.invoiceId, i.amount]), [['s1', 1000]]);
+});
+
+test('a USD bill with no exchange rate is listed but kept out of the money total; a USD bill with a rate is converted', () => {
+  const { byType } = run({ invoices: [
+    bill('f1', '2026-08-01', 'v1', [line('a-office', 100)], { currency_code: 'USD', exchange_rate: 3.6725 }),
+    bill('f2', '2026-08-02', 'v1', [line('a-office', 50)], { currency_code: 'USD', exchange_rate: '' }),
+  ] });
+  const rows = counted(byType.purchase_tax_missing);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map(r => [r.currency, r.amount, r.baseAmount ?? null, Boolean(r.noExchangeRate)]),
+    [['USD', 100, 367.25, false], ['USD', 50, null, true]]);
+  assert.equal(byType.purchase_tax_missing.potential_value_gbp, 367.25);
+});
+
+test('Low Cost Fixed Assets: AED 10,000 for a UAE client (at the limit flagged, just over not); GBP 2,000 for a UK one', () => {
+  const docs = [bill('l1', '2026-08-01', 'v1', [line('a-equip', 10000), line('a-equip', 10000.01), line('a-equip', 1500)])];
+  const ae = run({ invoices: docs }).byType.low_cost_fixed_assets;
+  assert.deepEqual(counted(ae).map(i => i.amount), [10000, 1500]);
+  assert.equal(ae.period_checked, 'fixed_asset_accounts_lte_10000_since_lock_date');
+  const uk = run({ invoices: docs, region: null, base: 'AED' }).byType.low_cost_fixed_assets;
+  assert.deepEqual(counted(uk).map(i => i.amount), [1500]);
+});
+
+test('Capital Item Review: an expense line at or over the threshold on a watched account; wages never; a low-cost fixed asset line not twice', () => {
+  const { byType } = run({ invoices: [bill('c1', '2026-08-01', 'v1', [
+    line('a-repairs', 10000), line('a-repairs', 9999.99), line('a-salary', 50000), line('a-office', 12000),
+  ])] });
+  assert.deepEqual(counted(byType.capital_item_review).map(i => [i.accountCode, i.amount]).sort(), [['Office Supplies', 12000], ['Repairs and Maintenance', 10000]]);
+  const none = run({ accounts: ACCOUNTS.filter(a => a._class !== 'EXPENSE') }).byType.capital_item_review;
+  assert.equal(none.period_checked, 'not_configured', 'no account to watch: "Not configured", not a false OK');
+  assert.equal(none.count, null);
+});
+
+test('Misallocated Items: lines on "General Expenses" and "General Income" from 1 up', () => {
+  const { byType } = run({ invoices: [
+    bill('g1', '2026-08-01', 'v1', [line('a-general', 1), line('a-general', 0.5), line('a-office', 500)]),
+    invoice('g2', '2026-08-01', 'c1', [line('a-geninc', 250, { tax: 't-std', pct: 5 })]),
+  ], bankTransactions: [expense('e1', '2026-08-03', 'v3', 'a-general', 40)] });
+  assert.deepEqual(counted(byType.misallocated_items).map(i => [i.source, i.accountCode, i.amount]),
+    [['bill', 'General Expenses', 1], ['invoice', 'General Income', 250], ['expense', 'General Expenses', 40]]);
+  assert.equal(counted(byType.misallocated_items)[2].bankTransactionId, 'exp-e1');
+});
+
+test('Multi-Account Suppliers: a supplier on two expense accounts is flagged with the smaller account\'s value; one account is not', () => {
+  const { byType } = run({ invoices: [
+    bill('m1', '2026-08-01', 'v1', [line('a-office', 300)]),
+    bill('m2', '2026-08-05', 'v1', [line('a-general', 40)]),
+    bill('m3', '2026-08-06', 'v2', [line('a-office', 10), line('a-office', 20)]),
+    bill('m4', '2026-08-07', 'v1', [line('a-equip', 900)]),      // a fixed asset line is not an expense coding
+  ], bankTransactions: [expense('e1', '2026-08-08', 'v1', 'a-office', 5)] });
+  const check = byType.multi_account_suppliers;
+  assert.equal(check.count, 1);
+  assert.equal(check.items[0].contactId, 'v1');
+  assert.deepEqual(check.items[0].accountCodes.sort(), ['General Expenses', 'Office Supplies']);
+  assert.equal(check.potential_value_gbp, 40);
+  assert.ok(check.items[0].transactions.some(t => t.source === 'expense'), 'expenses count as supplier spending');
+});
+
+test('Multi-Tax Code Suppliers: 5% and no VAT on one supplier is flagged; the "No VAT" amount adds no value', () => {
+  const { byType } = run({ invoices: [
+    bill('t1', '2026-08-01', 'v1', [line('a-office', 1000, { tax: 't-std', pct: 5 })]),
+    bill('t2', '2026-08-02', 'v1', [line('a-office', 200)]),
+    bill('t3', '2026-08-03', 'v1', [line('a-office', 300, { tax: 't-zero', pct: 0 })]),
+    bill('t4', '2026-08-04', 'v2', [line('a-office', 100, { tax: 't-std', pct: 5 })]),
+  ] });
+  const check = byType.multi_tax_suppliers;
+  assert.equal(check.count, 1);
+  assert.deepEqual(check.items[0].taxCodes.sort(), ['No VAT', 'Standard Rate', 'Zero Rate']);
+  assert.equal(check.items[0].dominantTax, 'Standard Rate');
+  assert.equal(check.potential_value_gbp, 300);
+});
+
+test('Sales Tax on Bills, Purchase Tax on Invoices, Unexpected Account / Tax Code: not applicable, with the right label', () => {
+  const ae = run().byType;
+  assert.equal(ae.sales_tax_on_bills.period_checked, LABELS.notApplicableUae);
+  assert.equal(ae.purchase_tax_on_invoices.period_checked, LABELS.notApplicableUae);
+  assert.equal(ae.unexpected_account_used.period_checked, LABELS.notApplicableZoho);
+  assert.equal(ae.unexpected_tax_code_used.period_checked, LABELS.notApplicableZoho);
+  for (const type of ['sales_tax_on_bills', 'unexpected_account_used']) assert.equal(status(ae[type]), 'not_applicable');
+  assert.equal(run({ region: null }).byType.sales_tax_on_bills.period_checked, LABELS.notApplicableZoho);
+});
+
+test('Bill or Direct: an expense matching an unpaid bill from the same supplier within 30 days; refused expense access asks to reconnect', () => {
+  const unpaid = bill('d1', '2026-08-01', 'v1', [line('a-office', 250)], { status: 'open', total: 250, balance: 250 });
+  const { byType } = run({ invoices: [unpaid], bankTransactions: [
+    expense('e1', '2026-08-20', 'v1', 'a-office', 250), expense('e2', '2026-09-15', 'v1', 'a-office', 250),
+  ] });
+  assert.deepEqual(counted(byType.bill_or_direct).map(i => [i.bankTransactionId, i.invoiceId]), [['exp-e1', 'bill-d1']]);
+  const refused = run({ invoices: [unpaid], readStatus: { permissions: { banking: false, expenses: false } } }).byType.bill_or_direct;
+  assert.equal(refused.period_checked, LABELS.expenseAccess);
+  assert.equal(status(refused), 'not_configured');
+  assert.equal(run().byType.invoice_or_direct.period_checked, LABELS.unavailable);
+});
+
+// ---------------- journal checks ----------------
+
+test('VAT Control Journals: a journal to Input VAT, and one with a 5% rate on an expense line, are flagged; a plain journal is not', () => {
+  const journals = [
+    journal('j1', '2026-08-01', [jl('a-input', 'debit', 50), jl('a-suspense', 'credit', 50)]),
+    journal('j2', '2026-08-02', [jl('a-office', 'debit', 100, { tax_id: 't-std', tax_percentage: 5 }), jl('a-bank', 'credit', 105)]),
+    journal('j3', '2026-08-03', [jl('a-office', 'debit', 100), jl('a-suspense', 'credit', 100)]),
+  ];
+  const { byType } = run({ journals });
+  const vat = counted(byType.journal_vat_control);
+  assert.deepEqual(vat.map(i => [i.documentId, i.accountCode, i.amount]), [['j1', 'Input VAT', 50], ['j2', 'Input VAT', 5]]);
+  assert.equal(vat[1].taxType, 'Standard Rate');
+  assert.equal(vat[1].taxOnAccountCode, 'Office Supplies');
+  assert.equal(vat[0].number, 'MJ-j1', 'Zoho\'s own journal number');
+  assert.deepEqual(counted(byType.journal_to_bank).map(i => i.documentId), ['j2']);
+  assert.equal(byType.journal_vat_control.importance, 'critical');
+});
+
+test('Revenue Journalled Against Expense and Fixed Asset Credited to Expense use the Xero rules on Zoho journals', () => {
+  const { byType } = run({ journals: [
+    journal('r1', '2026-08-01', [jl('a-sales', 'debit', 300), jl('a-office', 'credit', 300)]),
+    journal('f1', '2026-08-02', [jl('a-office', 'debit', 900), jl('a-equip', 'credit', 900)]),
+  ] });
+  assert.deepEqual(counted(byType.journal_revenue_vs_expense).map(i => [i.accountCode, i.counterAccountCode]), [['Sales', 'Office Supplies']]);
+  assert.deepEqual(counted(byType.journal_fixed_asset_to_expense).map(i => i.accountCode), ['Office Equipment']);
+  const unread = run({ journals: [{ ...journal('u1', '2026-08-01', []), linesRead: false, journalLines: [] }] });
+  assert.equal(unread.byType.journal_vat_control.count, 0);
+  assert.match(unread.notes.join(' '), /1 Zoho Books document\(s\) in the period have no line items read yet/);
+});
+
+test('balance checks are "unavailable" (no balance sheet in Zoho\'s API), never a made-up figure', () => {
+  const { byType } = run({ journals: [journal('s1', '2026-08-01', [jl('a-suspense', 'debit', 500), jl('a-bank', 'credit', 500)])] });
+  for (const type of ['suspense_open_balance', 'directors_loan_overdrawn', 'opening_balance_differences', 'unreconciled_bank_items', 'historical_changes']) {
+    assert.equal(byType[type].period_checked, LABELS.unavailable, type);
+    assert.equal(byType[type].count, null, type);
+    assert.equal(status(byType[type]), 'unavailable', type);
+  }
+  assert.equal(byType.directors_loan_overdrawn.importance, 'medium', 'UAE: review, not critical');
+  assert.equal(run({ region: null }).byType.directors_loan_overdrawn.importance, 'critical');
+  assert.equal(byType.dividend_status.period_checked, LABELS.notApplicableUae);
+  assert.equal(run({ region: null }).byType.dividend_status.period_checked, LABELS.unavailable);
+});
+
+// ---------------- tax review and thresholds ----------------
+
+test('Tax Review by Code (UAE): split by side and treatment, emirates shown, the three review flags raised', () => {
+  const { byType } = run({ invoices: [
+    invoice('x1', '2026-08-01', 'c1', [line('a-sales', 1000, { tax: 't-std', pct: 5 })], { place_of_supply: 'DU' }),
+    invoice('x2', '2026-08-02', 'c1', [line('a-sales', 500, { tax: 't-std', pct: 5 })], { place_of_supply: '' }),
+    invoice('x3', '2026-08-03', 'c2', [line('a-sales', 400, { tax: 't-zero', pct: 0 })], { tax_treatment: 'vat_registered' }),
+    bill('x4', '2026-08-04', 'v1', [line('a-office', 300)], { is_reverse_charge_applied: true, tax_treatment: 'vat_registered' }),
+  ] });
+  const rows = counted(byType.tax_review_by_code);
+  const std = rows.find(r => r.accountName === 'Sales' && r.accountCode === 'Standard Rate');
+  assert.equal(std.amount, 1500);
+  assert.equal(std.taxAmount, 75);
+  assert.match(std.description, /By emirate: DU AED 1000\.00, not set AED 500\.00/);
+  assert.match(std.description, /no place of supply/);
+  assert.match(rows.find(r => r.accountCode === 'Zero Rate').description, /zero rate is unusual/);
+  assert.match(rows.find(r => /reverse charge/.test(r.accountCode)).description, /Reverse charge on a bill from a UAE VAT-registered supplier/);
+  assert.equal(byType.tax_review_by_code.potential_value_gbp, 0);
+});
+
+test('VAT & Corporate Tax thresholds: taxable supplies + imports less credit notes; exempt sales are not counted', () => {
+  const big = (id, amount, extra = {}) => invoice(id, '2026-09-01', 'c1', [line('a-sales', amount, { tax: 't-std', pct: 5 })], extra);
+  const docs = [big('v1', 300000), invoice('v2', '2026-09-02', 'c1', [line('a-sales', 900000, { tax_exemption_id: 'x1' })]),
+    bill('v3', '2026-09-03', 'v9', [line('a-office', 50000)], { tax_treatment: 'non_gcc' })];
+  const credit = { ...zoho.mapSalesCredit({ creditnote_id: 'cn1', status: 'closed', date: '2026-09-05', total: 1050, balance: 0, customer_id: 'c1', sub_total: 1000, currency_code: 'AED', exchange_rate: 1 }) };
+  const notRegistered = run({ invoices: docs, credits: [credit], taxProfile: { isTaxRegistered: false, isFreeZone: false } }).byType.vat_scheme_threshold;
+  // 300,000 + 50,000 imports - 1,000 credit = 349,000: amber against 375,000.
+  assert.deepEqual(notRegistered.items.map(i => [i.rule, i.level, i.amount]), [['uae_vat_mandatory', 'amber', 349000]]);
+  assert.match(notRegistered.items[0].description, /next 30 days/);
+  const registeredSmall = run({ invoices: [big('v4', 1000)] }).byType.vat_scheme_threshold;
+  assert.deepEqual(registeredSmall.items.map(i => i.rule), ['uae_vat_deregistration']);
+  assert.equal(run({ region: null }).byType.vat_scheme_threshold.period_checked, LABELS.notApplicableZoho);
+  assert.equal(run({ accounts: [] }).byType.vat_scheme_threshold, undefined, 'no chart: "Not synced", not a false OK');
+});
+
+// ---------------- motor vehicle and blocked VAT ----------------
+
+test('Motor Vehicle & Entertainment VAT: vehicle costs with no vehicle asset, and 5% VAT claimed on meals or a car hire', () => {
+  const accounts = [...ACCOUNTS, mapping.mapAccount(rawAccount(['a-carhire', 'Car Hire', 'expense']))];
+  const { byType } = run({ accounts, invoices: [
+    bill('mv1', '2026-08-01', 'v1', [line('a-vehicle', 400)]),
+    bill('mv2', '2026-08-02', 'v2', [line('a-meals', 600, { tax: 't-std', pct: 5, itc_eligibility: 'eligible' })]),
+    bill('mv3', '2026-08-03', 'v3', [line('a-carhire', 1000, { tax: 't-std', pct: 5 })]),
+    bill('mv4', '2026-08-04', 'v2', [line('a-meals', 600, { tax: 't-std', pct: 5, itc_eligibility: 'ineligible' })]),  // already blocked
+    bill('mv5', '2026-08-05', 'v2', [line('a-meals', 600)]),  // no VAT claimed
+  ] });
+  const rows = counted(byType.motor_vehicle_expenses);
+  assert.deepEqual(rows.filter(r => r.rule === 'uae_blocked_input_vat').map(r => [r.accountCode, r.amount]).sort(), [['Car Hire', 50], ['Meals and Entertainment', 30]]);
+  assert.deepEqual(rows.filter(r => !r.rule).map(r => r.accountCode), ['Vehicle Running Costs']);
+  // A vehicle asset posted to (a fixed asset named "Motor Vehicles") clears the no-vehicle rule; the UK client gets no VAT rule.
+  const withVehicle = [...accounts, mapping.mapAccount(rawAccount(['a-mv', 'Motor Vehicles', 'fixed_asset']))];
+  const uk = run({ region: null, accounts: withVehicle, invoices: [bill('mv6', '2025-01-01', 'v1', [line('a-mv', 30000)]),
+    bill('mv7', '2026-08-01', 'v1', [line('a-vehicle', 400)]), bill('mv8', '2026-08-02', 'v2', [line('a-meals', 600, { tax: 't-std', pct: 5 })])] });
+  assert.equal(uk.byType.motor_vehicle_expenses.count, 0);
+});
+
+// ---------------- bank checks ----------------
+
+const BANK_ROWS = [
+  { account_id: 'a-bank', account_name: 'Main Bank Account', account_type: 'bank', currency_code: 'AED', balance: 1000, bcy_balance: 1000, bank_balance: 1200, uncategorized_transactions: 2, is_feeds_active: true },
+  { account_id: 'a-card', account_name: 'Company Card', account_type: 'credit_card', currency_code: 'AED', balance: -300, bcy_balance: -300, bank_balance: 0, uncategorized_transactions: 0 },
+  { account_id: 'a-cash', account_name: 'Petty Cash', account_type: 'cash', currency_code: 'AED', balance: -50, bcy_balance: -50, bank_balance: 0, uncategorized_transactions: 0, is_feeds_active: false },
+];
+const bankLine = (id, amount, type) => mapping.mapUncategorisedLine({ transaction_id: id, date: '2026-10-01', amount, transaction_type: type,
+  account_id: 'a-bank', account_name: 'Main Bank Account', payee: 'Someone', currency_code: 'AED' });
+
+test('Bank checks from Zoho\'s bank data: feed difference, overdrawn bank account, uncategorised lines, statements reminder', () => {
+  const accounts = mapping.mergeBankAccounts(ACCOUNTS, BANK_ROWS);
+  const { byType } = run({ accounts, bankTransactions: [bankLine('u1', 120, 'deposit'), bankLine('u2', 80, 'withdrawal')] });
+  const balance = byType.bank_balance;
+  assert.deepEqual(balance.items.map(i => [i.name, i.rule, i.amount]), [
+    ['Main Bank Account', 'bank_feed_difference', 200], ['Petty Cash', 'negative_bank_balance', 50],
+  ], 'the card (normally negative, no feed) is not listed');
+  assert.equal(balance.potential_value_gbp, 200, 'the overdrawn flag adds no value');
+  assert.equal(byType.unprocessed_bank.count, 2);
+  assert.equal(byType.unprocessed_bank.potential_value_gbp, 200);
+  assert.deepEqual(byType.bank_statements_review.items.map(i => i.accountCode), ['Main Bank Account'], 'accounts known to be clear are not listed');
+});
+
+test('Bank checks with banking refused: "Reconnect Zoho Books" unless a recent Banking page reading is there', () => {
+  const refused = { permissions: { banking: false, expenses: false } };
+  const off = run({ readStatus: refused }).byType;
+  for (const type of ['bank_balance', 'unprocessed_bank']) {
+    assert.equal(off[type].period_checked, LABELS.bankAccess, type);
+    assert.equal(status(off[type]), 'not_configured', type);
+  }
+  assert.equal(off.bank_statements_review.count, 3, 'one reminder per bank, card and cash account');
+  assert.match(off.bank_statements_review.items[0].description, /Open Banking in Zoho Books and confirm/);
+
+  const reading = { readAt: new Date('2026-11-08T09:00:00Z'), accounts: [
+    { accountName: 'Main Bank Account', uncategorised: 4, currency: 'AED', amountInBank: 900, amountInBooks: 1000 },
+    { accountName: 'Company Card', uncategorised: 0, currency: 'AED', amountInBank: 0, amountInBooks: -20 },
+  ] };
+  const viaPage = run({ readStatus: refused, bankReading: reading }).byType;
+  assert.deepEqual(viaPage.bank_balance.items.map(i => [i.name, i.amount, i.source]), [['Main Bank Account', 100, 'zoho_banking_page']]);
+  assert.equal(viaPage.bank_balance.period_checked, 'statement_comparison_as_of_2026-11-08');
+  assert.equal(viaPage.unprocessed_bank.count, 1, 'one finding per account, as for Xero\'s Bank accounts page');
+  assert.equal(viaPage.unprocessed_bank.items[0].itemsToReconcile, 4);
+  assert.deepEqual(viaPage.bank_statements_review.items.map(i => i.accountCode), ['Main Bank Account', 'Petty Cash']);
+
+  const stale = run({ readStatus: refused, bankReading: { ...reading, readAt: new Date('2026-10-01T09:00:00Z') } }).byType;
+  assert.equal(stale.bank_balance.period_checked, LABELS.bankAccess, 'a reading over 7 days old is not used');
+});
+
+test('Bank Balance with no account on a feed is "Not configured", not OK', () => {
+  const rows = BANK_ROWS.map(r => ({ ...r, bank_balance: 0, is_feeds_active: false, balance: 10, bcy_balance: 10 }));
+  const { byType } = run({ accounts: mapping.mergeBankAccounts(ACCOUNTS, rows) });
+  assert.equal(byType.bank_balance.period_checked, 'not_configured');
+  assert.equal(byType.bank_balance.count, null);
+});
+
+// ---------------- contacts ----------------
+
+test('Inactive Contacts: 24 months, activity from documents, journals and bank rows; inactive contacts are skipped', () => {
+  const contacts = ['c1', 'c2', 'c3', 'c4', 'c5'].map(id => ({ contactID: id, name: `Contact ${id}`, contactStatus: id === 'c5' ? 'ARCHIVED' : 'ACTIVE' }));
+  const { byType } = run({ contacts, invoices: [invoice('n1', '2024-11-11', 'c1', []), invoice('n2', '2024-11-09', 'c2', [])],
+    journals: [journal('n3', '2026-01-01', [jl('a-office', 'debit', 1, { customer_id: 'c3' }), jl('a-bank', 'credit', 1)])] });
+  // Cut-off 10 Nov 2024: c1 (11 Nov 2024) and c3 (journal) are active; c2 (9 Nov 2024) and c4 (never) are listed.
+  assert.deepEqual(byType.inactive_contacts.items.map(i => [i.id, i.lastTransaction]), [['c2', '2024-11-09'], ['c4', 'Never']]);
+  assert.equal(byType.inactive_contacts.period_checked, 'no_transaction_in_24_months_before_2026-11-10');
+});
+
+// ---------------- wording ----------------
+
+test('UAE wording: FTA not HMRC, AED not £, Zoho Books not Xero, and UAE names for the three changed checks', () => {
+  const ae = checkDescriptionsFor({ ledger: 'zoho', region: 'AE' });
+  assert.match(ae.duplicate_bills.soWhat, /the FTA \(Federal Tax Authority\)/);
+  assert.doesNotMatch(JSON.stringify(ae), /HMRC|£|\bXero\b/);
+  assert.match(ae.low_cost_fixed_assets.issue, /AED 10,000/);
+  assert.equal(checkLabelFor('vat_scheme_threshold', { ledger: 'zoho', region: 'AE' }), 'VAT & Corporate Tax Thresholds');
+  assert.equal(checkLabelFor('directors_loan_overdrawn', { ledger: 'zoho', region: 'AE' }), 'Shareholder & Related Party Balances');
+  assert.equal(checkLabelFor('vat_scheme_threshold', { ledger: 'zoho', region: null }), null);
+  const zohoUk = checkDescriptionsFor({ ledger: 'zoho', region: null });
+  assert.doesNotMatch(JSON.stringify(zohoUk), /\bXero\b/);
+  assert.match(zohoUk.duplicate_bills.soWhat, /HMRC/, 'a UK Zoho client keeps HMRC');
+  assert.equal(checkDescriptionsFor({ ledger: null }), baseDescriptions, 'Xero clients get the original object, unchanged');
+});
+
+// ---------------- review fixes (regression tests) ----------------
+
+test('VAT thresholds: a client that is not registered (no VAT rates at all) is still measured on its sales', () => {
+  // Twelve untaxed invoices of AED 50,000 in the rolling year: AED 600,000, over the mandatory limit.
+  const docs = Array.from({ length: 12 }, (_, i) => invoice(`nr${i}`, `2026-${String((i % 10) + 1).padStart(2, '0')}-15`, 'c1', [line('a-sales', 50000)]));
+  const exempt = invoice('nrx', '2026-05-01', 'c1', [line('a-sales', 900000, { tax_exemption_id: 'x1' })]);
+  const check = run({ invoices: [...docs, exempt], taxRates: [], taxProfile: { isTaxRegistered: false, isFreeZone: false } }).byType.vat_scheme_threshold;
+  assert.deepEqual(check.items.map(i => [i.rule, i.level, i.amount]), [['uae_vat_mandatory', 'red', 600000]], 'exempt lines still left out');
+});
+
+test('VAT thresholds: invoices whose lines are not read yet are counted at their list total, and said so', () => {
+  const read = Array.from({ length: 5 }, (_, i) => invoice(`rd${i}`, `2026-0${i + 5}-10`, 'c1', [line('a-sales', 80000)]));
+  const unread = ['2026-02-10', '2026-03-10', '2026-04-10'].map((date, i) => zoho.mapInvoice({
+    invoice_id: `un${i}`, invoice_number: `I-un${i}`, status: 'paid', date, due_date: date, total: 80000, sub_total: 80000, balance: 0,
+    customer_id: 'c1', customer_name: 'Customer c1', currency_code: 'AED', exchange_rate: 1, last_modified_time: `${date}T10:00:00+0400`,
+  }));
+  assert.equal(unread[0].lineItemsRead, false);
+  const check = run({ invoices: [...read, ...unread], taxRates: [], taxProfile: { isTaxRegistered: false, isFreeZone: false } }).byType.vat_scheme_threshold;
+  assert.equal(check.items[0].amount, 640000);
+  assert.match(check.items[0].description, /3 invoice\(s\) or bill\(s\) whose lines Akrio has not read yet were counted at their total/);
+});
+
+test('VAT thresholds: credit notes taken off are shown on the finding; an earlier year over AED 3m ends Small Business Relief', () => {
+  const credit = zoho.mapSalesCredit({ creditnote_id: 'cn9', status: 'closed', date: '2026-09-05', total: 100000, balance: 0, customer_id: 'c1', sub_total: 100000, currency_code: 'AED', exchange_rate: 1 });
+  const thisYear = invoice('ty1', '2026-09-01', 'c1', [line('a-sales', 360000, { tax: 't-std', pct: 5 })]);
+  const lastYear = invoice('ly1', '2025-06-01', 'c1', [line('a-sales', 3200000, { tax: 't-std', pct: 5 })]);
+  const check = run({ invoices: [thisYear, lastYear], credits: [credit], taxProfile: { isTaxRegistered: false, isFreeZone: false } }).byType.vat_scheme_threshold;
+  const vat = check.items.find(i => i.rule === 'uae_vat_voluntary');
+  assert.match(vat.description, /Sales credit notes of AED 100,000 were taken off in full/);
+  const sbr = check.items.find(i => i.rule === 'uae_sbr_revenue');
+  assert.equal(sbr.level, 'red');
+  assert.match(sbr.description, /earlier financial year to 31\/12\/2025/);
+});
+
+test('Undeposited Funds (Zoho cash type, system account) is a clearing account, not a bank', () => {
+  const undeposited = mapping.mapAccount(rawAccount(['a-undep', 'Undeposited Funds', 'cash'], { is_system_account: true }));
+  assert.deepEqual([undeposited.type, undeposited._class, undeposited.bankAccountType], ['CURRENT', 'ASSET', null]);
+  assert.equal(mapping.mapAccount(rawAccount(['a-pc', 'Petty Cash', 'cash'], { is_system_account: true })).type, 'BANK');
+  const accounts = [...ACCOUNTS, undeposited];
+  const { byType } = run({ accounts, journals: [journal('ud1', '2026-08-01', [jl('a-undep', 'debit', 500), jl('a-sales', 'credit', 500)])] });
+  assert.equal(byType.journal_to_bank.count, 0);
+  assert.ok(!byType.bank_statements_review.items.some(i => i.accountCode === 'Undeposited Funds'));
+});
+
+test('Purchase Tax Missing (UAE): an unregistered supplier is not a finding; a non-GCC import with no VAT is review only', () => {
+  const { byType } = run({ invoices: [
+    bill('pt1', '2026-08-01', 'v1', [line('a-office', 800)], { tax_treatment: 'vat_not_registered' }),
+    bill('pt2', '2026-08-02', 'v2', [line('a-office', 900)], { tax_treatment: 'dz_vat_not_registered' }),
+    bill('pt3', '2026-08-03', 'v3', [line('a-office', 1000)], { tax_treatment: 'non_gcc' }),
+    bill('pt4', '2026-08-04', 'v4', [line('a-office', 1100)], { tax_treatment: 'vat_registered' }),
+  ] });
+  const rows = counted(byType.purchase_tax_missing);
+  assert.deepEqual(rows.map(r => [r.number, r.rule || null, r.level || null]).sort(), [['B-pt3', 'uae_import_no_vat', 'review'], ['B-pt4', null, null]]);
+  assert.equal(byType.purchase_tax_missing.potential_value_gbp, 1100, 'the import adds no value');
+});
+
+test('Bank Balance from a Banking page reading: a "$" account is foreign (from the chart), never added to the AED total', () => {
+  const usd = mapping.mapAccount(rawAccount(['a-usd', 'USD Account', 'bank'], { currency_code: 'USD' }));
+  const reading = { readAt: new Date('2026-11-08T09:00:00Z'), accounts: [
+    { accountName: 'USD Account', uncategorised: 0, currency: '$', amountInBank: 10000, amountInBooks: 60000 },
+    { accountName: 'Main Bank Account', uncategorised: 0, currency: 'AED', amountInBank: 900, amountInBooks: 1000 },
+    { accountName: 'Unknown Dollar Account', uncategorised: 0, currency: '$', amountInBank: 5, amountInBooks: 10 },
+  ] };
+  const { byType } = run({ accounts: [...ACCOUNTS, usd], readStatus: { permissions: { banking: false, expenses: false } }, bankReading: reading });
+  const rows = byType.bank_balance.items;
+  assert.deepEqual(rows.find(r => r.name === 'USD Account').currency, 'USD');
+  assert.equal(rows.find(r => r.name === 'USD Account').potentialValue, 0);
+  assert.equal(rows.find(r => r.name === 'Unknown Dollar Account').currency, 'USD');
+  assert.equal(byType.bank_balance.potential_value_gbp, 100, 'only the AED account counts');
+});

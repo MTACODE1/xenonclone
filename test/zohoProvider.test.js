@@ -299,6 +299,12 @@ test('a 429 waits as long as Retry-After asks, then carries on', async () => {
   assert.equal(sleeps[0], 40000);
   assert.deepEqual(info, {
     name: 'Example Trading Ltd', lockDate: '2026-03-31', financialYearEndMonth: 3, financialYearEndDay: 31, baseCurrency: 'GBP',
+    // The tax profile read from the same answer (for the UAE checks); nothing in it is guessed.
+    taxProfile: {
+      currencyCode: 'GBP', countryCode: null, isTaxRegistered: null, taxRegNo: null, taxRegNoLabel: null,
+      taxRegisteredDate: null, taxReturnStartDate: null, internationalTradeEnabled: null,
+      isFreeZone: null, isDesignatedZone: null, fiscalYearStartMonth: 3,
+    },
   });
 });
 

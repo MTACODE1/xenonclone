@@ -1,5 +1,6 @@
 // Runs on Akrio Verify's own pages only (see manifest "matches"). It passes a "read this client's
-// Xero bank page" request from the page to the extension and hands the answer back to the same page.
+// Xero bank page" (or Zoho Books Banking page) request from the page to the extension and hands the
+// answer back to the same page.
 // It never sees Verify's session cookie or form token; the page itself saves the reading to Verify.
 (function () {
   'use strict';
@@ -21,11 +22,14 @@
     if (!data || data.source !== FROM_PAGE || typeof data.requestId !== 'string') return;
     if (data.type === 'PING') {
       reply({ type: 'PONG', requestId: data.requestId, version: chrome.runtime.getManifest().version });
-    } else if (data.type === 'READ_BANK_PAGE' || data.type === 'READ_BANK_LINES') {
+    } else if (data.type === 'READ_BANK_PAGE' || data.type === 'READ_BANK_LINES' || data.type === 'READ_ZOHO_BANKING') {
       activeRequestId = data.requestId;
-      const request = data.type === 'READ_BANK_LINES'
-        ? { type: 'READ_BANK_LINES', shortCode: data.shortCode, accountName: data.accountName }
-        : { type: 'READ_BANK_PAGE', shortCode: data.shortCode };
+      // Only the fields each request needs are passed on; the service worker checks them again.
+      const request = data.type === 'READ_ZOHO_BANKING'
+        ? { type: 'READ_ZOHO_BANKING', orgId: data.orgId, booksHost: data.booksHost }
+        : data.type === 'READ_BANK_LINES'
+          ? { type: 'READ_BANK_LINES', shortCode: data.shortCode, accountName: data.accountName }
+          : { type: 'READ_BANK_PAGE', shortCode: data.shortCode };
       chrome.runtime.sendMessage(request, response => {
         if (activeRequestId === data.requestId) activeRequestId = null;
         const failed = chrome.runtime.lastError || !response;

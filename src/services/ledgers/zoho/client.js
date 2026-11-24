@@ -17,8 +17,14 @@ const API_CALL_TIMEOUT_MS = 60000;
 const MAX_ATTEMPTS = 6;
 
 // Read-only scopes, one per list Verify reads. Vendor credits sit under "debitnotes" in Zoho's
-// scope list (List vendor credits needs ZohoBooks.debitnotes.READ); the organisation list and
-// details need settings; the transaction lock needs accountants.
+// scope list (List vendor credits needs ZohoBooks.debitnotes.READ); the organisation list, details
+// and tax rates need settings; the transaction lock, chart of accounts and manual journals need
+// accountants; bank accounts and bank transactions need banking; expenses need expenses.
+// Clients connected before banking and expenses were added keep their old consent until they
+// reconnect: Zoho then refuses those two lists (401, code 57) and the sync carries on without them
+// (see accounting.js), so nothing breaks while they have not reconnected.
+// There is no fixed-asset scope here on purpose: its name is not in Zoho's published OAuth scope
+// list, and a scope Zoho does not know could make the consent page refuse the whole connection.
 const SCOPES = [
   'ZohoBooks.settings.READ',
   'ZohoBooks.invoices.READ',
@@ -27,6 +33,8 @@ const SCOPES = [
   'ZohoBooks.debitnotes.READ',
   'ZohoBooks.contacts.READ',
   'ZohoBooks.accountants.READ',
+  'ZohoBooks.banking.READ',
+  'ZohoBooks.expenses.READ',
 ];
 
 // The accounts-server value arrives on the callback URL, which anyone can type. The client secret
@@ -208,14 +216,17 @@ async function getConnection(externalId, { force = false, rejectedToken = null }
   if (!apiDomain) throw new Error(`The stored Zoho API domain for organisation ${externalId} is not a Zoho address`);
 
   const tokenIsRejected = force && (!rejectedToken || rejectedToken === row.access_token);
+  // signIn: which sign-in (refresh token) the access token came from, so a refusal can be told apart from a dead
+  // sign-in even on the first call after a routine refresh (see goodSignIns).
+  const signIn = fingerprint(row.refresh_token);
   if (!tokenIsRejected && stillValid(parseDbDate(row.expires_at))) {
-    return { accessToken: row.access_token, apiDomain };
+    return { accessToken: row.access_token, apiDomain, signIn };
   }
   const token = await refreshToken(row, force ? (rejectedToken || row.access_token) : null);
   if (token.access_token !== row.access_token) {
     await saveLedgerToken(PROVIDER, externalId, { ...token, accounts_server: row.accounts_server || token.accounts_server });
   }
-  return { accessToken: token.access_token, apiDomain: token.api_domain || apiDomain };
+  return { accessToken: token.access_token, apiDomain: token.api_domain || apiDomain, signIn };
 }
 
 async function getValidAccessToken(externalId) {
@@ -223,6 +234,54 @@ async function getValidAccessToken(externalId) {
 }
 
 let sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Zoho allows 100 calls a minute per organisation. The detail reads (one call per journal, invoice,
+// bill or expense) can easily go faster than that, and each refused call still counts against the
+// daily limit, so calls are paced to stay under it rather than relying on the 429 back-off.
+const CALLS_PER_MINUTE = 90;
+const callTimes = new Map(); // organisation id -> times of its calls in the last minute
+
+async function paceCall(externalId) {
+  const key = String(externalId);
+  const times = callTimes.get(key) || [];
+  const now = Date.now();
+  while (times.length && now - times[0] >= 60000) times.shift();
+  if (times.length >= CALLS_PER_MINUTE) {
+    await sleep(Math.max(0, 60000 - (now - times[0])));
+    times.shift();
+  }
+  times.push(Date.now());
+  callTimes.set(key, times);
+  countDailyCall(key);
+}
+
+// Calls made per organisation per UTC day by this server, counted as they are sent (Zoho counts refused calls
+// too). The optional detail reads keep within what is left of the day (accounting.js), so a backlog read over
+// several syncs in one day can never use up the daily limit the compulsory document lists need. Kept in memory:
+// a restart forgets the day's count, which errs towards the old behaviour (no allowance) rather than blocking.
+const dailyCalls = new Map(); // organisation id -> { day: 'YYYY-MM-DD', count }
+const utcDay = () => new Date().toISOString().slice(0, 10);
+function countDailyCall(key) {
+  const day = utcDay();
+  const entry = dailyCalls.get(key);
+  if (entry && entry.day === day) entry.count += 1;
+  else dailyCalls.set(key, { day, count: 1 });
+}
+function callsToday(externalId) {
+  const entry = dailyCalls.get(String(externalId));
+  return entry && entry.day === utcDay() ? entry.count : 0;
+}
+
+// The access token each organisation last got a good answer with. A 401 for a token Zoho has just
+// accepted on another call is a missing scope, not a dead sign-in (Zoho answers code 57 "You are not
+// authorized to perform this operation" for both), so it is not worth a token refresh: Zoho allows
+// only 10 refreshes per 10 minutes per sign-in, shared by every organisation on it.
+const goodTokens = new Map();
+// The sign-in (refresh-token fingerprint) each organisation last got a good answer with. The token is refreshed
+// about 2 minutes before it expires, so the first call after that refresh has a token that has not succeeded yet;
+// a 401 on an optional list then is still a missing scope when the same sign-in has just worked, and a forced
+// refresh would only spend one of the 10 the sign-in is allowed per 10 minutes.
+const goodSignIns = new Map();
 
 function retryDelay(attempt, retryAfterHeader) {
   const backoff = Math.min(Math.pow(2, attempt) * 1000, 30000);
@@ -242,12 +301,18 @@ function isNetworkError(error) {
 // (429 and 5xx, timeouts, dropped connections) are retried with backoff that honours Retry-After;
 // a 401 gets one forced token refresh and one retry. Zoho's daily call limit (error code 45)
 // is not retried: nothing will succeed until the next day.
-async function apiGet(externalId, path, params = {}) {
+// optionalScope: the list may be outside the client's consent (banking and expenses for clients
+// connected before those scopes were asked for). A 401 for a token that has already worked on this
+// organisation is then thrown at once as notAuthorized, without spending a token refresh.
+// A 401 that survives the refresh is marked notAuthorized too: a token Zoho has just issued is
+// valid, so the refusal is about what the consent allows.
+async function apiGet(externalId, path, params = {}, { optionalScope = false } = {}) {
   let forced = false;
   let rejectedToken = null;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const connection = await getConnection(externalId, { force: Boolean(rejectedToken), rejectedToken });
     rejectedToken = null;
+    await paceCall(externalId);
     const url = new URL(`${connection.apiDomain}/books/v3${path}`);
     for (const [key, value] of Object.entries(params)) {
       if (value != null) url.searchParams.set(key, String(value));
@@ -272,6 +337,11 @@ async function apiGet(externalId, path, params = {}) {
     let body = null;
     try { body = JSON.parse(text); } catch (error) { body = null; }
 
+    if (response.status === 401 && optionalScope && (goodTokens.get(String(externalId)) === connection.accessToken
+      || (connection.signIn && goodSignIns.get(String(externalId)) === connection.signIn))) {
+      throw Object.assign(new Error(`Zoho Books ${path} refused: ${body?.message || 'not authorized'} (the connection does not allow this list)`),
+        { status: 401, zohoCode: body?.code, notAuthorized: true });
+    }
     if (response.status === 401 && !forced) {
       forced = true;
       rejectedToken = connection.accessToken;
@@ -291,12 +361,15 @@ async function apiGet(externalId, path, params = {}) {
       const error = new Error(`Zoho Books ${path} failed: ${response.status} ${body?.message || text.slice(0, 200)}`);
       error.status = response.status;
       error.zohoCode = body?.code;
+      if (response.status === 401 && forced) error.notAuthorized = true;
       throw error;
     }
     // Zoho answers code 0 for success; anything else is an error even with HTTP 200.
     if (!body || Number(body.code) !== 0) {
       throw new Error(`Zoho Books ${path} failed: ${body?.message || 'the answer was not Zoho JSON'}`);
     }
+    goodTokens.set(String(externalId), connection.accessToken);
+    if (connection.signIn) goodSignIns.set(String(externalId), connection.signIn);
     return body;
   }
   throw new Error(`Zoho Books ${path}: gave up after ${MAX_ATTEMPTS} attempts`);
@@ -320,10 +393,10 @@ async function fetchOrganizations(apiDomain, accessToken) {
 
 // For tests only: no real waiting, and no tokens remembered from an earlier test.
 function __setSleep(fn) { sleep = fn; }
-function __reset() { refreshesInFlight.clear(); freshTokens.clear(); }
+function __reset() { refreshesInFlight.clear(); freshTokens.clear(); callTimes.clear(); goodTokens.clear(); dailyCalls.clear(); goodSignIns.clear(); }
 
 module.exports = {
   SCOPES, isConfigured, buildConsentUrl, defaultAccountsUrl, safeAccountsServer, safeApiDomain,
   exchangeCode, tokenFromAnswer, parseDbDate, getConnection, getValidAccessToken, apiGet,
-  fetchOrganizations, __setSleep, __reset,
+  fetchOrganizations, callsToday, __setSleep, __reset,
 };

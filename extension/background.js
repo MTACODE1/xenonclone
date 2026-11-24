@@ -1,7 +1,9 @@
 // Service worker. On request from an Akrio Verify page it opens one Xero "Bank accounts" page in a
 // background tab, reads what the page shows, closes the tab and returns the reading. One at a time.
 // A second request type reads one bank account's unreconciled statement lines the same way (readBankLines).
+// A third reads a Zoho Books client's Banking page the same way (readZohoBanking); the Xero reads are unchanged.
 importScripts('parser.js');
+importScripts('zoho-parser.js');
 
 const ALLOWED_SENDERS = ['https://wf.morethanaccountants.co.uk/akrio-verify/'];
 const LOAD_TIMEOUT_MS = 60000;
@@ -23,7 +25,7 @@ const STATUS_LOOK = {
 };
 // Only faults that need a fix in the extension turn it red. A page that did not load, a redirect or a slow
 // Xero are amber: trying again usually works.
-const FAULTS = new Set(['page_changed', 'extension_error']);
+const FAULTS = new Set(['page_changed', 'extension_error', 'unsupported_format']); // unsupported_format: Zoho only
 function statusOf(result) {
   if (result && result.ok) return 'ok';
   return FAULTS.has(result && result.error) ? 'fault' : 'attention';
@@ -35,12 +37,15 @@ function showStatus(state) {
   chrome.action.setBadgeBackgroundColor({ color: look.colour }).catch(() => {});
   // UK order whatever the computer's language: toLocaleString() alone showed 11/24/2026 on a US-English Chrome.
   const when = new Date(state.at).toLocaleString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  // The last read may have been of Zoho Books; a state saved by an older version has no ledger and was Xero.
+  const ledger = state.ledger === 'zoho' ? 'Zoho Books' : 'Xero';
   chrome.action.setTitle({ title: state.status === 'ok'
-    ? 'Akrio Verify: last Xero read worked (' + when + ').'
-    : 'Akrio Verify: last Xero read failed (' + when + '). ' + String(state.message || '').slice(0, 400) }).catch(() => {});
+    ? 'Akrio Verify: last ' + ledger + ' read worked (' + when + ').'
+    : 'Akrio Verify: last ' + ledger + ' read failed (' + when + '). ' + String(state.message || '').slice(0, 400) }).catch(() => {});
 }
-async function recordStatus(result) {
+async function recordStatus(result, ledger) {
   const state = { status: statusOf(result), error: (result && result.error) || null, message: (result && result.message) || null, at: Date.now() };
+  if (ledger === 'zoho') state.ledger = 'zoho';
   showStatus(state);
   try { await chrome.storage.local.set({ lastStatus: state }); } catch (error) { /* the icon still shows it */ }
 }
@@ -248,14 +253,99 @@ async function readBankLines(shortCode, accountName, progress = () => {}) {
   }
 }
 
+// ---- Zoho Books ----
+const ZOHO_NOT_SIGNED_IN = 'Sign in to Zoho Books in this browser, then try again.';
+// Every problem is an amount in a number or currency format the reader does not support yet: not a changed page,
+// so a message of its own (the client cannot be read until support is added, whatever the user tries).
+const zohoUnsupportedFormat = problems => ({
+  ok: false, error: 'unsupported_format', problems: problems.slice(0, 20),
+  message: 'Zoho Books shows this client\'s amounts in a number or currency format the extension cannot read yet, so nothing was saved. Please tell Aditya. ('
+    + problems.slice(0, 5).join('; ').slice(0, 300) + ')',
+});
+const zohoPageChanged = problems => (problems.length && problems.every(problem => / amount_format$/.test(problem)) ? zohoUnsupportedFormat(problems) : {
+  ok: false, error: 'page_changed', problems: problems.slice(0, 20),
+  message: 'Zoho Books has changed its Banking page, so nothing was saved. Akrio Verify needs an update; please tell Aditya. ('
+    + problems.slice(0, 5).join('; ').slice(0, 300) + ')',
+});
+
+// One Zoho Books organisation's Banking page: opened in a background tab at https://<data centre>/app/<org id>#/banking,
+// read once it has finished drawing, then closed. Only the visible table is read; nothing is clicked or changed in
+// Zoho and no Zoho data endpoint is called. booksHost is the client's data centre as Verify knows it; anything
+// that is not one of Zoho's Books domains falls back to books.zoho.com.
+// The Zoho sites are optional permissions (manifest optional_host_permissions), not required ones: adding required
+// sites to an installed extension makes Chrome disable it on update until the user approves them, which would also
+// stop every Xero read. So the first Zoho read opens the extension's own "allow Zoho Books" page (Chrome only asks
+// for new sites from a click there) and reports that access is needed; nothing is read until it is granted.
+const ZOHO_ACCESS_NEEDED = 'The extension needs your permission to open Zoho Books. A tab has opened: click "Allow Zoho Books" there, then try again.';
+async function hasZohoAccess() {
+  const origins = chrome.runtime.getManifest().optional_host_permissions || [];
+  try { return Boolean(origins.length) && await chrome.permissions.contains({ origins }); } catch (error) { return false; }
+}
+
+async function readZohoBanking(orgId, booksHost, progress = () => {}) {
+  const zoho = self.AkrioZohoParser;
+  if (!zoho.isZohoOrgId(orgId)) return fail('bad_org_id', 'This client has no valid Zoho Books organisation id.');
+  if (!(await hasZohoAccess())) {
+    await chrome.tabs.create({ url: chrome.runtime.getURL('zoho-access.html'), active: true }).catch(() => {});
+    return fail('zoho_access_needed', ZOHO_ACCESS_NEEDED);
+  }
+  const host = zoho.isBooksHost(booksHost) ? String(booksHost).toLowerCase() : zoho.DEFAULT_BOOKS_HOST;
+  let tab;
+  const closeLater = setTimeout(() => { if (tab && tab.id != null) chrome.tabs.remove(tab.id).catch(() => {}); }, READ_DEADLINE_MS + 1000);
+  const where = async () => { try { return new URL((await chrome.tabs.get(tab.id)).url || ''); } catch (error) { return null; } };
+  const signedOut = async () => { const url = await where(); return Boolean(url && zoho.isZohoSignInHost(url.host)); };
+  try {
+    progress('opening');
+    tab = await chrome.tabs.create({ url: zoho.bankingUrl(host, orgId), active: false });
+    await waitForLoad(tab.id);
+    progress('loaded');
+    const loaded = await where();
+    if (loaded && zoho.isZohoSignInHost(loaded.host)) return fail('not_signed_in', ZOHO_NOT_SIGNED_IN);
+    if (!loaded || !zoho.isBooksHost(loaded.host)) return fail('unexpected_page', 'Zoho Books opened a different page than expected.');
+    progress('reading');
+    let page = null;
+    try {
+      const [injected] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['zoho-parser.js', 'zoho-read.js'] });
+      page = injected && injected.result;
+    } catch (error) {
+      if (await signedOut()) return fail('not_signed_in', ZOHO_NOT_SIGNED_IN);
+      throw error;
+    }
+    if (await signedOut()) return fail('not_signed_in', ZOHO_NOT_SIGNED_IN);
+    if (!page) {
+      await new Promise(resolve => setTimeout(resolve, 2500));
+      if (await signedOut()) return fail('not_signed_in', ZOHO_NOT_SIGNED_IN);
+      return fail('not_readable', 'Zoho Books\' Banking page could not be read.');
+    }
+    if (!zoho.isBooksHost(page.host)) return fail('unexpected_page', 'Zoho Books opened a different page than expected.');
+    // Zoho opens the organisation in the address. Any other organisation (for example the user's default one,
+    // when their login cannot open this client) must never be saved against this client.
+    if (page.orgId !== orgId) {
+      return fail('wrong_organisation', 'Zoho Books did not open this client. Check that your Zoho login has access to it.');
+    }
+    if (!page.onBanking) return fail('unexpected_page', 'Zoho Books opened a different screen than Banking.');
+    if (!page.tableFound) return fail('not_readable', 'Zoho Books\' Banking page did not show the bank accounts table for this client.');
+    if (Array.isArray(page.problems) && page.problems.length && (page.settled || page.stableWithProblems)) return zohoPageChanged(page.problems);
+    if (!page.settled) return fail('not_settled', 'Zoho Books was too slow to show the bank accounts. Try again in a moment.');
+    if (Array.isArray(page.problems) && page.problems.length) return zohoPageChanged(page.problems);
+    return { ok: true, reading: { orgId, booksHost: page.host, pageTitle: page.pageTitle, summaryTotal: page.summaryTotal, accounts: page.accounts } };
+  } catch (error) {
+    if (error && error.message === 'timeout') return fail('timeout', 'Zoho Books took too long to load.');
+    return fail('extension_error', 'The Zoho Books page could not be read: ' + String((error && error.message) || error).slice(0, 200));
+  } finally {
+    clearTimeout(closeLater);
+    if (tab && tab.id != null) chrome.tabs.remove(tab.id).catch(() => {});
+  }
+}
+
 // One read can never hold up the ones after it. Chrome may pause a background tab (for example while the
 // computer is busy or the window is hidden), and then the page script never finishes; without a deadline
 // every later client would wait behind it and the whole run would stall.
 const READ_DEADLINE_MS = 110000;
-function withDeadline(work) {
+function withDeadline(work, slowMessage = 'Xero took too long to load.') {
   let timer;
   const deadline = new Promise(resolve => {
-    timer = setTimeout(() => resolve(fail('timeout', 'Xero took too long to load.')), READ_DEADLINE_MS);
+    timer = setTimeout(() => resolve(fail('timeout', slowMessage)), READ_DEADLINE_MS);
   });
   return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
 }
@@ -264,11 +354,17 @@ let queue = Promise.resolve();
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const fromVerify = sender.id === chrome.runtime.id && typeof sender.url === 'string'
     && ALLOWED_SENDERS.some(prefix => sender.url.startsWith(prefix));
-  if (!fromVerify || !message || !['READ_BANK_PAGE', 'READ_BANK_LINES'].includes(message.type)) return false;
+  if (!fromVerify || !message || !['READ_BANK_PAGE', 'READ_BANK_LINES', 'READ_ZOHO_BANKING'].includes(message.type)) return false;
   // Stage updates go only to the Verify tab that asked; a closed tab simply misses them.
   const progress = stage => {
     if (sender.tab && sender.tab.id != null) chrome.tabs.sendMessage(sender.tab.id, { type: 'READ_PROGRESS', stage }).catch(() => {});
   };
+  if (message.type === 'READ_ZOHO_BANKING') {
+    const answerZoho = async result => { await recordStatus(result, 'zoho'); sendResponse(result); };
+    queue = queue.then(() => withDeadline(readZohoBanking(message.orgId, message.booksHost, progress), 'Zoho Books took too long to load.'))
+      .then(answerZoho, () => answerZoho(fail('extension_error', 'Unexpected error.')));
+    return true; // answer asynchronously
+  }
   const work = message.type === 'READ_BANK_LINES'
     ? () => readBankLines(message.shortCode, message.accountName, progress)
     : () => readBankPage(message.shortCode, progress);
