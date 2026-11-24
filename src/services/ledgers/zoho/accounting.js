@@ -22,6 +22,7 @@
 // (the checks then ask for a reconnect) and the sync carries on.
 const client = require('./client');
 const mapping = require('./mapping');
+const { isBalanceCheckAccount } = require('../../uaeRules');
 
 const PER_PAGE = 200;
 const MAX_PAGES = 1000;
@@ -160,8 +161,59 @@ function byId(rows, field) {
 
 async function readAccounts(externalId, budget) {
   // AccountType.All: inactive accounts too (Zoho lists only active ones by default), as Xero's list does.
-  const rows = await readAllPages(externalId, '/chartofaccounts', 'chartofaccounts', { filter_by: 'AccountType.All' }, budget);
-  return rows.map(mapping.mapAccount);
+  // showbalance=true asks Zoho to put each account's current balance on the list (no extra call). Should Zoho refuse
+  // the parameter, the chart is read again without it, so the chart itself never depends on it.
+  const params = { filter_by: 'AccountType.All' };
+  let rows;
+  try {
+    rows = await readAllPages(externalId, '/chartofaccounts', 'chartofaccounts', { ...params, showbalance: 'true' }, budget);
+  } catch (error) {
+    if (isFatal(error) || error.dailyLimit || isNotAuthorized(error)) throw error;
+    console.log(`Zoho Books organisation ${externalId}: chart of accounts with balances not read (${error.message}); reading it without them.`);
+    rows = await readAllPages(externalId, '/chartofaccounts', 'chartofaccounts', params, budget);
+  }
+  const readAt = new Date().toISOString();
+  return rows.map(raw => {
+    const account = mapping.mapAccount(raw);
+    if (account.ledgerBalance) account.ledgerBalance.readAt = readAt;
+    return account;
+  });
+}
+
+// The current balances Suspense & Clearing Balances and the Director's Loan / Shareholder check need. When the chart
+// list carried balances (showbalance) nothing more is read. Otherwise GET /chartofaccounts/{id} (accountants.READ)
+// is read for the candidate accounts only (suspense, clearing, director, shareholder, partner, related party,
+// current account: uaeRules.isBalanceCheckAccount), within the read budget. A candidate whose balance could not be
+// read keeps the one the last sync read, marked stale. Changes the account rows in place.
+async function readCandidateBalances(externalId, accounts, budget, cachedAccounts, { emit = () => {} } = {}) {
+  const status = { read: true, source: null, candidates: 0, withBalance: 0, detailRead: 0, stale: 0 };
+  const candidates = (accounts || []).filter(account => account && account.status !== 'ARCHIVED' && isBalanceCheckAccount(account));
+  status.candidates = candidates.length;
+  if ((accounts || []).some(account => account && account.ledgerBalance)) {
+    status.source = 'chart_list';
+  } else if (candidates.length) {
+    status.source = 'account_detail';
+    const readAt = new Date().toISOString();
+    const { done } = await readDetails(externalId, candidates, budget, 'account balances', async account => {
+      const body = await client.apiGet(externalId, `/chartofaccounts/${encodeURIComponent(account.accountID)}`);
+      const raw = body?.chart_of_account || body?.chartofaccount || body?.account || null;
+      const balance = mapping.balanceOf(raw);
+      if (!balance) throw new Error('the answer has no balance');
+      account.ledgerBalance = { ...balance, source: 'account_detail', readAt };
+    }, { emit });
+    status.detailRead = done.size;
+  }
+  const previous = byId(cachedAccounts, 'accountID');
+  for (const account of candidates) {
+    if (account.ledgerBalance) continue;
+    const old = previous.get(String(account.accountID));
+    if (old && old.ledgerBalance) {
+      account.ledgerBalance = { ...old.ledgerBalance, stale: true };
+      status.stale += 1;
+    }
+  }
+  status.withBalance = candidates.filter(account => account.ledgerBalance).length;
+  return status;
 }
 
 async function readTaxRates(externalId, budget) {
@@ -284,6 +336,12 @@ async function fetchAccounting(externalId, { emit = () => {}, cached = async () 
   const accounts = await optionalRead(budget, 'chart of accounts', externalId, () => readAccounts(externalId, budget));
   note('accounts', accounts);
 
+  if (accounts.ok) {
+    const balances = await optionalRead(budget, 'account balances', externalId,
+      async () => readCandidateBalances(externalId, accounts.value, budget, await load('account'), { emit }));
+    status.sections.balances = balances.ok ? balances.value : { read: false, reason: balances.reason };
+  }
+
   emit({ step: 'fetch_accounting', message: 'Reading tax rates from Zoho Books...' });
   const taxRates = await optionalRead(budget, 'tax rates', externalId, () => readTaxRates(externalId, budget));
   note('taxRates', taxRates);
@@ -338,6 +396,9 @@ async function fetchAccounting(externalId, { emit = () => {}, cached = async () 
   const keepCached = source => cachedBankTransactions.filter(row => row && row.source === source);
   bankRows.push(...(banking.ok ? banking.value.lines : banking.reason === 'not_authorized' ? [] : keepCached('zoho_uncategorized')));
   bankRows.push(...(expenses.ok ? expenses.value.rows : expenses.reason === 'not_authorized' ? [] : keepCached('zoho_expense')));
+  // The categorised deposits Invoice or Direct reads (fetchBankActivity, after the line items) are kept as they were
+  // until that read replaces them; refused banking empties them with the rest of the banking data.
+  bankRows.push(...(banking.reason === 'not_authorized' ? [] : keepCached('zoho_categorized_receipt')));
   if (!bankFresh) bankRows = cachedBankTransactions;
 
   return {
@@ -348,6 +409,144 @@ async function fetchAccounting(externalId, { emit = () => {}, cached = async () 
     status,
     budget,
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Bank activity for Unreconciled Bank and Invoice or Direct, read after the line items with what is left of the same
+// read budget (each list page counts as one read), only for bank accounts and only for the review period (and, for
+// the deposits, the 3 months before it, which the check lists for context):
+//  - each bank account's recorded transactions with their reconcile_status (GET /chartofaccounts/transactions,
+//    accountants.READ, already granted). Kept on the account row as `reconciliation` (unreconciled rows only, with
+//    the counts), so no new cache type is needed. Cash accounts have no statement to reconcile and are skipped.
+//  - the categorised deposits put straight to income (GET /banktransactions?filter_by=Status.Categorized,
+//    banking.READ), as bank_transaction rows with source 'zoho_categorized_receipt'. Not read when banking is refused.
+// ASSUMED (to be confirmed live): the account transactions list is /chartofaccounts/transactions with its rows under
+// "transactions" (Zoho's v3 docs); /chartofaccounts/accounttransactions is tried when that path is not found. Both
+// lists are filtered by date.start / date.end, and every row is also checked against the window here, so a
+// parameter Zoho ignored can cost pages but never brings in rows from outside the window.
+// read: what fetchAccounting returned (changed in place). Returns the read status of the two sections.
+const ACCOUNT_TRANSACTION_PATHS = [
+  { path: '/chartofaccounts/transactions', keys: ['transactions', 'accounttransactions'] },
+  { path: '/chartofaccounts/accounttransactions', keys: ['transactions', 'accounttransactions'] },
+];
+
+function shiftMonths(isoDate, months) {
+  const date = new Date(`${isoDate}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return null;
+  date.setUTCMonth(date.getUTCMonth() + months);
+  return date.toISOString().slice(0, 10);
+}
+
+// Every page of one list within the budget. Returns { rows, complete } (complete false when the budget or the daily
+// limit stopped it part-way). Throws on a failed call, as readAllPages does.
+async function readPagesWithinBudget(externalId, path, keys, params, budget, options = {}) {
+  const rows = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    if (budget.dailyLimit) return { rows, complete: false };
+    if (budget.left() <= 0) { budget.capReached = true; return { rows, complete: false }; }
+    budget.used++;
+    budget.listCalls++;
+    const body = await client.apiGet(externalId, path, { ...params, page, per_page: PER_PAGE }, options);
+    const key = keys.find(name => Array.isArray(body?.[name]));
+    if (!key) throw new Error(`Zoho Books ${path}: the answer has no ${keys.join(' or ')} list`);
+    rows.push(...body[key]);
+    if (!pageContext(body).has_more_page) return { rows, complete: true };
+  }
+  return { rows, complete: false };
+}
+
+async function fetchBankActivity(externalId, read, { period = null, emit = () => {}, readBudget = null, cached = async () => [], today = new Date() } = {}) {
+  const budget = readBudget || createReadBudget();
+  if (budget.externalId == null) budget.externalId = externalId;
+  const todayIso = today.toISOString().slice(0, 10);
+  const end = period && period.end && period.end < todayIso ? period.end : todayIso;
+  const start = (period && period.start) || shiftMonths(end, -12);
+  const contextStart = shiftMonths(start, -3) || start;
+  const within = (date, from) => Boolean(date) && date >= from && date <= end;
+  const accounts = Array.isArray(read?.accounts?.rows) ? read.accounts.rows : [];
+  const banks = accounts.filter(a => a && a.type === 'BANK' && a.status !== 'ARCHIVED');
+  const status = read.status || (read.status = { permissions: {}, sections: {} });
+  status.sections = status.sections || {};
+  let cachedAccounts = null;
+  const previousOf = async id => {
+    if (!cachedAccounts) { try { cachedAccounts = byId((await cached('account')) || [], 'accountID'); } catch (error) { cachedAccounts = new Map(); } }
+    return cachedAccounts.get(String(id)) || null;
+  };
+
+  // Unreconciled Bank: recorded transactions and their reconcile status, per bank or card account (not cash).
+  emit({ step: 'fetch_accounting', message: 'Reading which bank transactions are reconciled in Zoho Books...' });
+  const reconciliation = { read: true, from: start, to: end, accounts: 0, complete: 0, rows: 0, unreconciled: 0, unknown: 0, path: null };
+  let pathIndex = 0;
+  for (const account of banks.filter(a => a.zohoAccountType !== 'cash')) {
+    reconciliation.accounts += 1;
+    let result = null;
+    let failure = null;
+    while (pathIndex < ACCOUNT_TRANSACTION_PATHS.length) {
+      const { path, keys } = ACCOUNT_TRANSACTION_PATHS[pathIndex];
+      const attempt = await optionalRead(budget, `transactions of ${account.name || account.accountID}`, externalId,
+        () => readPagesWithinBudget(externalId, path, keys, { account_id: account.accountID, 'date.start': start, 'date.end': end }, budget));
+      if (attempt.ok) { result = attempt.value; reconciliation.path = path; break; }
+      failure = attempt;
+      // Not found at this path: try the other one once, then stay with whichever answered.
+      if (attempt.reason === 'error' && /\b404\b/.test(String(attempt.error || '')) && pathIndex + 1 < ACCOUNT_TRANSACTION_PATHS.length) { pathIndex += 1; continue; }
+      break;
+    }
+    if (!result) {
+      const old = await previousOf(account.accountID);
+      if (old && old.reconciliation) account.reconciliation = { ...old.reconciliation, stale: true };
+      if (failure && failure.reason === 'daily_limit') break;
+      continue;
+    }
+    const rows = result.rows.map(raw => mapping.mapAccountTransaction(raw, account))
+      .filter(row => within(row.date, start) && !/opening_?balance/i.test(String(row.transactionType || '')));
+    const unreconciled = rows.filter(row => row.reconcileState === 'unreconciled');
+    account.reconciliation = {
+      readAt: new Date().toISOString(), from: start, to: end, complete: result.complete,
+      rows: rows.length, reconciled: rows.filter(row => row.reconcileState === 'reconciled').length,
+      unknown: rows.filter(row => row.reconcileState === 'unknown').length, unreconciled,
+    };
+    reconciliation.complete += result.complete ? 1 : 0;
+    reconciliation.rows += rows.length;
+    reconciliation.unreconciled += unreconciled.length;
+    reconciliation.unknown += account.reconciliation.unknown;
+  }
+  if (reconciliation.accounts && reconciliation.complete < reconciliation.accounts) reconciliation.read = false;
+  // Kept with the chart in the cache (a chart that was not read this time is rewritten with what it had, plus this).
+  if (reconciliation.complete && accounts.length) read.accounts = { rows: accounts, fresh: true };
+  status.sections.reconciliation = reconciliation;
+
+  // Invoice or Direct: deposits categorised straight to income, per bank, card or cash account.
+  const receipts = { read: false, from: contextStart, to: end, accounts: 0, rows: 0 };
+  if (status.permissions && status.permissions.banking === true) {
+    emit({ step: 'fetch_accounting', message: 'Reading categorised bank deposits from Zoho Books...' });
+    const found = [];
+    let complete = true;
+    for (const account of banks) {
+      receipts.accounts += 1;
+      const attempt = await optionalRead(budget, `categorised deposits of ${account.name || account.accountID}`, externalId,
+        () => readPagesWithinBudget(externalId, '/banktransactions', ['banktransactions'],
+          { account_id: account.accountID, filter_by: 'Status.Categorized', 'date.start': contextStart, 'date.end': end }, budget, { optionalScope: true }),
+        { permission: 'banking' });
+      if (!attempt.ok || !attempt.value.complete) { complete = false; if (!attempt.ok) break; }
+      for (const raw of (attempt.ok ? attempt.value.rows : [])) {
+        if (raw?.transaction_id == null) continue;
+        if (raw.status && /uncategori[sz]ed/i.test(String(raw.status))) continue;
+        if (!mapping.INCOME_RECEIPT_TYPES.has(String(raw.transaction_type || '').toLowerCase())) continue;
+        const row = mapping.mapCategorisedReceipt(raw, account);
+        if (within(row.date, contextStart)) found.push(row);
+      }
+    }
+    if (complete) {
+      receipts.read = true;
+      receipts.rows = found.length;
+      const others = (read.bankTransactions?.rows || []).filter(row => row && row.source !== 'zoho_categorized_receipt');
+      read.bankTransactions = { rows: [...others, ...found], fresh: true };
+    }
+  } else {
+    receipts.reason = status.permissions && status.permissions.banking === false ? 'not_authorized' : 'banking_not_read';
+  }
+  status.sections.categorisedReceipts = receipts;
+  return { reconciliation, receipts };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -419,5 +618,5 @@ async function fetchLineItems(externalId, docs, { emit = () => {}, cachedDocumen
 
 module.exports = {
   DEFAULT_MAX_DETAIL_READS, DEFAULT_DAILY_CALL_ALLOWANCE, DEFAULT_DAILY_RESERVE, createReadBudget, fetchAccounting, fetchLineItems, readAllPages,
-  isNotAuthorized,
+  isNotAuthorized, fetchBankActivity, ACCOUNT_TRANSACTION_PATHS,
 };

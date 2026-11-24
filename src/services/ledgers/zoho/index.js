@@ -642,6 +642,7 @@ module.exports = {
   createReadBudget: accounting.createReadBudget,
   fetchAccounting: accounting.fetchAccounting,
   fetchLineItems: accounting.fetchLineItems,
+  fetchBankActivity: accounting.fetchBankActivity,
   // For tests and support scripts.
   mapInvoice, mapBill, mapSalesCredit, mapVendorCredit, mapContact, financialYearEnd, fetchAllPages,
   currencyRateFrom, vendorCreditRates, openingBalanceCandidates, fetchOpeningBalances,

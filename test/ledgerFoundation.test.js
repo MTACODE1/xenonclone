@@ -619,3 +619,83 @@ test('disconnect needs the form token, then marks the client disconnected and re
   assert.deepEqual(removed.params, ['quickbooks', '9130']);
   assert.equal(orgs.get('qbo-9130').connection_status, 'disconnected');
 });
+
+// ===================== 25 Nov 2026: the non-Xero rules brought into line with Xero =====================
+const findingRows = (orgId, runId, checkType) => getDb().prepare(
+  'SELECT detail_json FROM issue_findings WHERE org_id = ? AND run_id = ? AND check_type = ? ORDER BY id'
+).all(orgId, runId, checkType).map(row => JSON.parse(row.detail_json));
+async function runWith(t, orgId, runId, ledger, { invoices = [], contacts = [], baseCurrency = null } = {}) {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(TODAY) });
+  getDb();
+  await runLedgerChecks({
+    org: { id: orgId, name: 'Made Up Ltd' }, runId, period: period(), invoices, contacts, credits: [], options: {}, ledger,
+    baseCurrency, saveOrganisation: async () => {},
+  });
+  return issuesOf(orgId, runId);
+}
+
+test('Old Unpaid Invoices (non-Xero ledgers): aged by DUE date as at the end of the month, the invoice date only when there is no due date', async t => {
+  const c1 = contact('c1', 'Alpha Trading Ltd');
+  const invoices = [
+    doc('long-terms', 'ACCREC', 'AUTHORISED', '2026-07-01', { dueDate: '2026-10-15', amountDue: 100, total: 100, contact: c1 }), // old by date, not by due date
+    doc('overdue', 'ACCREC', 'AUTHORISED', '2026-09-01', { dueDate: '2026-09-15', amountDue: 60, total: 60, contact: c1 }),     // 76 days past due at 30 Nov
+    doc('no-due', 'ACCREC', 'AUTHORISED', '2026-09-29', { dueDate: null, amountDue: 30, total: 30, contact: c1 }),             // no due date: 62 days from its date
+    doc('paid', 'ACCREC', 'PAID', '2026-01-01', { dueDate: '2026-01-31', amountDue: 0, total: 10, contact: c1 }),
+  ];
+  for (const [key, orgId, runId] of [['zoho', 911, 9111], ['quickbooks', 912, 9112], ['freeagent', 913, 9113]]) {
+    const issues = await runWith(t, orgId, runId, { key, purchaseCredits: true, drafts: true }, { invoices });
+    assert.deepEqual(findingIds(orgId, runId, 'old_unpaid_invoices').sort(), ['no-due', 'overdue'], key);
+    assert.equal(issues.old_unpaid_invoices.potential_value_gbp, 90, key);
+    t.mock.timers.reset();
+  }
+});
+
+test('Undocumented Bills (Zoho): paid bills with no attachment are included, as the Xero rule; the other ledgers keep unpaid only', async t => {
+  const c2 = contact('c2', 'Beta Supplies');
+  const invoices = [
+    doc('b-paid', 'ACCPAY', 'PAID', '2026-08-01', { total: 50, contact: c2 }),
+    doc('b-open', 'ACCPAY', 'AUTHORISED', '2026-08-02', { total: 40, amountDue: 40, contact: c2 }),
+    doc('b-doc', 'ACCPAY', 'PAID', '2026-08-03', { total: 30, contact: c2, hasAttachments: true }),
+    doc('b-ob', 'ACCPAY', 'PAID', '2026-08-04', { total: 20, contact: c2, isOpeningBalance: true }),
+  ];
+  const zohoIssues = await runWith(t, 914, 9114, { key: 'zoho', purchaseCredits: true, drafts: true }, { invoices });
+  assert.deepEqual(findingRows(914, 9114, 'undocumented_bills').map(r => r.invoiceId).sort(), ['b-open', 'b-paid']);
+  assert.equal(zohoIssues.undocumented_bills.count, 2);
+  t.mock.timers.reset();
+  await runWith(t, 915, 9115, { key: 'quickbooks', purchaseCredits: true, drafts: false }, { invoices });
+  assert.deepEqual(findingRows(915, 9115, 'undocumented_bills').map(r => r.invoiceId), ['b-open']);
+});
+
+test('Duplicate Contacts (UAE Zoho client): UAE legal endings and Dr/Cr copies are ignored; the pairs show the real names', async t => {
+  const names = [['k1', 'Blue Sea FZE'], ['k2', 'Blue Sea FZ-LLC'], ['k3', 'Nova Tech DMCC'], ['k4', 'NOVA TECH FZCO'],
+    ['k5', 'Desert Rose (Sole Proprietorship L.L.C.)'], ['k6', 'Desert Rose Trading LLC S.P.S'], ['k7', 'Acme Supplies Dr.'], ['k8', 'Acme Supplies (Cr)'],
+    ['k9', 'Unrelated Works']];
+  const contacts = names.map(([id, name]) => ({ contactID: id, name, contactStatus: 'ACTIVE' }));
+  const invoices = names.map(([id, name], index) => doc(`d-${id}`, 'ACCPAY', 'AUTHORISED', '2026-08-01', { total: 10 + index, amountDue: 10 + index, contact: contact(id, name), hasAttachments: true }));
+  const pairs = orgId => findingRows(orgId, orgId * 10, 'duplicate_contacts').map(r => [r.name1, r.name2]);
+  await runWith(t, 916, 9160, { key: 'zoho', purchaseCredits: true, drafts: true }, { invoices, contacts, baseCurrency: 'AED' });
+  assert.deepEqual(pairs(916), [
+    ['Blue Sea FZE', 'Blue Sea FZ-LLC'], ['Nova Tech DMCC', 'NOVA TECH FZCO'],
+    ['Desert Rose (Sole Proprietorship L.L.C.)', 'Desert Rose Trading LLC S.P.S'], ['Acme Supplies Dr.', 'Acme Supplies (Cr)'],
+  ]);
+  // Sister companies sharing a group name are not duplicates once their activity words ("General Trading",
+  // "Trading", "Est") are dropped; the same business with and without them still is.
+  const sisters = [['s1', 'Made Up Star General Trading L.L.C'], ['s2', 'Made Up Star Technical Services LLC'], ['s3', 'Made Up Noor Trading LLC'],
+    ['s4', 'Made Up Noor Building Contracting LLC'], ['s5', 'Rubyx Est.'], ['s6', 'Rubyx Electrical Est.'], ['s7', 'MADE UP STAR LLC'],
+    ['s8', 'Made Up Noor General Trading'], ['s9', 'Made Up Furniture IND L.L.C'], ['s10', 'Made up furniture']];
+  const sisterContacts = sisters.map(([id, name]) => ({ contactID: id, name, contactStatus: 'ACTIVE' }));
+  const sisterInvoices = sisters.map(([id, name], index) => doc(`d-${id}`, 'ACCPAY', 'AUTHORISED', '2026-08-01', { total: 10 + index, amountDue: 10 + index, contact: contact(id, name), hasAttachments: true }));
+  t.mock.timers.reset();
+  await runWith(t, 918, 9180, { key: 'zoho', purchaseCredits: true, drafts: true }, { invoices: sisterInvoices, contacts: sisterContacts, baseCurrency: 'AED' });
+  // ("Made Up Star Technical Services LLC" / "MADE UP STAR LLC" is the shared one-name-plus-extra-words rule on the
+  // names as they are, found for every ledger; the two sister companies are not paired with each other.)
+  assert.deepEqual(pairs(918), [
+    ['Made Up Star General Trading L.L.C', 'MADE UP STAR LLC'], ['Made Up Star Technical Services LLC', 'MADE UP STAR LLC'],
+    ['Made Up Noor Trading LLC', 'Made Up Noor General Trading'],
+    ['Made Up Furniture IND L.L.C', 'Made up furniture'],
+  ]);
+  // A GBP (UK) Zoho client and every other ledger compare names exactly as before.
+  t.mock.timers.reset();
+  await runWith(t, 917, 9170, { key: 'zoho', purchaseCredits: true, drafts: true }, { invoices, contacts, baseCurrency: 'GBP' });
+  assert.ok(!pairs(917).some(([a]) => a === 'Nova Tech DMCC'), 'UK client: the UAE endings are not stripped');
+});

@@ -114,7 +114,7 @@ async function runLedgerSync(key, identifier, org, progressCallback, options) {
     });
   }
   const accountingData = typeof provider.fetchAccounting === 'function'
-    ? await readAccounting(provider, externalId, org, docs, emit, cachedDocuments, options)
+    ? await readAccounting(provider, externalId, org, docs, emit, cachedDocuments, { ...options, period })
     : null;
   const invoices = await refreshCache(org.id, options.runId, 'invoice', [...docs.invoices, ...docs.bills], options);
   const contacts = await refreshCache(org.id, options.runId, 'contact', docs.contacts, options);
@@ -190,6 +190,13 @@ async function readAccounting(provider, externalId, org, docs, emit, cachedDocum
     emit, readBudget: budget, cached: type => cachedRows(org.id, type),
   });
   const lineItems = await provider.fetchLineItems(externalId, docs, { emit, readBudget: budget, cachedDocuments });
+  // Zoho: which bank transactions are reconciled, and the deposits categorised straight to income, for the review
+  // period, with what is left of the same budget (after the line items, which more checks need).
+  if (typeof provider.fetchBankActivity === 'function') {
+    await provider.fetchBankActivity(externalId, read, {
+      period: options.period || null, emit, readBudget: budget, cached: type => cachedRows(org.id, type),
+    });
+  }
   const out = {};
   for (const [name, type] of Object.entries(ACCOUNTING_TYPES)) {
     const section = read[name];

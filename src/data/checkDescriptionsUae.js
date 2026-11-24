@@ -9,9 +9,24 @@ const base = require('./checkDescriptions');
 
 const ZOHO = {
   unreconciled_bank_items: {
-    issue: "Zoho Books does not say which recorded bank transactions have been reconciled, so this check cannot be worked out. Bank lines still waiting to be categorised in Zoho are listed under Unprocessed Bank.",
+    issue: "The following bank and card transactions recorded in Zoho Books in the review period have not been reconciled yet (Zoho's reconcile status on each account's transactions). Cash accounts are not included. Bank lines still waiting to be categorised in Zoho are listed under Unprocessed Bank.",
     soWhat: base.unreconciled_bank_items.soWhat.replace(/Xero/g, 'Zoho Books'),
-    solution: "Use Unprocessed Bank and Bank Statements Review for this client, and reconcile each bank account in Zoho Books.",
+    solution: "Reconcile each bank account in Zoho Books (Banking, then Reconcile) against the bank statement, and process each item listed.",
+  },
+  suspense_open_balance: {
+    issue: "The following suspense or clearing accounts have a balance in Zoho Books. Zoho gives each account's current balance, not the balance at the end of the period, so the date each balance was read is shown.",
+    soWhat: base.suspense_open_balance.soWhat,
+    solution: base.suspense_open_balance.solution,
+  },
+  directors_loan_overdrawn: {
+    issue: "The following director's loan accounts are overdrawn, meaning the director owes the company money. Zoho gives each account's current balance, not the balance at the end of the period, so the date each balance was read is shown.",
+    soWhat: base.directors_loan_overdrawn.soWhat,
+    solution: base.directors_loan_overdrawn.solution,
+  },
+  invoice_or_direct: {
+    issue: "The following bank deposits were categorised in Zoho Books straight to income (sales without invoices, other income or a deposit), whereas it appears that they should have been recorded as a payment against an unpaid invoice instead.",
+    soWhat: base.invoice_or_direct.soWhat,
+    solution: base.invoice_or_direct.solution,
   },
   unprocessed_bank: {
     issue: "The following bank accounts have transactions in Zoho Books that are still Uncategorized (not yet matched or categorised).",
@@ -52,7 +67,7 @@ const UAE = {
     solution: "Review the turnover figure and the limit shown, then agree with the client whether a VAT registration, deregistration or Corporate Tax position needs to change.",
   },
   directors_loan_overdrawn: {
-    issue: "Shareholder, partner or related-party accounts where the owner owes the company money at the end of the period. Zoho Books' API gives no account balances (no balance sheet or trial balance), so this cannot be checked automatically yet.",
+    issue: "Shareholder, partner or related-party accounts where the owner owes the company money. Zoho gives each account's current balance, not the balance at the end of the period, so the date each balance was read is shown.",
     soWhat: "Under UAE Corporate Tax, dealings with shareholders, directors and other connected persons must be at market value and on arm's-length terms, and may need to be disclosed with the Corporate Tax return. Unexplained balances can also hide personal spending or undeclared distributions.",
     solution: "Review each shareholder and related-party balance with the client in Zoho Books. Confirm it is a genuine loan on documented terms, clear it, or record the correct treatment before the Corporate Tax return is filed.",
   },

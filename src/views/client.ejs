@@ -31,6 +31,8 @@ const configuredAccounts = typeof accountConfigurations === 'undefined' ? expens
 // freeagent_company_id instead, the same universal identifier getOrganisationByTenantId
 // already resolves either kind of client by.
 const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
+// A Zoho Books client: the statement, statement-balance and filed-accounts cards are not shown (see below).
+const isZohoPage = /^zoho-\d{5,20}$/.test(String(org.freeagent_company_id || ''));
 
 %>
 
@@ -200,7 +202,8 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
       const zohoAccess = check => ['needs_zoho_bank_access', 'needs_zoho_expense_access'].includes(check.period_checked);
       // Bank access: a reading of Zoho's Banking page (the card below) works without reconnecting, and is what a
       // client whose reading went out of date needs, so the link goes to that card and names both actions.
-      const setupAnchor = check => check.period_checked === 'needs_zoho_bank_access' ? '#zoho-bank-screen' : zohoAccess(check) ? basePath + '/auth/zoho/connect' : check.type === 'opening_balance_differences' ? '#filed-accounts' : fromXeroScreen(check) ? '#bank-screen' : check.type === 'unprocessed_bank' ? '#statement-evidence' : '#bank-reconciliation';
+      // A Zoho Books client has no statement or filed-accounts cards: anything else to set up is on its Banking page card.
+      const setupAnchor = check => check.period_checked === 'needs_zoho_bank_access' ? '#zoho-bank-screen' : zohoAccess(check) ? basePath + '/auth/zoho/connect' : isZohoPage ? '#zoho-bank-screen' : check.type === 'opening_balance_differences' ? '#filed-accounts' : fromXeroScreen(check) ? '#bank-screen' : check.type === 'unprocessed_bank' ? '#statement-evidence' : '#bank-reconciliation';
       const setupPill = check => check.period_checked === 'needs_zoho_bank_access' ? 'Needs Zoho bank reading' : zohoAccess(check) ? 'Reconnect Zoho Books' : check.period_checked === 'needs_bank_update' ? 'Needs Xero update' : check.period_checked === 'needs_sync' ? 'Needs sync' : 'Not configured';
       const setupLink = check => check.period_checked === 'needs_zoho_bank_access' ? 'Update from Zoho Books (or reconnect Zoho Books to allow bank access) →' : check.period_checked === 'needs_zoho_expense_access' ? 'Reconnect Zoho Books to allow expense access →' : fromXeroScreen(check) ? 'Update from Xero →' : 'Configure evidence →';
     %>
@@ -501,7 +504,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
     <script src="<%= basePath %>/zohoBankScreen.js?v=2" defer></script>
     <% } %>
 
-    <div class="card" id="statement-evidence" style="margin-top: 24px;">
+    <%# Zoho Books clients: hidden. Their bank checks compare Zoho's own bank-feed balance and uncategorised lines (from Zoho's API or the Banking page reading above), never an imported statement or a typed closing balance, and a UAE company has no public filed-accounts register (the UAE Tax Registration card below covers it). %><% if (!isZohoPage) { %><div class="card" id="statement-evidence" style="margin-top: 24px;">
       <div class="card-header" style="background: var(--grey-100);">
         <h5>Bank Statement Evidence</h5>
         <p style="font-size: 0.75rem; color: #7C8FAC; margin-top: 4px;">
@@ -702,7 +705,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
           <% }) %>
         </div>
       <% } %>
-    </div>
+    </div><% } %>
 
     <% if (typeof uaeTaxCard !== 'undefined' && uaeTaxCard) { const uaeTax = uaeTaxCard.profile || {}; const uaeFmt = d => d ? String(d).slice(0, 10).split('-').reverse().join('/') : '—'; const uaeFlag = v => v === true ? 'Yes' : v === false ? 'No' : 'Not known'; %><%# A UAE company has no Companies House record: this card shows what Zoho Books holds about its UAE tax registration instead. %>
     <div class="card" id="uae-tax-registration" style="margin-top:24px;">

@@ -121,3 +121,34 @@ test('sync, cache-only re-run and an unchanged second sync', async () => {
   await syncLedgerOrganisation('zoho-600000009', null, { period: { type: 'all_transactions' } });
   assert.deepEqual(detailCalls(), ['/invoices/i1']);
 });
+
+test('sync: the bank reconcile status and categorised deposits are read after the line items, kept in the cache, and reused cache-only', async () => {
+  routes['/chartofaccounts/transactions'] = () => list('transactions', [
+    { categorized_transaction_id: 'r1', transaction_date: '2026-11-04', transaction_type: 'customer_payment', reconcile_status: 'unreconciled', debit_amount: 105, credit_amount: 0 },
+    { categorized_transaction_id: 'r2', transaction_date: '2026-11-05', transaction_type: 'expense', reconcile_status: 'reconciled', debit_amount: 0, credit_amount: 20 },
+  ]);
+  const plain = routes['/banktransactions'];
+  routes['/banktransactions'] = () => list('banktransactions', [
+    { transaction_id: 'bt1', date: '2026-11-20', amount: 50, transaction_type: 'withdrawal', status: 'uncategorized', account_id: 'a-bank' },
+    { transaction_id: 'dp1', date: '2026-11-06', amount: 105, transaction_type: 'sales_without_invoices', status: 'categorized', customer_id: 'c1', account_id: 'a-bank' },
+  ]);
+  try {
+    requests = [];
+    await syncLedgerOrganisation('zoho-600000009', null, { period: { type: 'all_transactions' } });
+    const paths = requests.map(u => u.pathname.replace('/books/v3', ''));
+    assert.ok(paths.indexOf('/chartofaccounts/transactions') > paths.lastIndexOf('/invoices'), 'after the documents and their lines');
+    const bank = given.accounting.accounts.find(a => a.accountID === 'a-bank');
+    assert.deepEqual(bank.reconciliation.unreconciled.map(t => t.transactionID), ['r1']);
+    assert.equal(given.accounting.readStatus.sections.reconciliation.unreconciled, 1);
+    assert.ok(given.accounting.bankTransactions.some(row => row.bankTransactionID === 'zrc-dp1'));
+    assert.ok(given.accounting.bankTransactions.some(row => row.bankTransactionID === 'zbt-bt1'), 'the uncategorised line is still there');
+    requests = [];
+    await syncLedgerOrganisation('zoho-600000009', null, { cacheOnly: true, period: { type: 'all_transactions' } });
+    assert.equal(requests.length, 0);
+    assert.deepEqual(given.accounting.accounts.find(a => a.accountID === 'a-bank').reconciliation.unreconciled.map(t => t.transactionID), ['r1']);
+    assert.ok(given.accounting.bankTransactions.some(row => row.bankTransactionID === 'zrc-dp1'));
+  } finally {
+    delete routes['/chartofaccounts/transactions'];
+    routes['/banktransactions'] = plain;
+  }
+});

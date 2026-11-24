@@ -54,6 +54,8 @@ A section Zoho could not read this time keeps its last cached copy (see `readSta
 | zohoAccountType | Zoho's own account_type, always kept |
 | isSystemAccount, parentAccountID, depth | from Zoho |
 | bank | null, or bank details from `/bankaccounts` (below) |
+| ledgerBalance | only when Zoho gave one: `{ amount, field, side (debit/credit/null), source ('chart_list' from showbalance=true, or 'account_detail' from GET /chartofaccounts/{id}), readAt, stale? }`. ASSUMED: amount is on the account's normal side (positive = debit on an asset, credit on a liability/equity), unless `side` says. Read for every account when the list carries it, else only for suspense/clearing/director/shareholder/related-party accounts (uaeRules.isBalanceCheckAccount) |
+| reconciliation | bank and card accounts only (not cash), from GET /chartofaccounts/transactions (else /chartofaccounts/accounttransactions) for the review period: `{ readAt, from, to, complete, rows, reconciled, unknown, unreconciled: [{ transactionID, date, transactionType, reconcileStatus, reconcileState, reference, entryNumber, description, payee, offsetAccountName, accountID, accountName, amount (signed, debit = money in), currencyCode }], stale? }` |
 
 `bank`: `{ accountType ('bank'|'credit_card'|...), currencyCode, bookBalance (balance in Zoho Books,
 account currency), bookBalanceBase (bcy_balance), bankBalance (feed balance; 0 when no feed, so check
@@ -135,12 +137,22 @@ null (Zoho does not say), date, reference, description, contact {vendor}, custom
 totalTax, lineAmountTypes, currencyCode, currencyRate, isBillable, hasAttachments, updatedDateUTC,
 lineItems: [Line], lineItemsRead, lineItemsStale, detailKey }`.
 
+**CategorisedReceipt** (`source: 'zoho_categorized_receipt'`, id `zrc-<transaction_id>`): a bank deposit
+categorised straight to income (transaction_type sales_without_invoices, other_income or deposit), from
+GET /banktransactions?filter_by=Status.Categorized (banking.READ), for the review period and the 3 months before
+it. For Invoice or Direct. `{ zohoTransactionID, type: 'RECEIVE', status: 'AUTHORISED', zohoTransactionType, date,
+reference, description, contact {customer}, bankAccount, offsetAccountID|null, offsetAccountName|null, total
+(account currency), currencyCode, lineItems: [] }`.
+
 ## ReadStatus (`organisation`, id `organisationID` = `'zoho-<organization_id>'`)
 
 ```
 { organisationID, ledger: 'zoho', readAt,
   permissions: { banking: true|false|null, expenses: true|false|null },
-  sections: { accounts, taxRates, manualJournals, banking, expenses: { read, reason?, error?, ... } },
+  sections: { accounts, taxRates, manualJournals, banking, expenses: { read, reason?, error?, ... },
+    balances: { read, source, candidates, withBalance, detailRead, stale },
+    reconciliation: { read, from, to, accounts, complete, rows, unreconciled, unknown, path },
+    categorisedReceipts: { read, from, to, accounts, rows, reason? } },
   lineItems: { read, carried, notRead, limit, used, capReached, dailyLimit, notReadAllSections, message? },
   detailReads: { limit, used, listCalls, capReached, dailyLimit, notRead } }
 ```
@@ -152,7 +164,8 @@ lineItems: [Line], lineItemsRead, lineItemsStale, detailKey }`.
 
 ## Not available from Zoho's API
 
-- Trial balance, balance sheet, P&L, bank summary and other reports (Zoho has no report endpoints).
+- Trial balance, balance sheet, P&L, bank summary and other reports (Zoho has no report endpoints). Account
+  balances are only the CURRENT ones (`Account.ledgerBalance`), never at a past date.
 - The general ledger journal list (Xero's `journal` type) — only manual journals.
 - Fixed asset register (scope not in Zoho's published list; not requested).
 - Bank statement date (Zoho's banking page has none either).

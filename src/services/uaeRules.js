@@ -39,6 +39,21 @@ const UAE_VEHICLE_NAME = /vehicle|\bcar\s+(hire|lease|leasing|rent|rental)|\bmot
 // "<name> Current Account"). Used only to describe the Shareholder check, which needs balances Zoho cannot give.
 const UAE_RELATED_PARTY_NAME = /shareholder|partner|owner|director|related party|due (to|from)|current account/i;
 
+// Suspense & Clearing Balances and the Director's Loan / Shareholder & Related Party check for Zoho Books, from the
+// accounts' current balances (Zoho gives no balance sheet). The names are the Xero rules' (journalChecks
+// SUSPENSE_NAME and DLA_NAME, copied so the Xero file is not touched); a UAE company also uses the related-party
+// names above. Bank, card and cash accounts are never candidates, and nor are income or expense accounts: a
+// "Directors Remuneration" or "Partner Commission" cost is not a balance owed to or by anyone (its balance is the
+// year's spend). An account whose class Zoho did not give is kept, as it may be a balance sheet account.
+const SUSPENSE_ACCOUNT_NAME = /suspense|clearing/i;
+const DLA_ACCOUNT_NAME = /director[s'’\s]{0,3}(loan|current)|\bdla\b|\bdrawings?\b/i;
+const isIncomeStatementAccount = account => account?._class === 'EXPENSE' || account?._class === 'REVENUE';
+function isBalanceCheckAccount(account) {
+  if (!account || account.type === 'BANK' || isIncomeStatementAccount(account)) return false;
+  const name = String(account.name || '');
+  return SUSPENSE_ACCOUNT_NAME.test(name) || DLA_ACCOUNT_NAME.test(name) || UAE_RELATED_PARTY_NAME.test(name);
+}
+
 // Is this Zoho client a UAE company? Zoho leaves the organisation's country empty, so it is told from the
 // currency (AED), the tax rates (country AE or authority FTA) or the "TRN" registration label.
 function regionOf({ baseCurrency = null, taxRates = [], taxProfile = null } = {}) {
@@ -90,6 +105,91 @@ function isNonGccImport(document) {
 }
 
 const aed = value => `AED ${Math.round(Number(value) || 0).toLocaleString('en-GB')}`;
+
+// Duplicate Contacts (UAE): the legal endings and noise a UAE contact name carries, dropped before two names are
+// compared, so "Falcon Star General Trading L.L.C" and "FALCON STAR LLC" are seen as one business. The Xero list
+// (checkRules LEGAL_ENDINGS) is not changed; the cleaned name is only what the shared comparison is given.
+// Endings are taken off the end of the name only, repeatedly ("X Trading L.L.C. S.P.C" -> "X"), and a name that
+// would be left empty keeps its original spelling.
+// Two levels: the legal form and Dr/Cr copies only (UAE_LEGAL_ENDINGS), and also the activity words "General
+// Trading", "Trading", "Est" / "Establishment", "Co" / "Company" (UAE_ACTIVITY_ENDINGS). A name cut down by an activity
+// word is often only a group's name ("Falcon Star"), so it is compared for an exact match only (uaeDuplicateContactPairs).
+const UAE_LEGAL_ENDINGS = [
+  /\(\s*(?:dr|cr)\.?\s*\)$/i, // "(Dr)" / "(Cr.)": a debit / credit copy of the same contact
+  /[-,]?\s*\b(?:dr|cr)\.?$/i,
+  /\(\s*([^()]*)\)$/, // a bracketed ending such as "(L.L.C)", "(FZE)", "(Sole Proprietorship L.L.C.)": unwrapped below
+  /\bsole\s+proprietorship\b\.?$/i,
+  /\bs\.?\s?p\.?\s?[sc]\.?$/i, // S.P.S / S.P.C / SPC (single person company)
+  /\bo\.?\s?p\.?\s?c\.?$/i, // OPC (one person company)
+  /\bfz[\s-]*l\.?\s?l\.?\s?c\.?$/i, // FZ-LLC, FZ LLC, FZLLC
+  /\bfz[\s-]?co\.?$/i, // FZCO, FZ-CO
+  /\bfz[\s-]?e\.?$/i, // FZE
+  /\bfzc\.?$/i,
+  /\bdmcc\.?$/i,
+  /\bl\.?\s?l\.?\s?c\.?$/i, // LLC, L.L.C, L.L.C.
+];
+const UAE_ACTIVITY_ENDINGS = [
+  /\bco\.?$/i, /\bcompany\.?$/i, /\bestablishment\.?$/i, /\best\.?$/i,
+  /\bgeneral\s+trading\b\.?$/i, /\btrading\b\.?$/i,
+];
+const UAE_CONTACT_ENDINGS = [...UAE_LEGAL_ENDINGS, ...UAE_ACTIVITY_ENDINGS];
+function stripUaeEndings(name, endings) {
+  const original = String(name || '');
+  let text = original.replace(/\s+/g, ' ').trim();
+  for (let guard = 0; guard < 12; guard += 1) {
+    const before = text;
+    for (const ending of endings) {
+      const match = ending.exec(text);
+      if (!match) continue;
+      // A bracketed ending is only dropped when what is inside it is itself an ending (or empty).
+      if (match[1] !== undefined) {
+        const inside = match[1].trim();
+        if (inside && stripUaeEndings(inside, UAE_CONTACT_ENDINGS) !== '') continue;
+      }
+      text = text.slice(0, match.index).replace(/[\s,.\-&]+$/, '').trim();
+      break;
+    }
+    if (text === before) break;
+  }
+  return text;
+}
+function uaeComparableContactName(name) {
+  return stripUaeEndings(name, UAE_CONTACT_ENDINGS);
+}
+// The name the duplicate search compares: the cleaned name, or the original when nothing would be left.
+function uaeContactNameForComparison(name) {
+  const cleaned = uaeComparableContactName(name);
+  return cleaned ? cleaned : String(name || '');
+}
+// The same, with only the legal form and Dr/Cr taken off (activity words kept).
+function uaeLegalNameForComparison(name) {
+  const cleaned = stripUaeEndings(name, UAE_LEGAL_ENDINGS);
+  return cleaned ? cleaned : String(name || '');
+}
+const sameWords = name => String(name || '').toLowerCase().replace(/&/g, ' and ').split(/[^a-z0-9]+/).filter(Boolean).join(' ');
+// Duplicate Contacts pairs for a UAE client, with the shared search (findPairs: checkRules.findDuplicateContactsAsync,
+// unchanged). Every rule (same words, one name plus extra words, close spelling) runs on the names without their
+// legal form; the names without their activity words as well only count when they are then exactly the same. So
+// "X General Trading LLC" / "X Trading" and "X Trading LLC" / "X LLC" are pairs, but "X General Trading LLC" /
+// "X Technical Services LLC" (two companies of one group) is not. Pairs keep the contacts' real names, in the shared
+// search's order.
+async function uaeDuplicateContactPairs(contacts, findPairs) {
+  const indexOf = new Map(contacts.map((c, index) => [c.contactID, index]));
+  const realName = new Map(contacts.map(c => [c.contactID, c.name]));
+  const legal = await findPairs(contacts.map(c => ({ ...c, name: uaeLegalNameForComparison(c.name) })));
+  const full = await findPairs(contacts.map(c => ({ ...c, name: uaeContactNameForComparison(c.name) })));
+  const seen = new Set();
+  const pairs = [];
+  const add = pair => {
+    const key = `${pair.id1}\u0000${pair.id2}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    pairs.push({ ...pair, name1: realName.get(pair.id1) ?? pair.name1, name2: realName.get(pair.id2) ?? pair.name2 });
+  };
+  legal.forEach(add);
+  full.filter(pair => sameWords(pair.name1) === sameWords(pair.name2)).forEach(add);
+  return pairs.sort((p, q) => indexOf.get(p.id1) - indexOf.get(q.id1) || indexOf.get(p.id2) - indexOf.get(q.id2));
+}
 
 // The UAE VAT registration and Corporate Tax Small Business Relief tests. Pure: the caller works out the figures.
 //  taxableSupplies: rolling 12 months of taxable sales plus imports, net, in AED
@@ -155,5 +255,6 @@ module.exports = {
   UAE_VAT, SBR_REVENUE, SBR_LAST_PERIOD_END, SBR_FIRST_PERIOD_START, UAE_POLICY,
   VAT_ACCOUNT_NAME, UAE_PURCHASE_TAX_EXCLUDED_NAME, UAE_ENTERTAINMENT_NAME, UAE_VEHICLE_NAME, UAE_RELATED_PARTY_NAME,
   regionOf, isVatRegistered, isExemptLine, isReverseChargeLine, isImportDocument, isUnregisteredSupplier, isNonGccImport,
-  evaluateUaeThresholds, aed,
+  evaluateUaeThresholds, aed, uaeComparableContactName, uaeContactNameForComparison, uaeLegalNameForComparison, uaeDuplicateContactPairs,
+  SUSPENSE_ACCOUNT_NAME, DLA_ACCOUNT_NAME, isBalanceCheckAccount, isIncomeStatementAccount,
 };

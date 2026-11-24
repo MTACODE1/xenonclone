@@ -187,7 +187,40 @@ function mapAccount(account) {
     parentAccountID: idOrNull(account.parent_account_id),
     depth: numberOrNull(account.depth),
     bank: null, // filled in from /bankaccounts by mergeBankAccounts when banking can be read
+    // The account's current balance, only when the answer carries one (the chart list read with showbalance=true,
+    // or GET /chartofaccounts/{id}); no field at all otherwise, so an account without it reads exactly as before.
+    ...balanceField(account),
   };
+}
+
+// A money figure as Zoho may send it (a number, "1234.5" or "1,234.50"), or null.
+function moneyOrNull(value) {
+  if (value == null || value === '') return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const parsed = Number(String(value).replace(/,/g, '').trim());
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+// An account's current balance from a chart-of-accounts answer. Zoho's documentation names closing_balance on
+// GET /chartofaccounts/{id}; the list read with showbalance=true is not documented field by field, so the usual
+// names are tried in turn. ASSUMED (to be confirmed on a live answer): the figure is on the account's normal side,
+// as Zoho's Chart of Accounts page shows it, i.e. positive = a debit balance on an asset or expense account and a
+// credit balance on a liability, equity or income account; negative = the other side. When Zoho also says which
+// side (debit_or_credit / balance_type), that is used instead.
+const BALANCE_FIELDS = ['closing_balance', 'current_balance', 'balance', 'account_balance'];
+function balanceOf(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  for (const field of BALANCE_FIELDS) {
+    const amount = moneyOrNull(raw[field]);
+    if (amount == null) continue;
+    const side = String(raw.debit_or_credit || raw.balance_type || '').trim().toLowerCase();
+    return { amount: round2(amount), field, side: side === 'debit' || side === 'credit' ? side : null };
+  }
+  return null;
+}
+function balanceField(raw) {
+  const balance = balanceOf(raw);
+  return balance ? { ledgerBalance: { ...balance, source: 'chart_list' } } : {};
 }
 
 // One row of GET /bankaccounts. balance is the account's balance in Zoho Books in the account's own
@@ -450,6 +483,82 @@ function mapUncategorisedLine(raw, account = {}) {
   };
 }
 
+// One row of an account's transactions (GET /chartofaccounts/transactions?account_id=..., accountants.READ), for
+// Unreconciled Bank. Zoho's documentation lists reconcile_status on each row; its values are not listed, so
+// "unreconciled" / "not_reconciled" mean not reconciled, any other value naming "reconciled" means reconciled, and
+// anything else (or no field) is "unknown" and never counted. On a bank account a debit is money in.
+function reconcileStateOf(value) {
+  const text = String(value == null ? '' : value).trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (!text) return 'unknown';
+  if (/^(un|not_?|non_?)reconciled$/.test(text)) return 'unreconciled';
+  if (/reconciled/.test(text)) return 'reconciled';
+  return 'unknown';
+}
+// amountInBaseCurrency: true when the amount came from Zoho's bcy_ (base currency) fields, so a row on a foreign
+// currency account is already in the organisation's currency; false when only the account-currency fields were there.
+function mapAccountTransaction(raw, account = {}) {
+  const debit = moneyOrNull(raw.bcy_debit != null ? raw.bcy_debit : raw.debit_amount) || 0;
+  const credit = moneyOrNull(raw.bcy_credit != null ? raw.bcy_credit : raw.credit_amount) || 0;
+  let signed = debit - credit;
+  let amountInBaseCurrency = raw.bcy_debit != null || raw.bcy_credit != null;
+  if (!debit && !credit) {
+    const amount = moneyOrNull(raw.bcy_amount != null ? raw.bcy_amount : raw.amount) || 0;
+    signed = String(raw.debit_or_credit || '').toLowerCase() === 'credit' ? -Math.abs(amount) : Math.abs(amount);
+    amountInBaseCurrency = raw.bcy_amount != null;
+  }
+  return {
+    transactionID: idOrNull(raw.categorized_transaction_id) || idOrNull(raw.transaction_id) || idOrNull(raw.entity_id),
+    date: dateOnly(raw.transaction_date || raw.date),
+    transactionType: textOrNull(raw.transaction_type),
+    reconcileStatus: textOrNull(raw.reconcile_status || raw.reconciliation_status),
+    reconcileState: reconcileStateOf(raw.reconcile_status || raw.reconciliation_status),
+    reference: textOrNull(raw.reference_number),
+    entryNumber: textOrNull(raw.entry_number) || textOrNull(raw.transaction_number),
+    description: textOrNull(raw.description),
+    payee: textOrNull(raw.payee) || textOrNull(raw.contact_name) || textOrNull(raw.customer_name) || textOrNull(raw.vendor_name),
+    offsetAccountName: textOrNull(raw.offset_account_name),
+    accountID: idOrNull(raw.account_id) || idOrNull(account.accountID),
+    accountName: textOrNull(raw.account_name) || textOrNull(account.name),
+    amount: round2(signed),
+    amountInBaseCurrency,
+    currencyCode: textOrNull(raw.currency_code),
+  };
+}
+
+// A categorised bank deposit (GET /banktransactions?filter_by=Status.Categorized, banking.READ) of a type that
+// puts money straight to income: sales_without_invoices, other_income, or a plain deposit. Kept in the
+// bank_transaction cache with Xero's RECEIVE shape, for Invoice or Direct. The income account is given only as
+// offset_account_id / offset_account_name when Zoho sends them; otherwise the transaction type says it is income.
+const INCOME_RECEIPT_TYPES = new Set(['deposit', 'sales_without_invoices', 'other_income']);
+function mapCategorisedReceipt(raw, account = {}) {
+  return {
+    bankTransactionID: `zrc-${raw.transaction_id}`,
+    zohoTransactionID: String(raw.transaction_id),
+    source: 'zoho_categorized_receipt',
+    isStatementLine: false,
+    type: 'RECEIVE',
+    status: 'AUTHORISED',
+    zohoStatus: textOrNull(raw.status),
+    zohoTransactionType: textOrNull(raw.transaction_type),
+    isReconciled: null,
+    date: dateOnly(raw.date),
+    reference: textOrNull(raw.reference_number),
+    description: textOrNull(raw.description),
+    contact: { contactID: idOrNull(raw.customer_id), name: textOrNull(raw.customer_name) || textOrNull(raw.payee) },
+    bankAccount: {
+      accountID: idOrNull(raw.account_id) || idOrNull(account.accountID),
+      name: textOrNull(raw.account_name) || textOrNull(account.name),
+    },
+    offsetAccountID: idOrNull(raw.offset_account_id),
+    offsetAccountName: textOrNull(raw.offset_account_name),
+    // In the account's own currency, as the invoice it may match is in its own (Invoice or Direct compares the two).
+    total: round2(Math.abs(number(raw.amount))),
+    currencyCode: textOrNull(raw.currency_code) || textOrNull(account.currencyCode),
+    lineItems: [],
+    updatedDateUTC: null,
+  };
+}
+
 // Expenses (GET /expenses, /expenses/{id}). Xero's nearest shape is a "spend money" bank transaction:
 // money paid out of a bank, card or cash account (paid_through_account) straight to an expense account.
 // Zoho does not say whether an expense is matched to a bank statement line, so isReconciled is null.
@@ -545,4 +654,5 @@ module.exports = {
   accountTypeOf, mapAccount, mapBankDetails, mergeBankAccounts, mapTaxRate,
   mapDocumentLine, documentDetail, mapJournalLine, mapManualJournal, journalStatus,
   mapUncategorisedLine, mapExpense, changeKey, isoUtc, currencyRateFrom,
+  balanceOf, reconcileStateOf, mapAccountTransaction, mapCategorisedReceipt, INCOME_RECEIPT_TYPES,
 };

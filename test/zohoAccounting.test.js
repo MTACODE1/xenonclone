@@ -409,3 +409,118 @@ test('a refused optional list right after a routine token refresh spends no seco
   await assert.rejects(client.apiGet(ORG, '/bankaccounts', {}, { optionalScope: true }), error => error.notAuthorized === true);
   assert.equal(tokenCalls(), 1, 'only the routine refresh');
 });
+
+// ---------------- account balances and bank activity (25 Nov 2026) ----------------
+const BALANCE_CHART = [
+  ...CHART,
+  accountRow('a-susp', 'Suspense Account', 'other_current_liability'),
+  accountRow('a-sh', 'Shareholder Loan - Made Up Person', 'other_current_asset'),
+  accountRow('a-cash', 'Petty Cash', 'cash', { is_system_account: true }),
+];
+
+test('balances: showbalance=true on the chart list gives them with no extra call', async () => {
+  fakeZoho();
+  handlers.unshift(r => at('/chartofaccounts')(r) && r.url.searchParams.get('showbalance') === 'true'
+    && page('chartofaccounts', BALANCE_CHART.map(row => ({ ...row, current_balance: row.account_id === 'a-susp' ? '1,250.50' : 0 }))));
+  const result = await accounting.fetchAccounting(ORG, { cached: async () => [] });
+  const suspense = result.accounts.rows.find(a => a.accountID === 'a-susp');
+  assert.equal(suspense.ledgerBalance.amount, 1250.5);
+  assert.equal(suspense.ledgerBalance.source, 'chart_list');
+  assert.equal(booksCalls('/chartofaccounts/').length, 0, 'no per-account reads');
+  assert.equal(result.status.sections.balances.source, 'chart_list');
+});
+
+test('balances: without them on the list, only the candidate accounts are read one by one; a refused showbalance is retried without it', async () => {
+  fakeZoho();
+  handlers.unshift(
+    r => at('/chartofaccounts')(r) && (r.url.searchParams.get('showbalance') === 'true'
+      ? json({ code: 2, message: 'Invalid value passed for showbalance' }, 400) : page('chartofaccounts', BALANCE_CHART)),
+    r => r.url.pathname.startsWith('/books/v3/chartofaccounts/a-') && (() => {
+      const id = decodeURIComponent(r.url.pathname.split('/').pop());
+      return ok({ chart_of_account: { account_id: id, closing_balance: id === 'a-sh' ? 3000 : -400 } });
+    })(),
+  );
+  const result = await accounting.fetchAccounting(ORG, { cached: async () => [] });
+  assert.deepEqual(booksCalls('/chartofaccounts/').sort(), ['/chartofaccounts/a-sh', '/chartofaccounts/a-susp'], 'suspense and shareholder only, never Sales, banks or cash');
+  assert.equal(result.accounts.rows.find(a => a.accountID === 'a-sh').ledgerBalance.amount, 3000);
+  assert.equal(result.accounts.rows.find(a => a.accountID === 'a-sh').ledgerBalance.source, 'account_detail');
+  assert.equal(result.accounts.rows.find(a => a.accountID === 'a-sales').ledgerBalance, undefined);
+  assert.equal(requests.filter(r => at('/chartofaccounts')(r)).length, 2, 'the chart was read again without showbalance');
+  assert.equal(result.status.sections.balances.withBalance, 2);
+});
+
+test('bank activity: reconcile status for bank and card accounts in the period only; income deposits for Invoice or Direct', async () => {
+  fakeZoho();
+  handlers.unshift(
+    r => at('/chartofaccounts')(r) && page('chartofaccounts', BALANCE_CHART),
+    // The first path is not there on this (made-up) Zoho: the other one is used for every account after it.
+    r => at('/chartofaccounts/transactions')(r) && json({ code: 5, message: 'Invalid URL Passed' }, 404),
+    r => at('/chartofaccounts/accounttransactions')(r) && page('transactions', r.url.searchParams.get('account_id') === 'a-bank' ? [
+      { categorized_transaction_id: 'x1', transaction_date: '2026-08-02', transaction_type: 'customer_payment', reconcile_status: 'unreconciled', debit_amount: 300, credit_amount: 0, payee: 'Made-up Customer' },
+      { categorized_transaction_id: 'x2', transaction_date: '2026-08-03', transaction_type: 'expense', reconcile_status: 'reconciled', debit_amount: 0, credit_amount: 50 },
+      { categorized_transaction_id: 'x3', transaction_date: '2026-05-01', transaction_type: 'expense', reconcile_status: 'unreconciled', debit_amount: 0, credit_amount: 9 },
+      { categorized_transaction_id: 'x4', transaction_date: '2026-08-04', transaction_type: 'opening_balance', reconcile_status: 'unreconciled', debit_amount: 100, credit_amount: 0 },
+    ] : []),
+    r => at('/banktransactions')(r) && r.url.searchParams.get('filter_by') === 'Status.Categorized' && page('banktransactions', r.url.searchParams.get('account_id') === 'a-bank' ? [
+      { transaction_id: 'd1', date: '2026-08-10', amount: 500, transaction_type: 'sales_without_invoices', status: 'categorized', customer_id: 'cust-1', customer_name: 'Made-up Customer', account_id: 'a-bank' },
+      { transaction_id: 'd2', date: '2026-08-11', amount: 70, transaction_type: 'transfer_fund', status: 'categorized', account_id: 'a-bank' },
+      { transaction_id: 'd3', date: '2026-08-12', amount: 80, transaction_type: 'other_income', status: 'categorized', account_id: 'a-bank', offset_account_name: 'Sales' },
+    ] : []),
+  );
+  const read = await accounting.fetchAccounting(ORG, { cached: async () => [] });
+  const budget = accounting.createReadBudget(50);
+  await accounting.fetchBankActivity(ORG, read, { period: { start: '2026-07-01', end: '2026-09-30' }, readBudget: budget, cached: async () => [], today: new Date('2026-11-25T00:00:00Z') });
+  const txRequests = requests.filter(r => r.url.pathname.includes('/chartofaccounts/') && r.url.pathname.endsWith('transactions'));
+  assert.deepEqual([...new Set(txRequests.filter(r => at('/chartofaccounts/accounttransactions')(r)).map(r => r.url.searchParams.get('account_id')))].sort(), ['a-bank', 'a-card'], 'bank and card, never the cash account');
+  assert.equal(txRequests[0].url.searchParams.get('date.start'), '2026-07-01');
+  assert.equal(txRequests[0].url.searchParams.get('date.end'), '2026-09-30');
+  const bank = read.accounts.rows.find(a => a.accountID === 'a-bank');
+  assert.deepEqual(bank.reconciliation.unreconciled.map(t => [t.transactionID, t.amount]), [['x1', 300]], 'outside the window and opening balances are left out');
+  assert.equal(bank.reconciliation.reconciled, 1);
+  assert.equal(read.status.sections.reconciliation.path, '/chartofaccounts/accounttransactions');
+  const receipts = read.bankTransactions.rows.filter(row => row.source === 'zoho_categorized_receipt');
+  assert.deepEqual(receipts.map(r => [r.bankTransactionID, r.zohoTransactionType, r.total]), [['zrc-d1', 'sales_without_invoices', 500], ['zrc-d3', 'other_income', 80]]);
+  assert.ok(read.bankTransactions.rows.some(row => row.source === 'zoho_expense'), 'expenses and uncategorised lines are kept');
+  const depositRequest = requests.find(r => at('/banktransactions')(r) && r.url.searchParams.get('filter_by') === 'Status.Categorized');
+  assert.equal(depositRequest.url.searchParams.get('date.start'), '2026-04-01', 'deposits also for the 3 months before the period');
+  assert.ok(budget.used >= 4, 'each page counts against the read budget');
+});
+
+test('bank activity: refused banking reads no deposits; the read budget stops the pages', async () => {
+  fakeZoho({ banking: false });
+  handlers.unshift(
+    r => at('/chartofaccounts')(r) && page('chartofaccounts', BALANCE_CHART),
+    r => at('/chartofaccounts/transactions')(r) && page('transactions', [
+      { categorized_transaction_id: 'y1', transaction_date: '2026-08-02', reconcile_status: 'unreconciled', debit_amount: 10, credit_amount: 0 },
+    ], true),
+  );
+  const read = await accounting.fetchAccounting(ORG, { cached: async () => [] });
+  const budget = accounting.createReadBudget(1);
+  await accounting.fetchBankActivity(ORG, read, { period: { start: '2026-07-01', end: '2026-09-30' }, readBudget: budget, cached: async () => [], today: new Date('2026-11-25T00:00:00Z') });
+  assert.equal(requests.filter(r => at('/banktransactions')(r)).length, 0, 'no deposits read without banking access');
+  assert.equal(read.status.sections.categorisedReceipts.reason, 'not_authorized');
+  assert.equal(budget.used, 1, 'one page, then the cap');
+  assert.equal(budget.capReached, true);
+  assert.equal(read.status.sections.reconciliation.read, false, 'not complete');
+  const bank = read.accounts.rows.find(a => a.accountID === 'a-bank');
+  assert.equal(bank.reconciliation.complete, false);
+});
+
+test('documents left unread by the per-sync cap are read at the next sync (the backlog), newest first, without re-reading the rest', async () => {
+  const invoiceRow = (id, date) => ({ invoice_id: id, invoice_number: `INV-${id}`, status: 'paid', customer_id: 'c1', customer_name: 'Made-up Customer',
+    date, due_date: date, total: 105, balance: 0, currency_code: 'AED', exchange_rate: 1, last_modified_time: `${date}T10:00:00+0400` });
+  handlers = [r => r.url.pathname.startsWith('/books/v3/invoices/') && ok({ invoice: { ...invoiceRow(r.url.pathname.split('/').pop(), '2026-05-01'),
+    sub_total: 100, line_items: [{ line_item_id: 'li1', account_id: 'a-sales', tax_id: 't-std', tax_percentage: 5, item_total: 100 }] } })];
+  const listed = () => ({ invoices: ['2026-05-01', '2026-05-02', '2026-05-03', '2026-11-01'].map((date, i) => zoho.mapInvoice(invoiceRow(`i${i}`, date))), bills: [] });
+  const first = listed();
+  await zoho.fetchLineItems(ORG, first, { readBudget: accounting.createReadBudget(2), cachedDocuments: async () => [] });
+  assert.deepEqual(booksCalls('/invoices/'), ['/invoices/i3', '/invoices/i2']);
+  assert.deepEqual(first.invoices.map(d => d.lineItemsRead), [false, false, true, true], 'two left without lines by the cap');
+  const cache = first.invoices.map(doc => JSON.parse(JSON.stringify(doc)));
+  requests = [];
+  const second = listed();
+  const result = await zoho.fetchLineItems(ORG, second, { readBudget: accounting.createReadBudget(400), cachedDocuments: async () => cache });
+  assert.deepEqual(booksCalls('/invoices/').sort(), ['/invoices/i0', '/invoices/i1'], 'only the backlog is read');
+  assert.equal(result.carried, 2);
+  assert.ok(second.invoices.every(d => d.lineItemsRead === true));
+});

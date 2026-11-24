@@ -43,6 +43,7 @@ const { accessChanges } = require('../services/staffAccess');
 const { hydrateOrgIfEmpty } = require('../db/xeroCacheStore');
 const checkDescriptions = require('../data/checkDescriptions');
 const { checkDescriptionsFor, checkLabelFor } = require('../data/checkDescriptionsUae');
+const { unreadLinesNote } = require('../services/zohoChecks');
 const { getZohoTaxProfile } = require('../db/zohoTaxProfile');
 const { regionOf } = require('../services/uaeRules');
 const { buildBankEvidence, loadLatestBankScreenReading } = require('../services/bankEvidence');
@@ -179,6 +180,8 @@ async function zohoCopyFor(org, clientCurrency) {
     descriptions: checkDescriptionsFor(scope),
     labelFor: type => checkLabelFor(type, scope),
     uaeTaxCard: region === 'AE' ? { profile: profile || {} } : null,
+    // The sentence a line-item check's page shows while documents in the period have no lines read yet.
+    unreadNoteFor: type => unreadLinesNote(type, profile && profile.lineCoverage),
   };
 }
 
@@ -642,6 +645,8 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
     checkDescriptions: zohoCopy ? zohoCopy.descriptions : checkDescriptions, groupSupplierTransactions,
     clientCurrency,
     displayStatus: issue ? resolveCheckDisplayStatus(issue) : null, ...extraData,
+    // Zoho Books only (nothing is passed for any other client, so their pages are unchanged).
+    ...(zohoCopy ? { zohoUnreadNote: zohoCopy.unreadNoteFor(checkType) } : {}),
   });
 });
 

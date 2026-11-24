@@ -80,9 +80,9 @@ function money(base = 'AED') {
 
 function run({ invoices = [], credits = [], contacts = [], accounts = ACCOUNTS, taxRates = TAX_RATES, journals = [], bankTransactions = [],
   readStatus = { permissions: { banking: true, expenses: true } }, region = 'AE', taxProfile = { isTaxRegistered: true }, bankReading = null,
-  org = { id: 1 }, base = 'AED' } = {}) {
+  org = { id: 1 }, base = 'AED', period = PERIOD } = {}) {
   const { issues, notes } = runZohoChecks({
-    org, period: PERIOD, region, taxProfile, invoices, credits, contacts, bankReading, now: NOW, money: money(base),
+    org, period, region, taxProfile, invoices, credits, contacts, bankReading, now: NOW, money: money(base),
     accounting: { accounts, taxRates, manualJournals: journals, bankTransactions, readStatus },
   });
   const byType = Object.fromEntries(issues.map(issue => [issue.check_type, { ...issue, items: JSON.parse(issue.detail_json) }]));
@@ -310,7 +310,8 @@ test('Bill or Direct: an expense matching an unpaid bill from the same supplier 
   const refused = run({ invoices: [unpaid], readStatus: { permissions: { banking: false, expenses: false } } }).byType.bill_or_direct;
   assert.equal(refused.period_checked, LABELS.expenseAccess);
   assert.equal(status(refused), 'not_configured');
-  assert.equal(run().byType.invoice_or_direct.period_checked, LABELS.unavailable);
+  // Invoice or Direct now reads the categorised deposits (tested below); none read yet asks for a sync.
+  assert.equal(run().byType.invoice_or_direct.period_checked, 'needs_sync');
 });
 
 // ---------------- journal checks ----------------
@@ -343,13 +344,15 @@ test('Revenue Journalled Against Expense and Fixed Asset Credited to Expense use
   assert.match(unread.notes.join(' '), /1 Zoho Books document\(s\) in the period have no line items read yet/);
 });
 
-test('balance checks are "unavailable" (no balance sheet in Zoho\'s API), never a made-up figure', () => {
+test('balance checks with no balance read are "unavailable", never a made-up figure; Unreconciled Bank asks for a sync', () => {
   const { byType } = run({ journals: [journal('s1', '2026-08-01', [jl('a-suspense', 'debit', 500), jl('a-bank', 'credit', 500)])] });
-  for (const type of ['suspense_open_balance', 'directors_loan_overdrawn', 'opening_balance_differences', 'unreconciled_bank_items', 'historical_changes']) {
+  for (const type of ['suspense_open_balance', 'directors_loan_overdrawn', 'opening_balance_differences', 'historical_changes']) {
     assert.equal(byType[type].period_checked, LABELS.unavailable, type);
     assert.equal(byType[type].count, null, type);
     assert.equal(status(byType[type]), 'unavailable', type);
   }
+  assert.equal(byType.unreconciled_bank_items.period_checked, 'needs_sync', 'reconcile status not read yet');
+  assert.equal(byType.unreconciled_bank_items.count, null);
   assert.equal(byType.directors_loan_overdrawn.importance, 'medium', 'UAE: review, not critical');
   assert.equal(run({ region: null }).byType.directors_loan_overdrawn.importance, 'critical');
   assert.equal(byType.dividend_status.period_checked, LABELS.notApplicableUae);
@@ -563,4 +566,227 @@ test('Bank Balance from a Banking page reading: a "$" account is foreign (from t
   assert.equal(rows.find(r => r.name === 'USD Account').potentialValue, 0);
   assert.equal(rows.find(r => r.name === 'Unknown Dollar Account').currency, 'USD');
   assert.equal(byType.bank_balance.potential_value_gbp, 100, 'only the AED account counts');
+});
+
+// ---------------- 25 Nov 2026 rule fixes ----------------
+
+test('Multi-Tax Code Suppliers: two 5% rates with different names are one code; zero-rated stays apart from exempt and No VAT', () => {
+  const rates = [...TAX_RATES, mapping.mapTaxRate({ tax_id: 't-vat', tax_name: 'VAT', tax_percentage: 5, tax_type: 'tax', country_code: 'AE', tax_authority_name: 'FTA' })];
+  const { byType } = run({ taxRates: rates, invoices: [
+    bill('r1', '2026-08-01', 'v1', [line('a-office', 1000, { tax: 't-std', pct: 5 })]),
+    bill('r2', '2026-08-02', 'v1', [line('a-office', 600, { tax: 't-vat', pct: 5 })]),     // same rate, other name: not a second code
+    bill('r3', '2026-08-03', 'v2', [line('a-office', 500, { tax: 't-std', pct: 5 })]),
+    bill('r4', '2026-08-04', 'v2', [line('a-office', 200, { tax: 't-zero', pct: 0 })]),    // zero-rated: a real second code
+    bill('r5', '2026-08-05', 'v3', [line('a-office', 300, { tax: 't-zero', pct: 0 })]),
+    bill('r6', '2026-08-06', 'v3', [line('a-office', 90, { tax_exemption_id: 'x1' })]),    // exempt: not the same as zero-rated
+  ] });
+  const check = byType.multi_tax_suppliers;
+  assert.deepEqual(check.items.map(i => i.contactId).sort(), ['v2', 'v3'], 'v1 used one VAT treatment under two names');
+  const v2 = check.items.find(i => i.contactId === 'v2');
+  assert.deepEqual(v2.taxCodes.sort(), ['Standard Rate', 'Zero Rate']);
+  assert.equal(check.potential_value_gbp, 200, 'the zero-rated 200; exempt adds no value');
+  const merged = run({ taxRates: rates, invoices: [
+    bill('m1', '2026-08-01', 'v1', [line('a-office', 1000, { tax: 't-std', pct: 5 })]),
+    bill('m2', '2026-08-02', 'v1', [line('a-office', 600, { tax: 't-vat', pct: 5 })]),
+    bill('m3', '2026-08-03', 'v1', [line('a-office', 100, { tax: 't-zero', pct: 0 })]),
+  ] }).byType.multi_tax_suppliers.items[0];
+  assert.equal(merged.dominantTax, 'Standard Rate / VAT', 'the merged code shows both names');
+  assert.deepEqual(merged.transactions.map(t => t.taxCode).sort(), ['Standard Rate', 'VAT', 'Zero Rate'], 'each line keeps its own rate name');
+});
+
+test('Journals to Bank (Zoho): one row per journal; a bank-to-cash transfer counted once; petty cash lower risk; a reversed pair nets to 0', () => {
+  const { byType } = run({ journals: [
+    journal('t1', '2026-08-01', [jl('a-bank', 'debit', 3000), jl('a-cash', 'credit', 3000)]),        // transfer: value 3000, not 6000
+    journal('p1', '2026-08-02', [jl('a-cash', 'debit', 600), jl('a-suspense', 'credit', 600)]),       // petty cash only
+    journal('b1', '2026-08-03', [jl('a-office', 'debit', 400), jl('a-bank', 'credit', 250), jl('a-card', 'credit', 150)]), // two bank lines, one row
+    { ...journal('o1', '2026-08-04', [jl('a-suspense', 'debit', 100), jl('a-cash', 'credit', 100)]), entryNumber: 'MJ-2026-020' },
+    { ...journal('o2', '2026-08-20', [jl('a-suspense', 'credit', 100), jl('a-cash', 'debit', 100)]), entryNumber: 'REV - MJ-2026-20', narration: 'Reverse entry of MJ-2026-020' },
+  ] });
+  const check = byType.journal_to_bank;
+  assert.deepEqual(check.items.map(i => i.documentId), ['t1', 'p1', 'b1', 'o1', 'o2'], 'one row per journal');
+  const row = id => check.items.find(i => i.documentId === id);
+  assert.equal(row('t1').amount, 3000);
+  assert.match(row('t1').description, /Transfer between bank \/ cash accounts: counted once/);
+  assert.equal(row('p1').level, 'review');
+  assert.match(row('p1').description, /Petty cash \(Cash account\) journal: lower risk/);
+  assert.equal(row('b1').amount, 400, 'the larger side, once');
+  for (const id of ['o1', 'o2']) {
+    assert.equal(row(id).amount, 0, id);
+    assert.equal(row(id).displayOnly, true, `${id} listed, not counted`);
+    assert.equal(row(id).level, 'reversed');
+  }
+  assert.match(row('o1').description, /Reversed by REV - MJ-2026-20/);
+  assert.match(row('o2').description, /Reversal of MJ-2026-020/);
+  assert.equal(check.count, 3);
+  assert.equal(check.potential_value_gbp, 3000 + 600 + 400);
+  // A "reversal" that does not cancel the original out is not treated as one.
+  const partial = run({ journals: [
+    { ...journal('q1', '2026-08-04', [jl('a-suspense', 'debit', 100), jl('a-bank', 'credit', 100)]), entryNumber: 'MJ-7' },
+    { ...journal('q2', '2026-08-05', [jl('a-suspense', 'credit', 60), jl('a-bank', 'debit', 60)]), entryNumber: 'REV - MJ-7' },
+  ] }).byType.journal_to_bank;
+  assert.equal(partial.count, 2);
+  assert.equal(partial.potential_value_gbp, 160);
+});
+
+test('VAT Control Journals (Zoho): each journal valued once at the larger of VAT debits or credits; a VAT offset journal is "review"', () => {
+  const { byType } = run({ journals: [
+    journal('v1', '2026-08-31', [jl('a-output', 'debit', 1200), jl('a-input', 'credit', 1000), jl('a-vatpay', 'credit', 200)]),
+    journal('v2', '2026-08-15', [jl('a-input', 'debit', 50), jl('a-suspense', 'credit', 50)]),
+  ], accounts: [...ACCOUNTS, mapping.mapAccount(rawAccount(['a-vatpay', 'VAT Payable', 'other_current_liability']))] });
+  const check = byType.journal_vat_control;
+  assert.deepEqual(check.items.map(i => [i.documentId, i.amount]), [['v1', 1200], ['v2', 50]], 'one row each; 1200 not 2400');
+  const offset = check.items.find(i => i.documentId === 'v1');
+  assert.equal(offset.level, 'review');
+  assert.match(offset.description, /Review: period-end VAT offset journal/);
+  assert.equal(check.potential_value_gbp, 1250);
+  assert.equal(check.count, 2);
+});
+
+test('Capital Item Review (Zoho): commission, fees, charges, salaries, rent, utilities and subscriptions are never watched', () => {
+  const extra = [['a-comm', 'Commission Given', 'expense'], ['a-fees', 'Professional Fees', 'expense'], ['a-chg', 'Bank Charges', 'expense'],
+    ['a-util', 'Electricity and Water', 'expense'], ['a-sub', 'Software Subscriptions', 'expense'], ['a-sal', 'Staff Salary', 'expense'],
+    ['a-lic', 'Trade Licence Renewal', 'expense']].map(row => mapping.mapAccount(rawAccount(row)));
+  const { byType } = run({ accounts: [...ACCOUNTS, ...extra], invoices: [bill('k1', '2026-08-01', 'v1', [
+    ...extra.map(a => line(a.accountID, 20000)), line('a-repairs', 20000),
+  ])] });
+  assert.deepEqual(counted(byType.capital_item_review).map(i => i.accountCode), ['Repairs and Maintenance']);
+  // The Xero default list itself is unchanged: commission is still a Xero candidate.
+  const { isCapitalDefaultAccount } = require('../src/services/checkRules');
+  assert.equal(isCapitalDefaultAccount({ type: 'EXPENSE', name: 'Commission Given' }), true);
+});
+
+const withBalance = (row, amount, extra = {}) => ({ ...mapping.mapAccount(rawAccount(row)), ledgerBalance: { amount, side: null, source: 'chart_list', readAt: '2026-11-09T10:00:00.000Z', ...extra } });
+
+test('Suspense & Clearing and Shareholder balances (Zoho): from the current balances; unavailable only when none could be read', () => {
+  const accounts = [
+    ...ACCOUNTS.filter(a => a.accountID !== 'a-suspense'),
+    withBalance(['a-suspense', 'Suspense', 'other_current_liability'], -250),
+    withBalance(['a-clear', 'Card Clearing', 'other_current_asset'], 0.5),
+    withBalance(['a-sh1', 'Shareholder Loan Account - Made Up', 'other_current_asset'], 4000),   // asset, debit: owner owes the company
+    withBalance(['a-sh2', 'Made Up Partner Current Account', 'equity'], 900),                     // equity, credit: company owes the owner
+    withBalance(['a-sh3', 'Due from Related Party', 'other_current_liability'], -1500),           // liability overdrawn
+  ];
+  const { byType } = run({ accounts, readStatus: { permissions: { banking: true, expenses: true }, sections: { balances: { read: true } } } });
+  const suspense = byType.suspense_open_balance;
+  assert.deepEqual(suspense.items.map(i => [i.accountCode, i.amount]), [['Suspense', 250]], 'under 1 is left out');
+  assert.match(suspense.items[0].description, /on 2026-11-09 \(the current balance/);
+  const related = byType.directors_loan_overdrawn;
+  assert.deepEqual(related.items.map(i => [i.accountCode, i.amount]).sort(), [['Due from Related Party', 1500], ['Shareholder Loan Account - Made Up', 4000]]);
+  assert.equal(related.importance, 'medium', 'UAE: review');
+  assert.equal(status(related), 'issues');
+  // UK Zoho client: the Xero director's loan names only.
+  const uk = run({ region: null, base: 'GBP', taxRates: UK_RATES, accounts: [...ACCOUNTS, withBalance(['a-dla', "Director's Loan Account", 'other_current_liability'], -75), withBalance(['a-sh9', 'Shareholder Loan', 'other_current_asset'], 10)] }).byType.directors_loan_overdrawn;
+  assert.deepEqual(uk.items.map(i => i.accountCode), ["Director's Loan Account"]);
+  assert.match(uk.items[0].description, /overdrawn by £75/);
+  // Candidates, but no balance read for any of them: unavailable, not a false OK.
+  const none = run({ accounts: [...ACCOUNTS] }).byType;
+  assert.equal(none.suspense_open_balance.period_checked, LABELS.unavailable);
+});
+
+test('Unreconciled Bank (Zoho): unreconciled recorded transactions in the period, from Zoho\'s reconcile status; cash accounts left out', () => {
+  const recon = (unreconciled, extra = {}) => ({ readAt: '2026-11-10T00:00:00Z', from: '2026-07-01', to: '2026-11-10', complete: true, rows: 5, reconciled: 3, unknown: 0, unreconciled, ...extra });
+  const tx = (id, date, amount) => ({ transactionID: id, date, amount, reconcileState: 'unreconciled', transactionType: 'expense', payee: 'Made-up Payee' });
+  const accounts = ACCOUNTS.map(a => (a.accountID === 'a-bank' ? { ...a, reconciliation: recon([tx('u1', '2026-08-01', -120), tx('u2', '2026-09-01', 80), tx('u3', '2026-06-01', 5)]) }
+    : a.accountID === 'a-card' ? { ...a, reconciliation: recon([]) } : a));
+  const { byType } = run({ accounts });
+  const check = byType.unreconciled_bank_items;
+  assert.deepEqual(check.items.map(i => [i.transactionId, i.amount]), [['u1', 120], ['u2', 80]], 'only the review period');
+  assert.equal(check.count, 2);
+  assert.equal(check.potential_value_gbp, 200);
+  // Zoho gave no status on any row: unavailable rather than a false OK.
+  const unknown = ACCOUNTS.map(a => (a.type === 'BANK' && a.zohoAccountType !== 'cash' ? { ...a, reconciliation: recon([], { unknown: 5, reconciled: 0 }) } : a));
+  assert.equal(run({ accounts: unknown }).byType.unreconciled_bank_items.period_checked, LABELS.unavailable);
+});
+
+test('Shareholder & Related Party (Zoho): an expense or income account named for a director or partner is not a loan account', () => {
+  const accounts = [
+    ...ACCOUNTS.filter(a => a.accountID !== 'a-suspense'),
+    withBalance(['a-suspense', 'Suspense', 'other_current_liability'], -250),
+    withBalance(['a-rem', 'Directors Remuneration', 'expense'], 48000),          // a cost, not money owed to the company
+    withBalance(['a-pcom', 'Partner Commission', 'expense'], 12000),
+    withBalance(['a-dinc', 'Director Fee Income', 'income'], -3000),
+    withBalance(['a-sh1', 'Shareholder Loan Account - Made Up', 'other_current_asset'], 700),
+    { ...mapping.mapAccount(rawAccount(['a-cust', 'Customs Clearing Charges', 'expense'])) },   // a cost, no balance read
+  ];
+  const byName = name => accounts.find(a => a.name === name);
+  const related = run({ accounts, readStatus: { permissions: { banking: true, expenses: true }, sections: { balances: { read: true } } } }).byType.directors_loan_overdrawn;
+  assert.deepEqual(related.items.map(i => i.accountCode), ['Shareholder Loan Account - Made Up']);
+  const suspense = run({ accounts, readStatus: { permissions: { banking: true, expenses: true }, sections: { balances: { read: true } } } }).byType.suspense_open_balance;
+  assert.deepEqual(suspense.items.map(i => i.accountCode), ['Suspense']);
+  assert.doesNotMatch(suspense.items[0].description, /not checked/, 'an expense "Clearing" account is not a candidate left unread');
+  assert.equal(uae.isBalanceCheckAccount(byName('Customs Clearing Charges')), false);
+  // Nor are they read one by one for their balance.
+  assert.equal(uae.isBalanceCheckAccount(byName('Directors Remuneration')), false);
+  assert.equal(uae.isBalanceCheckAccount(byName('Partner Commission')), false);
+  assert.equal(uae.isBalanceCheckAccount(byName('Director Fee Income')), false);
+  assert.equal(uae.isBalanceCheckAccount(byName('Shareholder Loan Account - Made Up')), true);
+  assert.equal(uae.isBalanceCheckAccount(byName('Suspense')), true);
+});
+
+test('Capital Item Review (Zoho): IT, internet, phone, software licence and loan-named expense accounts stay watched', () => {
+  const extra = [['a-it', 'IT and Internet Expenses', 'expense'], ['a-mob', 'Mobile Handsets', 'expense'], ['a-tel', 'Telephone Expense', 'expense'],
+    ['a-swl', 'Software Licences', 'expense'], ['a-carl', 'Made Up Bank Car Loan A/C', 'expense'], ['a-chg2', 'Bank Charges', 'expense']]
+    .map(row => mapping.mapAccount(rawAccount(row)));
+  const { byType } = run({ accounts: [...ACCOUNTS, ...extra], invoices: [bill('k2', '2026-08-01', 'v1', extra.map(a => line(a.accountID, 20000)))] });
+  assert.deepEqual(counted(byType.capital_item_review).map(i => i.accountCode).sort(),
+    ['IT and Internet Expenses', 'Made Up Bank Car Loan A/C', 'Mobile Handsets', 'Software Licences', 'Telephone Expense']);
+});
+
+test('Unreconciled Bank (Zoho): a foreign-currency account\'s rows read in the base currency (bcy) count in the total; others are listed only', () => {
+  const usd = mapping.mapAccount(rawAccount(['a-usd', 'Made Up USD Bank', 'bank'], { currency_code: 'USD' }));
+  const base = mapping.mapAccountTransaction({ transaction_id: 'f1', date: '2026-08-01', bcy_debit: 367.3, debit_amount: 100, reconcile_status: 'unreconciled', currency_code: 'USD' }, usd);
+  const foreign = mapping.mapAccountTransaction({ transaction_id: 'f2', date: '2026-08-02', debit_amount: 50, reconcile_status: 'unreconciled', currency_code: 'USD' }, usd);
+  assert.equal(base.amountInBaseCurrency, true);
+  assert.equal(foreign.amountInBaseCurrency, false);
+  const recon = { readAt: '2026-11-10T00:00:00Z', from: '2026-07-01', to: '2026-11-10', complete: true, rows: 2, reconciled: 0, unknown: 0, unreconciled: [base, foreign] };
+  const check = run({ accounts: [...ACCOUNTS, { ...usd, reconciliation: recon }] }).byType.unreconciled_bank_items;
+  const row = id => check.items.find(i => i.transactionId === id);
+  assert.equal(row('f1').amount, 367.3);
+  assert.equal(row('f1').currency, undefined, 'already in AED: not labelled USD');
+  assert.equal(row('f2').currency, 'USD');
+  assert.equal(row('f2').potentialValue, 0);
+  assert.equal(check.potential_value_gbp, 367.3, 'the USD-only row is not added to the AED total');
+});
+
+test('Journals to Bank (Zoho): a reversal dated after the period end does not cancel the original inside the period', () => {
+  const period = resolvePeriod({ type: 'custom', from: '2026-07-01', to: '2026-09-30' }, { asOf: '2026-11-10', ledgerName: 'Zoho Books' });
+  const journals = [
+    { ...journal('r1', '2026-09-20', [jl('a-suspense', 'debit', 100), jl('a-bank', 'credit', 100)]), entryNumber: 'MJ-9' },
+    { ...journal('r2', '2026-10-05', [jl('a-suspense', 'credit', 100), jl('a-bank', 'debit', 100)]), entryNumber: 'REV - MJ-9' },
+  ];
+  const check = run({ period, journals }).byType.journal_to_bank;
+  const row = check.items.find(i => i.documentId === 'r1');
+  assert.equal(row.amount, 100, 'unreversed at the period end');
+  assert.notEqual(row.level, 'reversed');
+  assert.equal(check.count, 1);
+  assert.equal(check.potential_value_gbp, 100);
+  // Both inside the period: still a reversed pair at 0.
+  const inside = run({ period, journals: [journals[0], { ...journals[1], date: '2026-09-25' }] }).byType.journal_to_bank;
+  assert.equal(inside.count, 0);
+});
+
+test('Invoice or Direct (Zoho): a deposit categorised to income matching an unpaid invoice; a deposit to a non-income account is not', () => {
+  const unpaid = invoice('i1', '2026-08-01', 'c1', [line('a-sales', 500)], { status: 'sent', total: 500, balance: 500 });
+  const receipt = (id, date, amount, extra = {}) => ({ ...mapping.mapCategorisedReceipt({ transaction_id: id, date, amount, transaction_type: 'sales_without_invoices', customer_id: 'c1', customer_name: 'Customer c1', account_id: 'a-bank', ...extra }) });
+  const readStatus = { permissions: { banking: true, expenses: true }, sections: { categorisedReceipts: { read: true } } };
+  const { byType } = run({ invoices: [unpaid], readStatus, bankTransactions: [
+    receipt('d1', '2026-08-10', 500),
+    receipt('d2', '2026-08-11', 500, { transaction_type: 'deposit', offset_account_id: 'a-suspense' }),   // to a non-income account
+  ] });
+  assert.deepEqual(counted(byType.invoice_or_direct).map(i => [i.bankTransactionId, i.invoiceId]), [['zrc-d1', 'i1']]);
+  assert.equal(byType.invoice_or_direct.potential_value_gbp, 500);
+  const refused = run({ invoices: [unpaid], readStatus: { permissions: { banking: false, expenses: true } } }).byType.invoice_or_direct;
+  assert.equal(refused.period_checked, LABELS.bankAccess);
+});
+
+test('the line-item checks\' pages say how many documents in the period have no lines read yet', () => {
+  const { unreadLinesNote, LINE_ITEM_CHECKS } = require('../src/services/zohoChecks');
+  const unread = { ...bill('n1', '2026-08-01', 'v1', []), lineItemsRead: false, lineItems: [] };
+  const { coverage } = runZohoChecks({ org: { id: 1 }, period: PERIOD, region: 'AE', taxProfile: { isTaxRegistered: true }, invoices: [unread],
+    now: NOW, money: money(), accounting: { accounts: ACCOUNTS, taxRates: TAX_RATES, manualJournals: [], bankTransactions: [], readStatus: null } });
+  assert.equal(coverage.unreadInPeriod, 1);
+  assert.match(unreadLinesNote('purchase_tax_missing', coverage), /^1 Zoho Books document in the period has not had its lines read yet/);
+  assert.equal(unreadLinesNote('old_unpaid_invoices', coverage), null, 'not a line-item check');
+  assert.equal(unreadLinesNote('purchase_tax_missing', { unreadInPeriod: 0, staleInPeriod: 0 }), null);
+  assert.ok(LINE_ITEM_CHECKS.has('journal_to_bank'));
 });

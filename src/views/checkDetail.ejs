@@ -106,9 +106,9 @@ function isNoRateRow(item) {
       <div class="check-stats">
         <div class="check-stat"><strong>Not applicable</strong><span><%= notApplicableReasons[issue.period_checked] || 'not applicable to this client' %></span></div>
       </div>
-    <% } else if (issue && ['unavailable_zoho', 'needs_zoho_bank_access', 'needs_zoho_expense_access'].includes(issue.period_checked)) { %><%# Zoho Books: why there is no result, instead of "null issues found". %>
+    <% } else if (issue && (['unavailable_zoho', 'needs_zoho_bank_access', 'needs_zoho_expense_access'].includes(issue.period_checked) || (issue.period_checked === 'needs_sync' && /^zoho-/.test(String(org.freeagent_company_id || ''))))) { %><%# Zoho Books: why there is no result, instead of "null issues found". %>
       <div class="check-stats">
-        <div class="check-stat"><strong><%= issue.period_checked === 'unavailable_zoho' ? 'Unavailable' : 'Reconnect Zoho Books' %></strong><span><%= issue.period_checked === 'unavailable_zoho' ? "Zoho Books' API does not give the data this check needs" : issue.period_checked === 'needs_zoho_bank_access' ? 'the Zoho Books connection does not allow bank access: reconnect Zoho Books, or read the Banking page with the extension' : 'the Zoho Books connection does not allow expense access: reconnect Zoho Books' %></span></div>
+        <div class="check-stat"><strong><%= issue.period_checked === 'unavailable_zoho' ? 'Unavailable' : issue.period_checked === 'needs_sync' ? 'Needs sync' : 'Reconnect Zoho Books' %></strong><span><%= issue.period_checked === 'unavailable_zoho' ? "Zoho Books' API does not give the data this check needs" : issue.period_checked === 'needs_sync' ? 'the data this check needs has not been read from Zoho Books yet: it is read at the next sync' : issue.period_checked === 'needs_zoho_bank_access' ? 'the Zoho Books connection does not allow bank access: reconnect Zoho Books, or read the Banking page with the extension' : 'the Zoho Books connection does not allow expense access: reconnect Zoho Books' %></span></div>
       </div>
     <% } else if (issue) { %>
       <div class="check-stats">
@@ -123,7 +123,7 @@ function isNoRateRow(item) {
       <% if (issue.potential_value_gbp > 0 && (checkType === 'multi_account_suppliers' || checkType === 'multi_tax_suppliers')) { %>
         <p class="check-note">Value counts only the amount outside each supplier's main <%= checkType === 'multi_account_suppliers' ? 'account code' : 'tax code' %>, not the supplier's full total.</p>
       <% } %>
-    <% } %>
+    <% } %><% if (typeof zohoUnreadNote !== 'undefined' && zohoUnreadNote) { %><p class="check-note"><%= zohoUnreadNote %></p><% } %>
   </div>
 </div>
 

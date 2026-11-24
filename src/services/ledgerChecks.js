@@ -5,7 +5,7 @@ const {
 } = require('../db/queries');
 const {
   NON_SCORED_CHECKS, findDuplicates, excludeDuplicateDrafts, findDuplicateContactsAsync,
-  isOldDocument, isOverdueMoreThan, selectOldCredits, sumAbsoluteExposure, amountInBase,
+  isOverdueMoreThan, selectOldUnpaidInvoices, selectOldCredits, sumAbsoluteExposure, amountInBase,
   resolveDuplicateInvoiceWindowDays, resolveDuplicateBillWindowDays,
   resolveDuplicateInvoiceRequireExactReference, resolveDuplicateInvoiceIncludeFullyPaid,
   resolveDuplicateBillRequireExactReference, resolveDuplicateBillIncludeFullyPaid,
@@ -15,7 +15,7 @@ const {
 const { calculateScoreBreakdown } = require('./scoreProfile');
 const { isWithinPeriod } = require('./periodResolver');
 const { runZohoChecks } = require('./zohoChecks');
-const { regionOf } = require('./uaeRules');
+const { regionOf, uaeDuplicateContactPairs } = require('./uaeRules');
 
 // The checks every non-Xero ledger (FreeAgent, QuickBooks, Zoho Books) runs on its documents.
 // Moved out of freeagentSync.js on 24 Nov 2026 so QuickBooks and Zoho run exactly the same checks
@@ -152,6 +152,13 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
     return date && date <= period.end;
   });
 
+  // Zoho Books: the client's tax profile (this sync's, else the stored copy) and region (UAE or not), worked out once
+  // here because Duplicate Contacts needs the region as well as the Zoho checks below.
+  const zohoProfile = ledger.key === 'zoho' && accounting ? await zohoTaxProfile(orgId, taxProfile) : null;
+  const zohoRegion = ledger.key === 'zoho'
+    ? regionOf({ baseCurrency: knownBase, taxRates: (accounting && accounting.taxRates) || [], taxProfile: zohoProfile || taxProfile || null })
+    : null;
+
   emit({ step: 'running_checks', message: 'Running bookkeeping checks...' });
   const issueResults = [];
   const persistIssue = issue => {
@@ -215,7 +222,10 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
   const asOf = new Date(`${ageingDate(period.end)}T00:00:00.000Z`);
 
   try {
-    const overdue = throughPeriodEnd(accrecAuthorised).filter(i => (i.amountDue || 0) > 0 && isOldDocument(i, asOf));
+    // Aged by DUE date (the invoice date when there is none), as at the end of the current month: the Xero rule
+    // (selectOldUnpaidInvoices, accountant 30 Oct and 12 Nov 2026). Until 25 Nov 2026 these ledgers aged invoices by
+    // their invoice date, which listed invoices on long payment terms that were not overdue at all.
+    const overdue = selectOldUnpaidInvoices(throughPeriodEnd(accrecAuthorised), asOf);
     persistIssue({
       org_id: orgId, check_type: 'old_unpaid_invoices', importance: 'high',
       count: overdue.length, potential_value_gbp: sumAbsoluteExposure(overdue, i => inBase(i.amountDue, i)),
@@ -225,7 +235,7 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
         ...currencyFields(i, i.amountDue),
         ...(isOpeningBalance(i) ? { openingBalance: true } : {}),
       }))),
-      period_checked: 'document_date_over_60_days_ago_all_time',
+      period_checked: 'due_date_over_60_days_ago_at_month_end',
     });
   } catch (err) {
     console.error('old_unpaid_invoices check failed — skipping (will show as "Not synced"):', err.message);
@@ -362,7 +372,10 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
   }
 
   try {
-    const billsSinceLD = notOpeningBalance(inPeriod(accpayAuthorised)).filter(b => b.status === 'AUTHORISED');
+    // Zoho Books: posted bills paid or not, as the Xero rule (selectUndocumentedBills) and the accountant's 29 Oct 2026
+    // rule ("bills with a missing attachment should be flagged"). The other ledgers keep unpaid bills only, as before.
+    const billsSinceLD = notOpeningBalance(inPeriod(accpayAuthorised))
+      .filter(b => b.status === 'AUTHORISED' || (ledger.key === 'zoho' && b.status === 'PAID'));
     const undocumented = billsSinceLD.filter(b => !b.hasAttachments);
     persistIssue({
       org_id: orgId, check_type: 'undocumented_bills', importance: 'medium',
@@ -395,7 +408,13 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
       c.contactStatus === 'ACTIVE' && (customerContactIds.has(c.contactID) || supplierContactIds.has(c.contactID))
     );
     // Pauses now and then so the server keeps answering while a large contact list is compared.
-    const duplicates = await findDuplicateContactsAsync(activeContacts);
+    // A UAE Zoho Books client: names are compared without UAE legal endings and noise (L.L.C, FZE, FZCO, DMCC,
+    // "General Trading", Dr/Cr copies...; uaeRules.uaeComparableContactName), and the pairs keep their real names.
+    // Activity words ("General Trading", "Est") only count when the names are then the same (uaeDuplicateContactPairs).
+    const uaeNames = ledger.key === 'zoho' && zohoRegion === 'AE';
+    const duplicates = uaeNames
+      ? await uaeDuplicateContactPairs(activeContacts, findDuplicateContactsAsync)
+      : await findDuplicateContactsAsync(activeContacts);
     persistIssue({
       org_id: orgId, check_type: 'duplicate_contacts', importance: 'low',
       count: duplicates.length, potential_value_gbp: 0,
@@ -416,8 +435,8 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
 
   // Zoho Books: the checks worked out from its accounting data (zohoChecks.js), with the UAE rules for a UAE company.
   if (ledger.key === 'zoho' && accounting) {
-    const profile = await zohoTaxProfile(orgId, taxProfile);
-    const region = regionOf({ baseCurrency: knownBase, taxRates: accounting.taxRates || [], taxProfile: profile });
+    const profile = zohoProfile;
+    const region = zohoRegion;
     if (taxProfile) {
       // Kept so a cache-only re-run and the client page know the client's region and registration.
       await require('../db/zohoTaxProfile').saveZohoTaxProfile(orgId, { region, profile: taxProfile })
@@ -425,11 +444,17 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
     }
     const bankReading = await require('../db/zohoBankScreenReadings').getLatestZohoReading(orgId)
       .catch(error => { console.error(`[ledgerChecks] Zoho Banking page reading not read for organisation ${orgId}: ${error.message}`); return null; });
-    const { issues, notes } = runZohoChecks({
+    const { issues, notes, coverage } = runZohoChecks({
       org, period, region, taxProfile: profile, accounting, invoices, credits: allCredits, contacts, bankReading,
       money: { inBase, converted, noRate, foreignCode, currencyFields, base, converts },
     });
     for (const message of notes) emit({ step: 'running_checks', message });
+    // How many documents in the period have no lines read yet, kept with the client's tax profile (no new table) so
+    // the line-item checks' pages can say so. Only a whole-client run records it; a single-check run leaves it alone.
+    if (profile && coverage && !options.checkType) {
+      await require('../db/zohoTaxProfile').saveZohoTaxProfile(orgId, { region, profile: { ...profile, lineCoverage: coverage } })
+        .catch(error => console.error(`[ledgerChecks] line coverage not saved for organisation ${orgId}: ${error.message}`));
+    }
     for (const issue of issues) persistIssue({ org_id: orgId, ...issue });
   }
 
