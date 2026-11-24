@@ -114,7 +114,7 @@ async function drain() {
       // A job restored after a restart has no in-memory runner: pick the sync that matches the client type.
       const [[owner]] = await getPool().query(`SELECT freeagent_company_id FROM akrio_organisations WHERE id = ?`, [job.org_id]);
       runner = owner?.freeagent_company_id
-        ? progress => require('./freeagentSync').syncFreeAgentOrganisation(job.tenant_id, progress, payload)
+        ? progress => require('./ledgers').syncNonXeroOrganisation(job.tenant_id, progress, payload)
         : progress => require('./xeroSync').syncOrganisation(job.tenant_id, progress, payload);
     }
     runner = runner || null;

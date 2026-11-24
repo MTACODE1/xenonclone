@@ -361,6 +361,13 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
             not_a_company: 'only applies to UK limited companies (this client is a sole trader, partnership or non-UK)',
             no_filed_accounts_yet: 'this company has not filed any accounts at Companies House yet',
             flat_rate_scheme: 'this client is on the VAT Flat Rate Scheme, so VAT on purchases is not reclaimed',
+            ...Object.fromEntries([['freeagent', 'FreeAgent'], ['quickbooks', 'QuickBooks'], ['zoho', 'Zoho Books']].map(([key, name]) => [
+              `not_applicable_${key}`,
+              { old_purchase_credits: `${name} has no supplier credit notes`,
+                contact_defaults: `${name} contacts have no default account or tax code`,
+                unapproved_invoices: `${name} has no draft invoices`,
+                unapproved_bills: `${name} has no draft bills` }[check.type] || `${name} does not have this`,
+            ])),
           }[check.period_checked];
           const desc = checkDescriptions[check.type] || {};
         %>
@@ -969,7 +976,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
       <%
       const mth = txCounts.months_covered || 12;
       const txItems = [
-        { label: 'Turnover', raw: txCounts.turnover || 0, isCurrency: true },
+        { label: 'Turnover', raw: txCounts.turnover || 0, isCurrency: true, unknown: txCounts.turnover == null },
         { label: 'Total Transactions', raw: txCounts.total_transactions || 0, isCurrency: false },
         { label: 'Customer Invoices', raw: txCounts.customer_invoices || 0, isCurrency: false },
         { label: 'Supplier Bills', raw: txCounts.supplier_bills || 0, isCurrency: false },

@@ -111,7 +111,8 @@
         <% } %>
         <% orgs.forEach(org => { %>
           <% const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id; %>
-          <% const isFreeAgent = !!org.freeagent_company_id; %>
+          <% const ledger = ledgerOf(org); const isConnected = org.connection_status === 'connected'; %>
+          <% const authPath = ledger === 'xero' ? '' : '/' + ledger; const authId = ledger === 'quickbooks' || ledger === 'zoho' ? externalIdOf(orgIdentifier) : orgIdentifier; %>
           <tr class="client-row" data-name="<%= org.name.toLowerCase() %>" data-tag="<%= org.tag || '' %>" data-status="<%= org.connection_status %>" data-score="<%= org.score != null ? org.score : '' %>">
             <td class="text-muted"><%= org.client_ref || '—' %></td>
             <td class="font-medium">
@@ -125,9 +126,9 @@
             </td>
             <td>
               <div class="connection-icons">
-                <span class="connection-icon <%= !isFreeAgent && org.connection_status === 'connected' ? 'xero-active' : 'connection-disabled' %>" title="<%= !isFreeAgent && org.connection_status === 'connected' ? 'Connected via Xero' : 'Not connected via Xero' %>">Xe</span>
-                <span class="connection-icon connection-disabled" title="Coming soon">QB</span>
-                <span class="connection-icon <%= isFreeAgent && org.connection_status === 'connected' ? 'xero-active' : 'connection-disabled' %>" title="<%= isFreeAgent && org.connection_status === 'connected' ? 'Connected via FreeAgent' : 'Not connected via FreeAgent' %>">Fa</span>
+                <% [['xero', 'Xe'], ['quickbooks', 'QB'], ['freeagent', 'Fa'], ['zoho', 'Zo']].forEach(([key, short]) => { const on = ledger === key && isConnected; %>
+                <span class="connection-icon <%= on ? 'xero-active' : 'connection-disabled' %>" title="<%= on ? 'Connected via ' + ledgerLabel(key) : 'Not connected via ' + ledgerLabel(key) %>"><%= short %></span>
+                <% }) %>
                 <span class="connection-icon connection-disabled" title="Coming soon">Sg</span>
               </div>
             </td>
@@ -191,12 +192,12 @@
                 <button onclick="syncClient('<%= orgIdentifier %>', this)" class="btn btn-ghost-primary btn-sm">Sync</button>
               <% } %>
               <% if (org.connection_status === 'connected') { %>
-                <form method="post" action="<%= basePath %>/auth<%= isFreeAgent ? '/freeagent' : '' %>/disconnect/<%= orgIdentifier %>" style="display:inline" onsubmit="return confirm('Disconnect this client?')">
+                <form method="post" action="<%= basePath %>/auth<%= authPath %>/disconnect/<%= authId %>" style="display:inline" onsubmit="return confirm('Disconnect this client?')">
                   <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
                   <button type="submit" class="btn btn-ghost-error btn-sm">Disconnect</button>
                 </form>
               <% } else { %>
-                <a href="<%= basePath %>/auth<%= isFreeAgent ? '/freeagent' : '' %>/connect" class="btn btn-ghost-success btn-sm">Reconnect</a>
+                <a href="<%= basePath %>/auth<%= authPath %>/connect" class="btn btn-ghost-success btn-sm">Reconnect</a>
               <% } %>
             </td>
           </tr>
@@ -215,8 +216,9 @@
     <p class="text-muted" style="margin-bottom:16px;">Select your client's bookkeeping data...</p>
     <div class="provider-grid">
       <a href="<%= basePath %>/auth/connect" class="provider-btn provider-xero">Connect to Xero</a>
-      <button type="button" class="provider-btn provider-disabled" disabled title="Coming soon">Connect to QuickBooks</button>
+      <% if (ledgerReady('quickbooks')) { %><a href="<%= basePath %>/auth/quickbooks/connect" class="provider-btn provider-xero">Connect to QuickBooks</a><% } else { %><button type="button" class="provider-btn provider-disabled" disabled title="Waiting for the QuickBooks app keys">Connect to QuickBooks</button><% } %>
       <a href="<%= basePath %>/auth/freeagent/connect" class="provider-btn provider-xero">Connect to FreeAgent</a>
+      <% if (ledgerReady('zoho')) { %><a href="<%= basePath %>/auth/zoho/connect" class="provider-btn provider-xero">Connect to Zoho Books</a><% } else { %><button type="button" class="provider-btn provider-disabled" disabled title="Waiting for the Zoho Books app keys">Connect to Zoho Books</button><% } %>
       <button type="button" class="provider-btn provider-disabled" disabled title="Coming soon">Connect to Sage</button>
     </div>
   </div>

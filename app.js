@@ -11,7 +11,7 @@ const { getDb } = require('./src/db/schema');
 const { getAllOrganisations, getSetting, getStaffById, restoreSettingsFromMysql } = require('./src/db/queries');
 const { restoreSnapshots, startSnapshotSync } = require('./src/db/snapshotStore');
 const { syncOrganisation } = require('./src/services/xeroSync');
-const { syncFreeAgentOrganisation } = require('./src/services/freeagentSync');
+const { syncNonXeroOrganisation } = require('./src/services/ledgers');
 const { startJob } = require('./src/services/syncJobs');
 const MysqlSessionStore = require('./src/services/mysqlSessionStore');
 const { bootstrapAdmin } = require('./src/services/bootstrapAdmin');
@@ -25,6 +25,8 @@ const app = express();
 app.locals.ukDate = require('./src/services/displayDate').ukDate;
 // A stored period key (since_lock_date:2025-09-30:2026-11-21) in words with UK dates.
 app.locals.periodKeyLabel = require('./src/services/periodResolver').periodKeyLabel;
+// Which ledger a client is on (Xero, FreeAgent, QuickBooks, Zoho Books), for the views.
+Object.assign(app.locals, (({ ledgerOf, ledgerLabel, externalIdOf, ledgerReady }) => ({ ledgerOf, ledgerLabel, externalIdOf, ledgerReady }))(require('./src/services/ledgers')));
 
 if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) {
   throw new Error('SESSION_SECRET is required in production');
@@ -147,6 +149,10 @@ app.use(requireStaffLogin); // everything below requires a staff session
 // /auth is Xero OAuth (connect/callback/disconnect a client's Xero org) — now implicitly
 // staff-gated by the requireStaffLogin above, since only a logged-in admin/staff clicking
 // "Connect Client" should ever start that flow.
+// QuickBooks and Zoho Books connect routes, mounted before Xero's /auth so they are never shadowed.
+const { createLedgerAuthRouter } = require('./src/routes/ledgerAuth');
+app.use(BASE_PATH + '/auth/quickbooks', createLedgerAuthRouter('quickbooks'));
+app.use(BASE_PATH + '/auth/zoho', createLedgerAuthRouter('zoho'));
 app.use(BASE_PATH + '/auth', authRoutes);
 app.use(BASE_PATH + '/auth/freeagent', freeagentAuthRoutes);
 // Per-:tenantId access enforcement (resolveOrgAccess) is mounted INSIDE client.js itself via
@@ -172,7 +178,7 @@ cron.schedule('0 2 * * *', async () => {
     for (const org of orgs) {
       const identifier = org.xero_tenant_id || org.freeagent_company_id;
       const runSync = org.freeagent_company_id
-        ? progress => syncFreeAgentOrganisation(identifier, progress, { period })
+        ? progress => syncNonXeroOrganisation(identifier, progress, { period })
         : progress => syncOrganisation(identifier, progress, { period });
       try {
         await startJob(

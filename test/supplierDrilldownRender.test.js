@@ -77,9 +77,20 @@ test('other checks keep the normal header, and an unknown not-applicable label g
   assert.match(normal, /issues found/);
   assert.match(normal, /since lock date/);
   const unknown = await ejs.renderFile(path.join(__dirname, '../src/views/checkDetail.ejs'), {
-    ...locals, items: [], issue: { count: 0, potential_value_gbp: 0, period_checked: 'not_applicable_freeagent', synced_at: '2026-10-24' }, displayStatus: 'not_applicable',
+    ...locals, items: [], issue: { count: 0, potential_value_gbp: 0, period_checked: 'not_applicable_example', synced_at: '2026-10-24' }, displayStatus: 'not_applicable',
   });
   assert.match(unknown, /not applicable to this client/);
+});
+
+test('a check the client\'s ledger does not have says which ledger and why (24 Nov 2026)', async () => {
+  const render = (checkType, ledgerKey) => ejs.renderFile(path.join(__dirname, '../src/views/checkDetail.ejs'), {
+    ...locals, items: [], checkType, def: { type: checkType, label: checkType, importance: 'low' },
+    issue: { count: 0, potential_value_gbp: 0, period_checked: `not_applicable_${ledgerKey}`, synced_at: '2026-11-24' }, displayStatus: 'not_applicable',
+  });
+  assert.match(await render('old_purchase_credits', 'freeagent'), /FreeAgent has no supplier credit notes/);
+  assert.match(await render('contact_defaults', 'zoho'), /Zoho Books contacts have no default account or tax code/);
+  assert.match(await render('unapproved_bills', 'quickbooks'), /QuickBooks has no draft bills/);
+  assert.match(await render('duplicate_bills', 'quickbooks'), /QuickBooks does not have this/);
 });
 
 // ---- The previous 3 months on every review-period check (Abdur, 27 Oct 2026) ----

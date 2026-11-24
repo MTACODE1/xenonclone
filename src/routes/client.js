@@ -29,7 +29,7 @@ const {
 const { syncOrganisation, CHECK_DEFINITIONS } = require('../services/xeroSync');
 const { xeroLinks } = require('../services/xeroLinks');
 const { formatTurnoverGbp, groupSupplierTransactions } = require('../services/checkPresentation');
-const { syncFreeAgentOrganisation } = require('../services/freeagentSync');
+const { syncNonXeroOrganisation, ledgerLabel } = require('../services/ledgers');
 const { CASH_HEALTH_CATEGORIES, syncInsight } = require('../services/insightSync');
 const { resolveCheckDisplayStatus, isCapitalDefaultAccount, NON_SCORED_CHECKS } = require('../services/checkRules');
 const { calculateScoreBreakdown } = require('../services/scoreProfile');
@@ -953,7 +953,7 @@ router.post('/:tenantId/sync', verifyCsrf, async (req, res) => {
     return res.status(409).json({ error: 'This client\'s stored Xero data is more than two days old. Sync the client first (with its normal period), then choose the period again.' });
   }
   const runSync = org.freeagent_company_id
-    ? progress => syncFreeAgentOrganisation(tenantId, progress, { period, cacheOnly })
+    ? progress => syncNonXeroOrganisation(tenantId, progress, { period, cacheOnly })
     : progress => syncOrganisation(tenantId, progress, { period, cacheOnly, view: asView });
   const started = await startJob(
     `${tenantId}:${asView ? 'view' : 'all'}:${period.type}:${period.from || ''}:${period.to || ''}`,
@@ -979,7 +979,7 @@ router.post('/:tenantId/check/:checkType/reanalyse', verifyCsrf, async (req, res
   // and reactivates just that one, leaving every other check's issue row untouched/inactive,
   // so it silently reads as "Not synced" on the dashboard until a real full sync runs.
   if (org.freeagent_company_id) {
-    return res.status(400).json({ error: 'Per-check reanalyse is not yet supported for FreeAgent clients — run a full sync instead.' });
+    return res.status(400).json({ error: `Per-check reanalyse is not yet supported for ${ledgerLabel(org)} clients — run a full sync instead.` });
   }
   let period, resolvedPeriod;
   try {
@@ -1002,7 +1002,7 @@ router.post('/:tenantId/check/:checkType/reanalyse', verifyCsrf, async (req, res
   // bypasses that and re-fetches everything live, same as a brand-new client's first sync.
   const forceFullRefresh = req.query.forceFullRefresh === '1';
   const runSync = org.freeagent_company_id
-    ? progress => syncFreeAgentOrganisation(tenantId, progress, {
+    ? progress => syncNonXeroOrganisation(tenantId, progress, {
       period, checkType, cacheOnly, asOf: resolvedPeriod.end, forceFullRefresh,
     })
     : progress => syncOrganisation(tenantId, progress, {

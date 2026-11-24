@@ -63,6 +63,13 @@ function fmtMoney(val) {
          no_filed_accounts_yet: 'this company has not filed any accounts at Companies House yet',
          flat_rate_scheme: 'this client is on the VAT Flat Rate Scheme, so VAT on purchases is not reclaimed',
          not_vat_registered: 'this client is not VAT registered',
+         ...Object.fromEntries([['freeagent', 'FreeAgent'], ['quickbooks', 'QuickBooks'], ['zoho', 'Zoho Books']].map(([key, name]) => [
+           `not_applicable_${key}`,
+           { old_purchase_credits: `${name} has no supplier credit notes`,
+             contact_defaults: `${name} contacts have no default account or tax code`,
+             unapproved_invoices: `${name} has no draft invoices`,
+             unapproved_bills: `${name} has no draft bills` }[checkType] || `${name} does not have this`,
+         ])),
        }; %>
     <% if (issue && typeof displayStatus !== 'undefined' && displayStatus === 'not_applicable') { %>
       <div class="check-stats">

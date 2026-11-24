@@ -7,7 +7,7 @@ const {
 const { isStaffManager } = require('../services/staffPermissions');
 const { parseBankLineFilters, sendBankLinesCsv, bankLinesPageData } = require('./bankLinesShared');
 const { syncOrganisation } = require('../services/xeroSync');
-const { syncFreeAgentOrganisation } = require('../services/freeagentSync');
+const { syncNonXeroOrganisation } = require('../services/ledgers');
 const {
   periodInput, PERIOD_TYPES, resolvePeriod, shouldUseCacheOnlyForReanalysis,
 } = require('../services/periodResolver');
@@ -42,7 +42,7 @@ async function startOrganisationJob(tenantId, query = {}, checkType = null, { pr
   // queries.js) — the same identifier the caller already has. FreeAgent Stage 1 only supports
   // full syncs (no per-check reanalysis yet), which is all this route ever requests anyway.
   const runSync = org?.freeagent_company_id
-    ? progress => syncFreeAgentOrganisation(tenantId, progress, { period, checkType, cacheOnly, asOf })
+    ? progress => syncNonXeroOrganisation(tenantId, progress, { period, checkType, cacheOnly, asOf })
     : progress => syncOrganisation(tenantId, progress, { period, checkType, cacheOnly, asOf });
   return startJob(key, runSync,
     { tenantId, priority, mode: checkType ? `check:${checkType}` : 'full', payload: { period, checkType, cacheOnly, asOf } }
