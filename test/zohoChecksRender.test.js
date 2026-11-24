@@ -158,8 +158,9 @@ test('check page, Zoho Unreconciled Bank: bank account, payee, description and M
   assert.ok(!html.includes('Tax Payable'), 'the offset account is not shown');
   assert.ok(!html.includes('zoho-unreconciled:'), 'no internal id column');
   assert.ok(!html.includes('>potential value<'), 'the gross is not the headline');
-  assert.ok(html.includes('matched to a line of an imported bank statement or bank feed'), 'About text says the rule');
-  assert.ok(!html.includes('This is what Zoho Books&#39; Reconciliation Status report lists'), 'About text does not claim a match with Zoho\'s report the live data has not shown');
+  // Checked live quarter by quarter against Zoho's Reconciliation Status report (25 Nov 2026), so the About text says so.
+  assert.ok(html.includes('lists as unreconciled for each account'), 'About text says the rule');
+  assert.ok(!html.includes('matched to a line of an imported bank statement'), 'the disproved matched-rows rule is gone');
   // A net below zero is shown with its sign.
   const negative = await renderCheck('unreconciled_bank_items', items, issue, { zohoUnreconciled: { ...unreconciledTotals(issue.detail_json), net: -40.5 } });
   assert.ok(negative.includes('-AED 40.50</strong>'));

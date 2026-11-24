@@ -185,6 +185,20 @@ async function zohoCopyFor(org, clientCurrency) {
   };
 }
 
+// Zoho Books Unreconciled Bank totals (money in, money out, net) from ALL the check's stored rows. An issue with
+// findings keeps them in issue_findings and stores no detail_json, so the rows are read page by page (the same way
+// the CSV export does); detail_json is only the fallback for an issue saved without findings.
+function zohoUnreconciledFor(issue, orgId) {
+  if (!issue) return null;
+  const items = [];
+  for (let page = 1; page < 1000; page++) {
+    const chunk = getIssueFindings(issue.id, orgId, page, 100, 'all', '', 'period');
+    items.push(...chunk.items);
+    if (!chunk.items.length || page >= (chunk.totalPages || 1)) break;
+  }
+  return unreconciledTotals(items.length ? items : issue.detail_json);
+}
+
 function clientViewData(liveOrg, query = {}, clientCurrency = 'GBP', zohoCopy = null) {
   const { selectedPeriod, view } = periodViewFor(liveOrg, query);
   const viewIssues = view ? getIssuesForView(view) : null;
@@ -201,7 +215,7 @@ function clientViewData(liveOrg, query = {}, clientCurrency = 'GBP', zohoCopy = 
     if (issue && def.type === 'unprocessed_bank') merged.screenItems = getLiveScreenItemTotal(issue.id);
     if (zohoCopy && zohoCopy.labelFor(def.type)) merged.label = zohoCopy.labelFor(def.type);
     // Zoho Books: Unreconciled Bank's headline is Zoho's net (money in minus money out), not the gross value.
-    if (zohoCopy && def.type === 'unreconciled_bank_items' && issue) merged.zohoUnreconciled = unreconciledTotals(issue.detail_json);
+    if (zohoCopy && def.type === 'unreconciled_bank_items' && issue) merged.zohoUnreconciled = zohoUnreconciledFor(issue, org.id);
     // Single source of truth for what this check's state means — the template must never re-derive
     // this from its own period_checked string comparisons (see checkRules.js/periodStatus.js).
     return { ...merged, displayStatus: resolveCheckDisplayStatus(merged) };
@@ -649,7 +663,7 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
     displayStatus: issue ? resolveCheckDisplayStatus(issue) : null, ...extraData,
     // Zoho Books only (nothing is passed for any other client, so their pages are unchanged).
     ...(zohoCopy ? { zohoUnreadNote: zohoCopy.unreadNoteFor(checkType) } : {}),
-    ...(zohoCopy && checkType === 'unreconciled_bank_items' && issue ? { zohoUnreconciled: unreconciledTotals(issue.detail_json) } : {}),
+    ...(zohoCopy && checkType === 'unreconciled_bank_items' && issue ? { zohoUnreconciled: zohoUnreconciledFor(issue, org.id) } : {}),
   });
 });
 

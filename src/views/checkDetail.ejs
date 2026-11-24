@@ -514,7 +514,7 @@ function toggleBbEditForm(id) {
               <% if (key === 'date' && mainHasAge) { %><th>Age</th><% } %>
             <% }) %>
             <% if (mainHasAccountColumn) { %><th>Account Code Used</th><% } %>
-            <th>Xero</th>
+            <th><%= /^zoho-/.test(String(org.freeagent_company_id || '')) ? 'Zoho Books' : 'Xero' %></th>
             <th>Review</th>
           </tr>
         </thead>
@@ -634,7 +634,7 @@ function toggleBbEditForm(id) {
                               <th style="text-transform: capitalize;"><%= key.replace(/_/g,' ').replace(/([A-Z])/g,' $1').trim() %></th>
                             <% }) %>
                             <% if (hasAccountColumn) { %><th>Account Code Used</th><% } %>
-                            <th>Xero</th>
+                            <th><%= /^zoho-/.test(String(org.freeagent_company_id || '')) ? 'Zoho Books' : 'Xero' %></th>
                             <th>Reviewed?</th>
                           </tr>
                         </thead>
