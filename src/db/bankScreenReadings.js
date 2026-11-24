@@ -4,6 +4,7 @@
 const zlib = require('zlib');
 const { getPool } = require('./mysqlPool');
 const { buildShortCodeIndex } = require('../services/bankScreenReading');
+const { ukStatementLabel } = require('../services/displayDate');
 
 let tableReady = null;
 function ensureTables(pool = getPool()) {
@@ -288,7 +289,8 @@ async function getLatestReading(orgId, { pool = getPool(), ensure = ensureTables
       itemsToReconcile: row.items_to_reconcile == null ? null : Number(row.items_to_reconcile),
       reconciled: Boolean(row.reconciled), balancesDiffer: Boolean(row.balances_differ),
       balanceInXero: num(row.balance_in_xero), statementBalance: num(row.statement_balance),
-      statementDateLabel: row.statement_date_label, feedProblem: Boolean(row.feed_problem),
+      // Xero's own label ("Nov 17") shown day first ("17 Nov"); the stored reading is unchanged.
+      statementDateLabel: ukStatementLabel(row.statement_date_label), feedProblem: Boolean(row.feed_problem),
       stoppedImporting: Boolean(row.stopped_importing), noFeed: Boolean(row.no_feed),
     })),
   };

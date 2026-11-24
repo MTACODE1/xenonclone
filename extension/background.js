@@ -33,7 +33,8 @@ function showStatus(state) {
   const look = STATUS_LOOK[state.status];
   chrome.action.setBadgeText({ text: look.text }).catch(() => {});
   chrome.action.setBadgeBackgroundColor({ color: look.colour }).catch(() => {});
-  const when = new Date(state.at).toLocaleString();
+  // UK order whatever the computer's language: toLocaleString() alone showed 11/24/2026 on a US-English Chrome.
+  const when = new Date(state.at).toLocaleString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
   chrome.action.setTitle({ title: state.status === 'ok'
     ? 'Akrio Verify: last Xero read worked (' + when + ').'
     : 'Akrio Verify: last Xero read failed (' + when + '). ' + String(state.message || '').slice(0, 400) }).catch(() => {});

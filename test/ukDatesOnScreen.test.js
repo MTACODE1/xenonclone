@@ -97,3 +97,19 @@ test('dividend check message names its dates as DD/MM/YYYY', () => {
   assert.match(source, /between \$\{ukDate\(fyStart\)\} and \$\{ukDate\(fyEnd\)\}/);
   assert.doesNotMatch(source, /between \$\{fyStart\} and \$\{fyEnd\}/);
 });
+
+test('Xero\'s statement date label is shown day first, never with a guessed year (James\'s meeting, 23 Nov 2026)', () => {
+  const { ukStatementLabel } = require('../src/services/displayDate');
+  assert.equal(ukStatementLabel('Nov 17'), '17 Nov');
+  assert.equal(ukStatementLabel('Nov 17, 2025'), '17 Nov 2025');
+  assert.equal(ukStatementLabel('17 Nov'), '17 Nov');
+  assert.equal(ukStatementLabel(null), null);
+  assert.match(require('fs').readFileSync(path.join(__dirname, '../src/db/bankScreenReadings.js'), 'utf8'), /statementDateLabel: ukStatementLabel\(row\.statement_date_label\)/);
+});
+
+test('the browser extension writes its "last Xero read" time in UK order', () => {
+  const source = require('fs').readFileSync(path.join(__dirname, '../extension/background.js'), 'utf8')
+    .split('\n').filter(line => !line.trim().startsWith('//')).join('\n');
+  assert.doesNotMatch(source, /toLocaleString\(\)/);
+  assert.match(source, /toLocaleString\('en-GB'/);
+});

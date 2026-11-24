@@ -31,4 +31,15 @@ function ukDate(value) {
   return value;
 }
 
-module.exports = { ukDate };
+// Xero's Bank accounts page writes the statement date month first and without a year ("Nov 17").
+// Shown day first ("17 Nov"), as in the UK; a year is kept only if Xero gave one, never guessed.
+function ukStatementLabel(label) {
+  if (label == null) return label;
+  const text = String(label).trim();
+  const monthFirst = /^([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:,?\s+(\d{4}))?$/.exec(text);
+  if (!monthFirst) return text;
+  const [, month, day, year] = monthFirst;
+  return `${Number(day)} ${month.slice(0, 1).toUpperCase()}${month.slice(1, 3).toLowerCase()}${year ? ` ${year}` : ''}`;
+}
+
+module.exports = { ukDate, ukStatementLabel };
