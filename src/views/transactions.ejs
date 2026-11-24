@@ -3,7 +3,7 @@
 <div class="page-header page-header-flex">
   <div>
     <h4>Transaction Counts</h4>
-    <p><%= (query.period || 'since_lock_date').replaceAll('_',' ') %>: worked out from each client's last sync. Changing the period needs no new sync; each client's own dates are shown under its name.</p>
+    <p><%= ((periodOptions || []).find(option => option.value === (query.period || 'since_lock_date')) || {}).label || (query.period || 'since_lock_date').replaceAll('_',' ') %>: worked out from each client's last sync. Changing the period needs no new sync; each client's own dates are shown under its name.</p>
   </div>
   <button onclick="exportCSV()" class="btn btn-outlined">
     <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">

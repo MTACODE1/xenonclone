@@ -23,6 +23,8 @@ getDb();
 const app = express();
 // Every view can show a date the UK way (DD/MM/YYYY): <%= ukDate(value) %>.
 app.locals.ukDate = require('./src/services/displayDate').ukDate;
+// A stored period key (since_lock_date:2025-09-30:2026-11-21) in words with UK dates.
+app.locals.periodKeyLabel = require('./src/services/periodResolver').periodKeyLabel;
 
 if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) {
   throw new Error('SESSION_SECRET is required in production');

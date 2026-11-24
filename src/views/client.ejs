@@ -573,7 +573,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
                 <% } %>
               </td>
               <td style="padding: 10px 16px; font-size: 0.7rem; color: #7C8FAC;">
-                <% if (acc.statement_balance_updated_at) { %>entered <%= acc.statement_balance_updated_at.split(' ')[0] %><% } %>
+                <% if (acc.statement_balance_updated_at) { %>entered <%= ukDate(String(acc.statement_balance_updated_at).split(' ')[0]) %><% } %>
               </td>
               <td style="padding: 10px 16px;">
                 <form method="POST" action="<%= basePath %>/client/<%= orgIdentifier %>/bank-account-exclusion">

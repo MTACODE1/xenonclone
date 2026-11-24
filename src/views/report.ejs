@@ -40,10 +40,10 @@
 
   <h2>Basis and evidence</h2>
   <table>
-    <tr><th>Selected period</th><td><%= selectedPeriod.start %> to <%= selectedPeriod.end %></td><th>Period key</th><td><%= selectedPeriod.key %></td></tr>
-    <tr><th>Last sync</th><td><%= org.last_synced_at || 'Not synced' %></td><th>Score calculated</th><td><%= org.calculated_at || 'Not calculated' %></td></tr>
-    <tr><th>Most recent transaction</th><td><%= org.most_recent_transaction || 'Unavailable' %></td><th>Lock date</th><td><%= org.lock_date || 'Not set' %></td></tr>
-    <tr><th>Statement evidence</th><td colspan="3"><%= statementImports.length ? statementImports.map(item => `${item.bank_account_name}: ${item.statement_end_date}`).join(' · ') : 'No imported statement evidence' %></td></tr>
+    <tr><th>Selected period</th><td><%= ukDate(selectedPeriod.start) %> to <%= ukDate(selectedPeriod.end) %></td><th>Period</th><td><%= selectedPeriod.label %></td></tr>
+    <tr><th>Last sync</th><td><%= org.last_synced_at ? ukDate(org.last_synced_at) : 'Not synced' %></td><th>Score calculated</th><td><%= org.calculated_at ? ukDate(org.calculated_at) : 'Not calculated' %></td></tr>
+    <tr><th>Most recent transaction</th><td><%= org.most_recent_transaction ? ukDate(org.most_recent_transaction) : 'Unavailable' %></td><th>Lock date</th><td><%= org.lock_date ? ukDate(org.lock_date) : 'Not set' %></td></tr>
+    <tr><th>Statement evidence</th><td colspan="3"><%= statementImports.length ? statementImports.map(item => `${item.bank_account_name}: ${ukDate(item.statement_end_date)}`).join(' · ') : 'No imported statement evidence' %></td></tr>
   </table>
 
   <h2>All checks</h2>

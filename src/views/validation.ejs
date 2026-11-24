@@ -129,7 +129,7 @@
     <% gate.comparisons.forEach(comparison => { %>
       <details class="validation-snapshot">
         <summary>
-          <strong><%= comparison.orgName %></strong> — <%= comparison.periodKey %>
+          <strong><%= comparison.orgName %></strong> — <%= periodKeyLabel(comparison.periodKey) %>
           <span class="importance-badge <%= comparison.runMatches ? 'low' : 'critical' %>"><%= comparison.runMatches ? 'RUN MATCHED' : 'NO MATCHING RUN' %></span>
         </summary>
         <p>Headline: score <%= comparison.xenonScore %> → <%= comparison.appScore == null ? 'N/A' : comparison.appScore %>
