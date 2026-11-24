@@ -99,7 +99,7 @@
           <% rows.forEach(row => { %>
             <tr>
               <td><%= row.review_state %><%= row.displayOnly ? ' (display only)' : '' %></td>
-              <td><%= Object.entries(row).filter(([key]) => !hiddenFindingFields.includes(key)).map(([key,value]) => `${key}: ${Array.isArray(value) ? value.join(', ') : value ?? '—'}`).join(' · ') %></td>
+              <td><%= Object.entries(row).filter(([key]) => !hiddenFindingFields.includes(key)).map(([key,value]) => `${key}: ${(Array.isArray(value) ? value.join(', ') : String(value ?? '—')).replace(/\b(\d{4})-(\d{2})-(\d{2})\b/g, '$3/$2/$1')}`).join(' · ') %></td>
             </tr>
           <% }) %>
           </tbody>

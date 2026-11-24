@@ -4,6 +4,8 @@
 // Manual journal lines carry a signed LineAmount: positive = debit, negative = credit (the same
 // convention the Turnover calculation relies on).
 
+const { ukDate } = require('./displayDate');
+
 const CHECK_TYPES = Object.freeze({
   revenueVsExpense: 'journal_revenue_vs_expense',
   vatControl: 'journal_vat_control',
@@ -320,8 +322,8 @@ function dividendStatus({ accounts, lines, fyStart, fyEnd, profit }) {
     documentId: 'dividends-current-fy', number: null, date: fyEnd, source: 'dividend_status', accountCode: null,
     level: 'info', rule: 'no_dividend_evidence',
     description: (dividendCodes.size
-      ? `No dividend postings found between ${fyStart} and ${fyEnd}`
-      : `No dividend account was found, and no dividend postings exist between ${fyStart} and ${fyEnd}`)
+      ? `No dividend postings found between ${ukDate(fyStart)} and ${ukDate(fyEnd)}`
+      : `No dividend account was found, and no dividend postings exist between ${ukDate(fyStart)} and ${ukDate(fyEnd)}`)
       + ` although the company made a profit of £${Math.round(profit).toLocaleString('en-GB')} this year.`,
     amount: profit,
   }];

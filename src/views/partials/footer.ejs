@@ -132,5 +132,47 @@ function followJob(jobId, btn, originalHTML) {
   };
 }
 </script>
+<!-- Date boxes in DD/MM/YYYY. A browser's own date box follows the computer's language setting, so on a
+     machine set to US English it shows mm/dd/yyyy (Insights "Show data up to", custom periods, bank lines...).
+     Each date box gets a calendar that always shows DD/MM/YYYY; the value sent to the server stays YYYY-MM-DD,
+     so nothing on the server changes. If the calendar script cannot load, the browser's own box stays. -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css">
+<script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js"></script>
+<script>
+(function () {
+  if (!window.flatpickr) return;
+  function ukDateBox(input) {
+    if (input._flatpickr || input.type !== 'date') return;
+    var style = input.getAttribute('style');
+    var fp = window.flatpickr(input, {
+      dateFormat: 'Y-m-d', altInput: true, altFormat: 'd/m/Y', altInputClass: input.className, allowInput: true, disableMobile: true,
+      locale: { firstDayOfWeek: 1 },
+      minDate: input.getAttribute('min') || null, maxDate: input.getAttribute('max') || null,
+    });
+    var alt = fp.altInput;
+    if (!alt) return;
+    alt.placeholder = 'DD/MM/YYYY';
+    if (style) alt.setAttribute('style', style);
+    if (input.required) alt.required = true;
+    // Enter in the box: take what was typed, then let the page's own Enter handling run (Insights uses it).
+    alt.addEventListener('keydown', function (event) {
+      if (event.key !== 'Enter') return;
+      if (alt.value) fp.setDate(alt.value, true, 'd/m/Y');
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    });
+  }
+  document.querySelectorAll('input[type="date"]').forEach(ukDateBox);
+  // Date boxes added later (rows added on a settings page) get the same calendar.
+  new MutationObserver(function (changes) {
+    changes.forEach(function (change) {
+      change.addedNodes.forEach(function (node) {
+        if (node.nodeType !== 1) return;
+        if (node.matches && node.matches('input[type="date"]')) ukDateBox(node);
+        if (node.querySelectorAll) node.querySelectorAll('input[type="date"]').forEach(ukDateBox);
+      });
+    });
+  }).observe(document.body, { childList: true, subtree: true });
+})();
+</script>
 </body>
 </html>

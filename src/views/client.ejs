@@ -706,7 +706,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
             <% } %>
           </div>
           <div style="border-top:1px solid #f2f6fa;padding:8px 20px;font-size:0.72rem;color:#7C8FAC;">
-            Fetched <%= new Date(companiesHouse.fetched_at).toLocaleString('en-GB') %> ·
+            Fetched <%= ukDate(new Date(companiesHouse.fetched_at)) %> ·
             <a href="https://find-and-update.company-information.service.gov.uk/company/<%= encodeURIComponent(companiesHouse.company_number) %>" target="_blank" rel="noopener">View on Companies House</a>
           </div>
         <% } %>

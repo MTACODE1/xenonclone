@@ -65,3 +65,35 @@ test('transactions page heading names the period, not its code', () => {
   assert.match(ejs.render(heading, { ...shared, periodOptions, query: { period: 'previous_fy' } }), /^<p>Previous Financial Year: worked out/);
   assert.match(ejs.render(heading, { ...shared, periodOptions: [], query: { period: 'odd_one' } }), /^<p>odd one: worked out/);
 });
+
+test('PDF report findings: dates inside each finding are DD/MM/YYYY', () => {
+  const source = require('fs').readFileSync(path.join(VIEWS, 'report.ejs'), 'utf8');
+  const line = source.split('\n').find(l => l.includes('hiddenFindingFields.includes(key)'));
+  const cell = line.trim();
+  const html = ejs.render(cell, { ...shared, hiddenFindingFields: ['id'],
+    row: { id: 'x', contact: 'Made Up Ltd', date: '2026-08-05', dueDate: '2026-09-04', amount: 10, dates: ['2026-01-02', '2026-01-03'], note: null } });
+  assert.doesNotMatch(html, ISO);
+  assert.ok(html.includes('date: 05/08/2026') && html.includes('dueDate: 04/09/2026'));
+  assert.ok(html.includes('dates: 02/01/2026, 03/01/2026') && html.includes('amount: 10') && html.includes('note: —'));
+  assert.ok(!html.includes('id: x'));
+});
+
+test('check pages: dates inside a sentence are DD/MM/YYYY; references are left alone', () => {
+  const source = require('fs').readFileSync(path.join(VIEWS, 'checkDetail.ejs'), 'utf8');
+  const start = source.indexOf('const ISO_DATE_RE');
+  const end = source.indexOf('\n}\n', source.indexOf('function fmtDisplayDate')) + 2;
+  const fmtDisplayDate = new Function(source.slice(start, end) + '; return fmtDisplayDate;')();
+  assert.equal(fmtDisplayDate('2026-11-24'), '24/11/2026');
+  assert.equal(fmtDisplayDate('No dividend postings found between 2026-11-01 and 2026-11-24 although'), 'No dividend postings found between 01/11/2026 and 24/11/2026 although');
+  assert.equal(fmtDisplayDate('INV-2026-11-01'), 'INV-2026-11-01');
+  assert.equal(fmtDisplayDate(12.5), 12.5);
+});
+
+test('dividend check message names its dates as DD/MM/YYYY', () => {
+  const journalChecks = require('../src/services/journalChecks');
+  const name = Object.keys(journalChecks).find(k => /dividend/i.test(k) && typeof journalChecks[k] === 'function');
+  assert.ok(name, 'dividend check exported');
+  const source = require('fs').readFileSync(path.join(__dirname, '../src/services/journalChecks.js'), 'utf8');
+  assert.match(source, /between \$\{ukDate\(fyStart\)\} and \$\{ukDate\(fyEnd\)\}/);
+  assert.doesNotMatch(source, /between \$\{fyStart\} and \$\{fyEnd\}/);
+});

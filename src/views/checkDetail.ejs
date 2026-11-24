@@ -12,7 +12,10 @@ const viewInfo = typeof periodView === 'undefined' ? null : periodView;
 // that reads these same fields.
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 function fmtDisplayDate(val) {
-  if (typeof val !== 'string' || !ISO_DATE_RE.test(val)) return val;
+  if (typeof val !== 'string') return val;
+  // A sentence (it has spaces) can name dates too, e.g. the dividend check's "between 2026-11-01 and 2026-11-24".
+  // A reference without spaces (INV-2026-11-01) is left exactly as written.
+  if (!ISO_DATE_RE.test(val)) return val.includes(' ') ? val.replace(/\b(\d{4})-(\d{2})-(\d{2})\b/g, '$3/$2/$1') : val;
   const [y, m, d] = val.split('-');
   return `${d}/${m}/${y}`;
 }
