@@ -232,7 +232,7 @@ async function fetchDocuments(externalId, { emit = () => {} } = {}) {
   emit({ step: 'fetch_documents', message: 'Reading credit notes from Zoho Books...' });
   const salesCredits = (await fetchAllPages(externalId, '/creditnotes', 'creditnotes', all, emit)).map(mapSalesCredit);
   emit({ step: 'fetch_documents', message: 'Reading vendor credits from Zoho Books...' });
-  const vendorCredits = (await fetchAllPages(externalId, '/vendorcredits', 'vendorcredits', all, emit)).map(mapVendorCredit);
+  const vendorCredits = (await fetchAllPages(externalId, '/vendorcredits', 'vendor_credits', all, emit)).map(mapVendorCredit);
   return { invoices, bills, credits: [...salesCredits, ...vendorCredits], contacts };
 }
 

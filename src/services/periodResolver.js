@@ -67,8 +67,10 @@ function resolvePeriod(input = {}, context = {}) {
     // Xenon's wording and UK date order ("Since Xero Lock Date (31/10/2025)"). Where Abdur's rule starts the review at
     // the last signed accounts instead (later than Xero's lock date), the label says so rather than naming a date
     // that is not Xero's lock date.
-    label = !context.lockDate ? `All transactions to ${ukDate(end)} (no Xero lock date)`
-      : context.lockSource === 'signed_accounts' ? `Since last signed accounts (${ukDate(start)})` : `Since Xero Lock Date (${ukDate(start)})`;
+    // A QuickBooks, Zoho Books or FreeAgent client names its own ledger (context.ledgerName); Xero is the default.
+    const ledgerName = context.ledgerName || 'Xero';
+    label = !context.lockDate ? `All transactions to ${ukDate(end)} (no ${ledgerName} lock date)`
+      : context.lockSource === 'signed_accounts' ? `Since last signed accounts (${ukDate(start)})` : `Since ${ledgerName} Lock Date (${ukDate(start)})`;
   } else if (type === 'all_transactions') {
     start = EARLIEST;
     label = `All transactions (to ${ukDate(end)})`;

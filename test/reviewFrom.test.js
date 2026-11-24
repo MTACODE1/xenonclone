@@ -61,6 +61,9 @@ test('the lock date label and the no-date label are unchanged', () => {
   assert.equal(resolvePeriod({ type: 'since_lock_date' }, { lockDate: '2026-03-31', lockSource: 'lock_date', asOf: ASOF }).label, 'Since Xero Lock Date (31/03/2026)');
   assert.equal(resolvePeriod({ type: 'since_lock_date' }, { lockDate: '2026-03-31', asOf: ASOF }).label, 'Since Xero Lock Date (31/03/2026)');
   assert.equal(resolvePeriod({ type: 'since_lock_date' }, { asOf: ASOF }).label, 'All transactions to 20/10/2026 (no Xero lock date)');
+  // A non-Xero client names its own ledger; Xero stays the default wording.
+  assert.equal(resolvePeriod({ type: 'since_lock_date' }, { asOf: ASOF, ledgerName: 'Zoho Books' }).label, 'All transactions to 20/10/2026 (no Zoho Books lock date)');
+  assert.equal(resolvePeriod({ type: 'since_lock_date' }, { asOf: ASOF, lockDate: '2025-09-30', ledgerName: 'QuickBooks' }).label, 'Since QuickBooks Lock Date (30/09/2025)');
 });
 
 test('other period types ignore the review-from date', () => {

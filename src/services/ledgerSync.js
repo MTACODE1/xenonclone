@@ -70,6 +70,7 @@ async function runLedgerSync(key, identifier, org, progressCallback, options) {
   }
   const period = resolvePeriod(options.period || {}, {
     lockDate: info.lockDate || null,
+    ledgerName: label,
     financialYearEndDay: info.financialYearEndDay,
     financialYearEndMonth: info.financialYearEndMonth,
     asOf: options.asOf,

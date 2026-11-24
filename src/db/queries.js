@@ -2204,9 +2204,13 @@ async function getAllTransactionActivity(periodInputValue) {
     let period;
     try {
       const reviewFrom = getReviewFrom(o);
+      const ledgerId = String(o.freeagent_company_id || '');
       period = resolvePeriod(periodInputValue, {
         lockDate: reviewFrom.date, lockSource: reviewFrom.source,
         financialYearEndDay: o.financial_year_end_day, financialYearEndMonth: o.financial_year_end_month,
+        // The client's own ledger in the period wording (the same names as services/ledgers).
+        ledgerName: o.xero_tenant_id || !ledgerId ? 'Xero'
+          : ledgerId.startsWith('qbo-') ? 'QuickBooks' : ledgerId.startsWith('zoho-') ? 'Zoho Books' : 'FreeAgent',
       });
     } catch (error) {
       return { ...base, period_error: error.message };

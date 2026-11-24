@@ -88,6 +88,7 @@ function periodContextFor(org) {
     lockSource: reviewFrom.source,
     financialYearEndDay: org.financial_year_end_day,
     financialYearEndMonth: org.financial_year_end_month,
+    ledgerName: ledgerLabel(org),
   };
 }
 

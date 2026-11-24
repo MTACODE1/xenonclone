@@ -87,7 +87,7 @@ async function runFreeAgentSync(companyId, progressCallback, options = {}) {
   // No FreeAgent equivalent wired up yet for lock date / financial year end (Stage 2) — resolve
   // against whatever period the caller asked for with no lock-date override, same as a Xero
   // client would get before its first-ever sync populates one.
-  const period = resolvePeriod(options.period || {}, { lockDate: null, asOf: options.asOf });
+  const period = resolvePeriod(options.period || {}, { lockDate: null, ledgerName: 'FreeAgent', asOf: options.asOf });
 
   // Contacts are read once and shared by the invoice, bill and credit note reads (they used to be
   // read four times per sync).

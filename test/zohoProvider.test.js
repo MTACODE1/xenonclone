@@ -214,7 +214,7 @@ test('fetchDocuments reads every page of every list and maps them to the Xero sh
   handlers.push(r => isBooks(r, '/invoices') && pagedList('invoices', invoices, seen)(r));
   handlers.push(r => isBooks(r, '/bills') && pagedList('bills', bills, seen)(r));
   handlers.push(r => isBooks(r, '/creditnotes') && pagedList('creditnotes', creditnotes, seen)(r));
-  handlers.push(r => isBooks(r, '/vendorcredits') && pagedList('vendorcredits', vendorcredits, seen)(r));
+  handlers.push(r => isBooks(r, '/vendorcredits') && pagedList('vendor_credits', vendorcredits, seen)(r));
   handlers.push(r => isBooks(r, '/contacts') && pagedList('contacts', contacts, seen)(r));
 
   const messages = [];
