@@ -11,7 +11,8 @@ const client = require('./client');
 
 // QuickBooks has supplier credits (VendorCredit) but no draft invoices or bills: a QuickBooks
 // invoice or bill exists only once it is saved, so the two "unapproved" checks are not applicable.
-const ledger = { key: 'quickbooks', purchaseCredits: true, drafts: false };
+// exchangeRates: a foreign document carries currencyRate (Xero's convention), so the checks convert.
+const ledger = { key: 'quickbooks', purchaseCredits: true, drafts: false, exchangeRates: true };
 
 const PAGE_SIZE = 1000; // Intuit's documented maximum per query (the default is 100)
 const MAX_PAGES = 1000;

@@ -19,8 +19,8 @@ function fmtDisplayDate(val) {
   const [y, m, d] = val.split('-');
   return `${d}/${m}/${y}`;
 }
-// Money is shown in the client's currency ("£" for GBP, "AED " for a client kept in AED; amounts are never
-// converted) with pence whatever its value: a whole-pound amount is stored as a plain integer (22, 1188),
+// Money is shown in the client's currency ("£" for GBP, "AED " for a client kept in AED; the page only labels
+// amounts, see rowPrefix below for documents in another currency) with pence whatever its value: a whole-pound amount is stored as a plain integer (22, 1188),
 // which used to be shown bare. Decided by the column name, so counts (items to reconcile, days) stay plain numbers.
 const MONEY_KEY_RE = /(amount|total|value|balance|gross|net|spent|received|difference|outstanding|due)(gbp)?$/i;
 const NOT_MONEY_KEY_RE = /(date|days|count|items|lines|age|code|number|rate|percent)/i;
@@ -34,13 +34,24 @@ function fmtMoney(val, prefix = cur) {
   return (val < 0 ? '-' + prefix : prefix) + Math.abs(val).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 // A row for a document raised in another currency carries that currency ("currency": "USD"), and its
-// figures are in it, not converted. Its amounts take that code, so a dollar figure is never labelled
-// as the client's own currency. Rows without the field are in the client's currency, as before.
+// figures are in it. Its amounts take that code, so a dollar figure is never labelled as the client's
+// own currency. Rows without the field are in the client's currency, as before.
+// Zoho, QuickBooks and FreeAgent rows also say how the document went into the totals: "baseAmount" is
+// the figure converted to the client's currency (shown as "USD 1,000.00 = AED 3,672.50"), and
+// "noExchangeRate" means the ledger gave no usable rate, so it is listed but left out of the totals.
+// A row in another currency with neither (Xero's rows; FreeAgent's, which map no rate; a re-run before the
+// client's currency is stored) keeps the "(not converted)" wording.
 function rowPrefix(item) {
   return item && item.currency ? currencyPrefix(item.currency) : cur;
 }
 function isOtherCurrency(item) {
   return rowPrefix(item) !== cur;
+}
+function isConvertedRow(item) {
+  return isOtherCurrency(item) && typeof item.baseAmount === 'number' && Number.isFinite(item.baseAmount);
+}
+function isNoRateRow(item) {
+  return isOtherCurrency(item) && item.noExchangeRate === true;
 }
 %>
 
@@ -418,6 +429,8 @@ function toggleBbEditForm(id) {
         'standaloneNote', // rendered inline under the Review actions, not as its own column
         // Unprocessed Bank rows from Xero's Bank accounts page: ids and raw provenance; "lastRead" shows it readably.
         'bankAccountId', 'batchId', 'readAt', 'readByName', 'potentialValue',
+        // A foreign document's converted figure and "no rate" flag: shown inside the amount cell instead.
+        'baseAmount', 'noExchangeRate',
       ]);
       // Per-transaction column set for the drill-down (multi_account_suppliers/multi_tax_suppliers)
       // — same hidden-ID-field rule as the main table, applied to each transaction sub-object.
@@ -463,7 +476,11 @@ function toggleBbEditForm(id) {
     <% const mainHasSourceColumn = tableRows.some(item => item.source); %>
     <% const mainHasAge = tableRows.some(item => item.ageDays != null); %>
     <% const mainColorByCode = new Map(); %>
-    <% if (tableRows.some(isOtherCurrency)) { %>
+    <% if (tableRows.some(isConvertedRow)) { %>
+      <p class="check-note">Some documents are in another currency. Each is shown in its own currency with the amount converted to the client's currency beside it; the totals use the converted amounts.</p>
+    <% } if (tableRows.some(isNoRateRow)) { %>
+      <p class="check-note">Some documents in another currency have no exchange rate in the ledger. They are listed and counted, but their amounts are not included in the totals.</p>
+    <% } if (tableRows.some(item => isOtherCurrency(item) && !isConvertedRow(item) && !isNoRateRow(item))) { %>
       <p class="check-note">Some documents are in another currency. Their amounts are shown in that currency, not converted.</p>
     <% } %>
     <div class="table-wrap">
@@ -507,11 +524,11 @@ function toggleBbEditForm(id) {
               <% columns.forEach(key => { const val = item[key]; %>
                 <td>
                   <% if (isMoneyCell(key, val)) { %>
-                    <%= fmtMoney(val, rowPrefix(item)) %><% if (isOtherCurrency(item)) { %> <span style="font-size:0.7rem;color:#7C8FAC;">(not converted)</span><% } %>
+                    <%= fmtMoney(val, rowPrefix(item)) %><% if (isConvertedRow(item)) { %> = <%= fmtMoney(item.baseAmount) %><% } else if (isNoRateRow(item)) { %> <span style="font-size:0.7rem;color:#7C8FAC;">(no exchange rate - not included in totals)</span><% } else if (isOtherCurrency(item)) { %> <span style="font-size:0.7rem;color:#7C8FAC;">(not converted)</span><% } %>
                   <% } else if (Array.isArray(val)) { %>
                     <%# A group of bills/invoices is listed as "reference · amount · status · date", never as [object Object] %>
                     <%= val.length && val[0] !== null && typeof val[0] === 'object'
-                      ? val.map(d => [d.reference, d.amount != null ? cur + Number(d.amount).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : null, d.status, fmtDisplayDate(d.date)].filter(Boolean).join(' · ')).join('   |   ')
+                      ? val.map(d => [d.reference, d.amount != null ? rowPrefix(item) + Number(d.amount).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : null, d.status, fmtDisplayDate(d.date)].filter(Boolean).join(' · ')).join('   |   ')
                       : val.join(', ') %>
                   <% } else { %>
                     <%= val != null ? fmtDisplayDate(val) : '—' %>

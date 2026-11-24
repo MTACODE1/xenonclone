@@ -21,6 +21,7 @@ const orgs = new Map(); // freeagent_company_id -> organisation row
 let nextOrgId = 2000;
 let nextRunId = 5000;
 const resetCalls = () => { calls.length = 0; };
+const storedCurrency = new Map(); // org id -> currency code
 function seedOrg(identifier, id, extra = {}) {
   const row = { id, freeagent_company_id: identifier, xero_tenant_id: null, name: 'Made Up Ltd', client_ref: null, tag: null, connection_status: 'connected', ...extra };
   orgs.set(identifier, row);
@@ -45,6 +46,12 @@ async function fakeQuery(sql, params = []) {
     return [{ affectedRows: row ? 1 : 0 }, []];
   }
   if (/INSERT INTO akrio_sync_runs/.test(sql)) return [{ insertId: nextRunId++ }, []];
+  // akrio_org_currency (orgCurrency.js): one currency per client.
+  if (/INSERT INTO akrio_org_currency/.test(sql)) { storedCurrency.set(Number(params[0]), params[1]); return [{ affectedRows: 1 }, []]; }
+  if (/SELECT currency_code FROM akrio_org_currency WHERE org_id = \?/.test(sql)) {
+    const code = storedCurrency.get(Number(params[0]));
+    return [code ? [{ currency_code: code }] : [], []];
+  }
   // activateSyncRun asks whether runLedgerChecks staged a health score; upsertHealthScore was called just before.
   if (/SELECT 1 FROM akrio_health_scores/.test(sql)) return [[{ 1: 1 }], []];
   return [{ insertId: 0, affectedRows: 0 }, []];
@@ -82,15 +89,17 @@ const { toMysqlDate } = require('../src/db/ledgerTokens');
 // (used once the file exists) AND handed out by ledgers.provider (used either way). ledgerSync looks
 // the provider up through ledgers.provider at call time, so this is what it gets.
 const qbo = {
-  ledger: { key: 'quickbooks', purchaseCredits: true, drafts: false },
+  ledger: { key: 'quickbooks', purchaseCredits: true, drafts: false, exchangeRates: true },
   isConfigured: () => true,
   externalIdsRead: [],
   info: { name: 'Made Up Ltd', lockDate: null },
   docs: { invoices: [], bills: [], credits: [], contacts: [] },
   failWith: null,
   async fetchCompanyInfo(externalId) { this.externalIdsRead.push(externalId); return this.info; },
-  async fetchDocuments(externalId) {
+  optionsSeen: [],
+  async fetchDocuments(externalId, options) {
     this.externalIdsRead.push(externalId);
+    this.optionsSeen.push(options);
     if (this.failWith) throw this.failWith;
     return this.docs;
   },
@@ -272,8 +281,9 @@ test('ageing is as at the end of the current month, not today', async t => {
   assert.deepEqual(findingIds(903, 9103, 'old_sales_credits'), ['sc-old']);
 });
 
-// A document in another currency keeps its own figures (nothing is converted), so its row says which
-// currency it is in; a row in the client's own currency is left exactly as it was.
+// A document in another currency keeps its own figures on its row, which says which currency it is in
+// (the conversion itself is tested in foreignCurrencyConversion.test.js; these documents carry no rate,
+// so they are marked as having none); a row in the client's own currency is left exactly as it was.
 test('a document in another currency is marked with that currency on its check row', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: new Date(TODAY) });
   const { invoices, bills, credits, contacts } = sampleDocuments();
@@ -283,7 +293,7 @@ test('a document in another currency is marked with that currency on its check r
   getDb();
   await runLedgerChecks({
     org: { id: 908, name: 'Made Up Ltd' }, runId: 9108, period: period(),
-    invoices: [...invoices, ...bills], contacts, credits, options: {}, ledger: { key: 'zoho', purchaseCredits: true, drafts: true },
+    invoices: [...invoices, ...bills], contacts, credits, options: {}, ledger: { key: 'zoho', purchaseCredits: true, drafts: true, exchangeRates: true },
     saveOrganisation: async () => {}, baseCurrency: 'AED',
   });
   const rows = checkType => getDb().prepare(
@@ -389,6 +399,51 @@ test('a QuickBooks sign-in that is no longer accepted fails the run and marks th
     qbo.failWith = null;
   }
   assert.equal(orgs.get('qbo-8888').connection_status, 'connected');
+});
+
+// The sync hands the organisation's currency to the provider (Zoho reads vendor credit rates by it), keeps each
+// document's currencyRate through the cache, and a cache-only re-run gives the same converted totals. Before the
+// client's currency is stored, a cache-only re-run leaves the totals as they were rather than zeroing them.
+test('ledger sync: the organisation currency reaches fetchDocuments, and cache-only re-runs keep the converted totals', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(TODAY) });
+  const { syncLedgerOrganisation } = require('../src/services/ledgerSync');
+  const savedInfo = qbo.info;
+  const savedDocs = qbo.docs;
+  t.after(() => { qbo.info = savedInfo; qbo.docs = savedDocs; });
+  const options = { period: { type: 'all_transactions' }, asOf: '2026-11-10' };
+  const oldInvoice = (id, amount, extra) => doc(id, 'ACCREC', 'AUTHORISED', '2026-09-01',
+    { total: amount, subTotal: amount, amountDue: amount, contact: contact('c1', 'Alpha Trading Ltd'), ...extra });
+  const oldUnpaid = orgId => issuesOf(orgId, nextRunId - 1).old_unpaid_invoices.potential_value_gbp;
+
+  // A GBP client with a EUR invoice (EUR 100 at 1.25 EUR per GBP = 80.00) and a GBP one (50.00): 130.00.
+  seedOrg('qbo-4242', 910);
+  qbo.info = { name: 'Made Up Ltd', lockDate: null, baseCurrency: 'GBP' };
+  qbo.docs = { invoices: [oldInvoice('fx-eur', 100, { currencyCode: 'EUR', currencyRate: 1.25 }), oldInvoice('fx-gbp', 50, { currencyCode: 'GBP' })],
+    bills: [], credits: [credit('fx-cn', 'ACCRECCREDIT', 'AUTHORISED', '2026-11-01', 1)], contacts: [{ contactID: 'c1', name: 'Alpha Trading Ltd', contactStatus: 'ACTIVE' }] };
+  qbo.optionsSeen = [];
+  await syncLedgerOrganisation('qbo-4242', null, options);
+  assert.equal(qbo.optionsSeen.at(-1).baseCurrency, 'GBP', 'fetchDocuments is told the organisation currency');
+  assert.equal(oldUnpaid(910), 130);
+  assert.equal(storedCurrency.get(910), 'GBP');
+  qbo.optionsSeen = [];
+  await syncLedgerOrganisation('qbo-4242', null, { ...options, cacheOnly: true });
+  assert.equal(qbo.optionsSeen.length, 0, 'a cache-only run reads nothing from the ledger');
+  assert.equal(oldUnpaid(910), 130, 'the same converted total from the cache');
+  const cached = getDb().prepare('SELECT json FROM xero_entity_cache WHERE org_id = ? AND entity_type = ?').all(910, 'invoice')
+    .map(row => JSON.parse(row.json)).find(row => row.invoiceID === 'fx-eur');
+  assert.equal(cached.currencyRate, 1.25, 'currencyRate survives the cache');
+
+  // An AED client cached before its currency was stored: AED 500, documents with no rate. A cache-only run with no
+  // stored currency must not treat AED as foreign (that zeroed the total); it stays 500.
+  seedOrg('qbo-4343', 911);
+  qbo.info = { name: 'Made Up FZ LLC', lockDate: null, baseCurrency: 'AED' };
+  qbo.docs = { invoices: [oldInvoice('aed-1', 500, { currencyCode: 'AED' })], bills: [],
+    credits: [credit('aed-cn', 'ACCRECCREDIT', 'AUTHORISED', '2026-11-01', 1)], contacts: [{ contactID: 'c1', name: 'Alpha Trading Ltd', contactStatus: 'ACTIVE' }] };
+  await syncLedgerOrganisation('qbo-4343', null, options);
+  assert.equal(oldUnpaid(911), 500);
+  storedCurrency.delete(911);
+  await syncLedgerOrganisation('qbo-4343', null, { ...options, cacheOnly: true });
+  assert.equal(oldUnpaid(911), 500, 'not 0');
 });
 
 // ===================== sign-in tokens =====================

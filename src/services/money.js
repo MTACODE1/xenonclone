@@ -1,5 +1,7 @@
-// How an amount is written on screen in the client's own currency. Amounts are never converted:
-// a Zoho Books client in the UAE keeps its books in AED, so its figures are AED and must say so.
+// How an amount is written on screen in the client's own currency. This only labels amounts (it
+// never converts): a Zoho Books client in the UAE keeps its books in AED, so its figures are AED and
+// must say so. Documents in another currency are converted to the client's currency by the checks
+// (ledgerChecks.js / checkRules.amountInBase) before any total reaches a page.
 // GBP keeps the "£" every page has always shown, written exactly as before, so Xero and FreeAgent
 // pages do not change by a single character. Any other currency is shown by its code ("AED 1,234"),
 // which reads clearly for currencies whose symbols are ambiguous or unfamiliar.

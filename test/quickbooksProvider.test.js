@@ -142,7 +142,7 @@ test('isConfigured needs all three app settings; the consent URL asks only for t
   assert.equal(url.searchParams.get('scope'), 'com.intuit.quickbooks.accounting');
   assert.equal(url.searchParams.get('redirect_uri'), process.env.QBO_REDIRECT_URI);
   assert.equal(url.searchParams.get('state'), 'state-123');
-  assert.deepEqual(qbo.ledger, { key: 'quickbooks', purchaseCredits: true, drafts: false });
+  assert.deepEqual(qbo.ledger, { key: 'quickbooks', purchaseCredits: true, drafts: false, exchangeRates: true });
 });
 
 test('completeConnection swaps the code for tokens with Basic auth, names the company, and writes nothing', async () => {

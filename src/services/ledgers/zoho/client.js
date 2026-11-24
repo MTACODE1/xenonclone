@@ -278,7 +278,8 @@ async function apiGet(externalId, path, params = {}) {
       continue;
     }
     if (response.status === 429 && Number(body?.code) === 45) {
-      throw new Error(`Zoho Books daily API limit reached for this organisation: ${body?.message || 'try again tomorrow'}`);
+      throw Object.assign(new Error(`Zoho Books daily API limit reached for this organisation: ${body?.message || 'try again tomorrow'}`),
+        { dailyLimit: true });
     }
     if ((response.status === 429 || response.status >= 500) && attempt < MAX_ATTEMPTS) {
       const delay = retryDelay(attempt, response.headers.get('retry-after'));

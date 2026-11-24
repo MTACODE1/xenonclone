@@ -422,5 +422,5 @@ test('a stored API domain that is not Zoho is never sent the token', async () =>
 });
 
 test('ledger flags for the shared checks', () => {
-  assert.deepEqual(zoho.ledger, { key: 'zoho', purchaseCredits: true, drafts: true });
+  assert.deepEqual(zoho.ledger, { key: 'zoho', purchaseCredits: true, drafts: true, exchangeRates: true });
 });

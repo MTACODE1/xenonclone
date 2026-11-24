@@ -45,10 +45,17 @@ async function saveOrgCurrency(orgId, code) {
   return true;
 }
 
-async function getOrgCurrency(orgId) {
+// The stored currency, or null when the client has no row yet. The sync needs to tell "not known"
+// apart from GBP: converting an AED client's documents against a guessed GBP would zero its totals.
+async function getStoredOrgCurrency(orgId) {
   await ensureTable();
   const [rows] = await getPool().query('SELECT currency_code FROM akrio_org_currency WHERE org_id = ?', [orgId]);
-  return cleanCode(rows[0]?.currency_code) || DEFAULT_CURRENCY;
+  return cleanCode(rows?.[0]?.currency_code);
+}
+
+// For display: a client with no row is shown in GBP.
+async function getOrgCurrency(orgId) {
+  return (await getStoredOrgCurrency(orgId)) || DEFAULT_CURRENCY;
 }
 
 // Every requested client's currency from one query, for the all-clients pages. Clients without a
@@ -68,4 +75,4 @@ async function getOrgCurrencies(orgIds) {
   return result;
 }
 
-module.exports = { saveOrgCurrency, getOrgCurrency, getOrgCurrencies, cleanCode, DEFAULT_CURRENCY };
+module.exports = { saveOrgCurrency, getOrgCurrency, getStoredOrgCurrency, getOrgCurrencies, cleanCode, DEFAULT_CURRENCY };

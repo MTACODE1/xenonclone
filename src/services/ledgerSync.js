@@ -10,7 +10,7 @@ const {
 const { resolvePeriod } = require('./periodResolver');
 const { runLedgerChecks } = require('./ledgerChecks');
 const ledgers = require('./ledgers');
-const { saveOrgCurrency, getOrgCurrency } = require('../db/orgCurrency');
+const { saveOrgCurrency, getStoredOrgCurrency } = require('../db/orgCurrency');
 
 const syncsInProgress = new Set();
 
@@ -80,16 +80,19 @@ async function runLedgerSync(key, identifier, org, progressCallback, options) {
   let docs = { invoices: [], bills: [], credits: [], contacts: [] };
   if (!options.cacheOnly) {
     emit({ step: 'fetch_documents', message: `Reading invoices, bills, credit notes and contacts from ${label}...` });
-    docs = await provider.fetchDocuments(externalId, { emit });
+    // The organisation's currency, so Zoho reads the exchange rate only of vendor credits in another one.
+    docs = await provider.fetchDocuments(externalId, { emit, baseCurrency: info.baseCurrency || null });
   }
   const invoices = await refreshCache(org.id, options.runId, 'invoice', [...docs.invoices, ...docs.bills], options);
   const contacts = await refreshCache(org.id, options.runId, 'contact', docs.contacts, options);
   const credits = await refreshCache(org.id, options.runId, 'credit_note', docs.credits, options);
 
-  // The client's own currency, so a document in another currency is marked as such on its check row.
+  // The client's own currency, which the checks convert other currencies into.
   // A cache-only run has not read the company settings, so it uses the currency the last sync stored.
+  // None stored yet (or unreadable) is passed on as null, not as GBP: the checks then leave documents
+  // unconverted for this run, as before, rather than treat an AED client's own documents as foreign.
   const baseCurrency = info.baseCurrency
-    || await getOrgCurrency(org.id).catch(error => {
+    || await getStoredOrgCurrency(org.id).catch(error => {
       console.error(`[ledgerSync] currency not read for organisation ${org.id}: ${error.message}`);
       return null;
     });
