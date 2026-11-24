@@ -117,3 +117,97 @@ test('check page: a Zoho check waiting for its first read says "Needs sync", not
   assert.ok(html.includes('has not been read from Zoho Books yet'));
   assert.ok(!html.includes('issues found'));
 });
+
+// ---- Unreconciled Bank and the balance checks, round 2 of the live checks (made-up rows) ----
+const { runZohoChecks, unreconciledTotals } = require('../src/services/zohoChecks');
+const zohoMapping = require('../src/services/ledgers/zoho/mapping');
+
+function renderCheck(checkType, items, issue, extra = {}) {
+  const decorated = items.map((item, index) => ({ ...item, finding_key: `k${index}`, review_state: 'active', xero_links: [] }));
+  return ejs.renderFile(path.join(VIEWS, 'checkDetail.ejs'), {
+    ...globals, org: { name: 'Made Up FZ LLC', id: 1, freeagent_company_id: 'zoho-600000001' }, issue,
+    def: ALL_CHECK_DEFINITIONS.find(d => d.type === checkType), items: decorated, previousItems: [],
+    pagination: { page: 1, totalPages: 1, total: decorated.length, items: decorated }, previousPagination: { page: 1, totalPages: 1, total: 0, items: [] },
+    summary: { active: decorated.length, dismissed: 0, ignored: 0, ok: 0, previous: 0 }, status: 'all', contact: '', checkType,
+    checkDescriptions: checkDescriptionsFor(scope), groupSupplierTransactions, clientCurrency: 'AED', displayStatus: resolveCheckDisplayStatus(issue), ...extra,
+  });
+}
+function zohoIssues(accounts, contacts = []) {
+  const period = { type: 'since_lock_date', key: 'since_lock_date', start: '2026-06-30', end: '2026-11-10' };
+  const money = { base: 'AED', converts: true, foreignCode: () => null, noRate: () => false, converted: a => a, inBase: a => a, currencyFields: () => ({}) };
+  const { issues } = runZohoChecks({ org: { id: 1 }, period, region: 'AE', taxProfile: { isTaxRegistered: true }, contacts, money, now: new Date('2026-11-10T12:00:00Z'),
+    accounting: { accounts, taxRates: [], manualJournals: [], bankTransactions: [], readStatus: { permissions: { banking: true, expenses: true }, sections: { balances: { read: true } } } } });
+  return Object.fromEntries(issues.map(issue => [issue.check_type, issue]));
+}
+
+test('check page, Zoho Unreconciled Bank: bank account, payee, description and Money in / Money out; the headline is the net, the gross is in the note', async () => {
+  const bank = zohoMapping.mapAccount({ account_id: 'a-bank', account_name: 'Made Up Bank Current', account_type: 'bank', is_active: true });
+  const tx = raw => zohoMapping.mapAccountTransaction({ reconcile_status: 'unreconciled', ...raw }, bank);
+  const unreconciled = [
+    tx({ transaction_id: 't1', transaction_date: '2026-08-01', transaction_type: 'customer_payment', debit_amount: 1500, credit_amount: 0, payee: 'Made-up Customer' }),
+    tx({ transaction_id: 't2', transaction_date: '2026-08-02', transaction_type: 'expense', debit_amount: 0, credit_amount: 210, offset_account_name: 'Tax Payable', vendor_id: 'v-1' }),
+  ];
+  const issues = zohoIssues([{ ...bank, reconciliation: { readAt: '2026-11-10T00:00:00Z', from: '2000-01-01', to: '2026-11-10', complete: true, rows: 2, reconciled: 0, unknown: 0, unreconciled } }],
+    [{ contactID: 'v-1', name: 'Made-up Fuel Supplier' }]);
+  const issue = { ...issues.unreconciled_bank_items, id: 1 };
+  const items = JSON.parse(issue.detail_json);
+  const html = await renderCheck('unreconciled_bank_items', items, issue, { zohoUnreconciled: unreconciledTotals(issue.detail_json) });
+  for (const text of ['Made Up Bank Current', 'Made-up Customer', 'Made-up Fuel Supplier', 'Money in', 'Money out', 'Customer payment',
+    'AED 1,290.00</strong><span>net unmatched value (money in minus money out)', 'money in AED 1,500.00 minus money out AED 210.00 = AED 1,290.00 over 2 transactions',
+    'gross, money in plus money out: AED 1,710.00']) assert.ok(html.includes(text), text);
+  assert.ok(!html.includes('Tax Payable'), 'the offset account is not shown');
+  assert.ok(!html.includes('zoho-unreconciled:'), 'no internal id column');
+  assert.ok(!html.includes('>potential value<'), 'the gross is not the headline');
+  assert.ok(html.includes('matched to a line of an imported bank statement or bank feed'), 'About text says the rule');
+  assert.ok(!html.includes('This is what Zoho Books&#39; Reconciliation Status report lists'), 'About text does not claim a match with Zoho\'s report the live data has not shown');
+  // A net below zero is shown with its sign.
+  const negative = await renderCheck('unreconciled_bank_items', items, issue, { zohoUnreconciled: { ...unreconciledTotals(issue.detail_json), net: -40.5 } });
+  assert.ok(negative.includes('-AED 40.50</strong>'));
+  // Without the totals (any other client), the page shows the stored value as before.
+  const plain = await renderCheck('unreconciled_bank_items', items, issue);
+  assert.ok(plain.includes('AED 1,710.00</strong><span>potential value'));
+});
+
+test('check page, Zoho Unreconciled Bank on several accounts: one net per account as Zoho reports them, the combined figure labelled, and rows in another currency explained', async () => {
+  const totals = unreconciledTotals([
+    { account: 'Made Up Bank Current', direction: 'Money in', amount: 1000 },
+    { account: 'Made Up Bank Current', direction: 'Money out', amount: 200 },
+    { account: 'Made Up Credit Card', direction: 'Money out', amount: 300 },
+    { account: 'Made Up USD Bank', direction: 'Money out', amount: 50, currency: 'USD', potentialValue: 0 },
+  ]);
+  const issue = { check_type: 'unreconciled_bank_items', count: 4, potential_value_gbp: 1500, period_checked: 'since_lock_date', id: 1, detail_json: '[]' };
+  const html = await renderCheck('unreconciled_bank_items', [], issue, { zohoUnreconciled: totals });
+  for (const text of [
+    'AED 800.00</strong><span>net unmatched value, Made Up Bank Current',
+    '-AED 300.00</strong><span>net unmatched value, Made Up Credit Card',
+    'All accounts combined: money in AED 1,000.00 minus money out AED 500.00 = AED 500.00 over 3 transactions',
+    '1 transaction in another currency is listed but not added',
+  ]) assert.ok(html.includes(text), text);
+  assert.ok(!html.includes('<span>net unmatched value (money in minus money out)'), 'no single combined headline when there are several accounts');
+});
+
+test('check page, Zoho Suspense and Shareholder balances: the account name and balance, never the Zoho account id', async () => {
+  const withBalance = (raw, amount) => ({ ...zohoMapping.mapAccount({ is_active: true, account_code: '', ...raw }), ledgerBalance: { amount, side: null, source: 'chart_list', readAt: '2026-11-09T10:00:00.000Z' } });
+  const issues = zohoIssues([
+    withBalance({ account_id: '8000000000000001', account_name: 'Suspense', account_type: 'other_current_liability' }, -320.25),
+    withBalance({ account_id: '8000000000000002', account_name: 'Shareholder Loan Account - Made Up', account_type: 'other_current_asset' }, 900),
+  ]);
+  for (const [checkType, name, amount] of [['suspense_open_balance', 'Suspense', 'AED 320.25'], ['directors_loan_overdrawn', 'Shareholder Loan Account - Made Up', 'AED 900.00']]) {
+    const issue = { ...issues[checkType], id: 1 };
+    const html = await renderCheck(checkType, JSON.parse(issue.detail_json), issue);
+    assert.ok(html.includes(name), `${checkType}: ${name}`);
+    assert.ok(html.includes(amount), `${checkType}: ${amount}`);
+    assert.ok(!/8000000000000\d{3}/.test(html), `${checkType}: no Zoho account id on the page`);
+  }
+});
+
+test('client page, Zoho Unreconciled Bank card: the net value, signed; other clients keep the stored value', async () => {
+  const defs = checkDefs.map(def => (def.type === 'unreconciled_bank_items'
+    ? { ...def, count: 3, potential_value_gbp: 900, period_checked: 'since_lock_date', displayStatus: 'issues', zohoUnreconciled: { net: -300.4, gross: 900 } } : def));
+  const html = await renderClient({ checkDefs: defs });
+  assert.ok(html.includes('-AED 300 net'));
+  assert.ok(html.includes('all bank and card accounts combined'), 'the card says the net is every account added together');
+  const plain = await renderClient({ checkDefs: defs.map(def => (def.type === 'unreconciled_bank_items' ? { ...def, zohoUnreconciled: undefined } : def)) });
+  assert.ok(!plain.includes(' net</span>'));
+  assert.ok(plain.includes('AED 900'));
+});

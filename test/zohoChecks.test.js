@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 
 const mapping = require('../src/services/ledgers/zoho/mapping');
 const zoho = require('../src/services/ledgers/zoho');
-const { runZohoChecks, LABELS } = require('../src/services/zohoChecks');
+const { runZohoChecks, LABELS, unreconciledTotals } = require('../src/services/zohoChecks');
 const uae = require('../src/services/uaeRules');
 const { resolvePeriod } = require('../src/services/periodResolver');
 const { resolveCheckDisplayStatus } = require('../src/services/checkRules');
@@ -690,7 +690,7 @@ test('Unreconciled Bank (Zoho): unreconciled recorded transactions in the period
     : a.accountID === 'a-card' ? { ...a, reconciliation: recon([]) } : a));
   const { byType } = run({ accounts });
   const check = byType.unreconciled_bank_items;
-  assert.deepEqual(check.items.map(i => [i.transactionId, i.amount]), [['u1', 120], ['u2', 80]], 'only the review period');
+  assert.deepEqual(check.items.map(i => [i.id, i.amount]), [['zoho-unreconciled:a-bank:u1', 120], ['zoho-unreconciled:a-bank:u2', 80]], 'only the review period');
   assert.equal(check.count, 2);
   assert.equal(check.potential_value_gbp, 200);
   // Zoho gave no status on any row: unavailable rather than a false OK.
@@ -740,7 +740,7 @@ test('Unreconciled Bank (Zoho): a foreign-currency account\'s rows read in the b
   assert.equal(foreign.amountInBaseCurrency, false);
   const recon = { readAt: '2026-11-10T00:00:00Z', from: '2026-07-01', to: '2026-11-10', complete: true, rows: 2, reconciled: 0, unknown: 0, unreconciled: [base, foreign] };
   const check = run({ accounts: [...ACCOUNTS, { ...usd, reconciliation: recon }] }).byType.unreconciled_bank_items;
-  const row = id => check.items.find(i => i.transactionId === id);
+  const row = id => check.items.find(i => i.id === `zoho-unreconciled:a-usd:${id}`);
   assert.equal(row('f1').amount, 367.3);
   assert.equal(row('f1').currency, undefined, 'already in AED: not labelled USD');
   assert.equal(row('f2').currency, 'USD');
@@ -789,4 +789,119 @@ test('the line-item checks\' pages say how many documents in the period have no 
   assert.equal(unreadLinesNote('old_unpaid_invoices', coverage), null, 'not a line-item check');
   assert.equal(unreadLinesNote('purchase_tax_missing', { unreadInPeriod: 0, staleInPeriod: 0 }), null);
   assert.ok(LINE_ITEM_CHECKS.has('journal_to_bank'));
+});
+
+// ---- Unreconciled Bank, round 2 of the live checks (invented rows) ----
+const reconOf = unreconciled => ({ readAt: '2026-11-10T00:00:00Z', from: '2000-01-01', to: '2026-11-10', complete: true, rows: unreconciled.length, reconciled: 0, unknown: 0, unreconciled });
+const accountRow = (raw, account) => mapping.mapAccountTransaction({ reconcile_status: 'unreconciled', ...raw }, account);
+const bankAccount = () => ACCOUNTS.find(a => a.accountID === 'a-bank');
+
+test('Unreconciled Bank (Zoho): every unreconciled row counts, matched to a statement line or not (Zoho\'s report lists them all; checked live)', () => {
+  const bank = bankAccount();
+  const rows = [
+    accountRow({ transaction_id: 'm1', transaction_date: '2026-08-01', transaction_type: 'customer_payment', debit_amount: 500, credit_amount: 0 }, bank),
+    accountRow({ transaction_id: 'm2', transaction_date: '2026-08-02', transaction_type: 'transfer_fund', debit_amount: 0, credit_amount: 70, imported_transaction_id: '90000001' }, bank),
+    accountRow({ transaction_id: 'm3', transaction_date: '2026-08-03', transaction_type: 'owner_drawings', debit_amount: 0, credit_amount: 30, transaction_status: 'matched' }, bank),
+    accountRow({ transaction_id: 'm4', transaction_date: '2026-08-04', transaction_type: 'expense', debit_amount: 0, credit_amount: 20, imported_transaction_id: '0', transaction_status: 'manually_added' }, bank),
+  ];
+  assert.deepEqual(rows.map(r => r.statementLinked), [false, true, true, false], 'imported_transaction_id 0 or blank is no link');
+  const accounts = ACCOUNTS.map(a => (a.accountID === 'a-bank' ? { ...a, reconciliation: reconOf(rows) } : a));
+  const check = run({ accounts }).byType.unreconciled_bank_items;
+  assert.deepEqual(check.items.map(i => i.id), ['zoho-unreconciled:a-bank:m1', 'zoho-unreconciled:a-bank:m2', 'zoho-unreconciled:a-bank:m3', 'zoho-unreconciled:a-bank:m4']);
+  assert.equal(check.count, 4);
+  assert.equal(check.potential_value_gbp, 620, 'the stored value stays the gross amount');
+  // Rows cached before the link was read have no statementLinked: counted, exactly as before.
+  const old = rows.map(({ statementLinked, ...rest }) => rest);
+  assert.equal(run({ accounts: ACCOUNTS.map(a => (a.accountID === 'a-bank' ? { ...a, reconciliation: reconOf(old) } : a)) }).byType.unreconciled_bank_items.count, 4);
+});
+
+test('Unreconciled Bank (Zoho): each row says money in or out, and the headline is Zoho\'s net (money in minus money out)', () => {
+  const bank = bankAccount();
+  const card = ACCOUNTS.find(a => a.accountID === 'a-card');
+  const rows = [
+    accountRow({ transaction_id: 'd1', transaction_date: '2026-08-01', transaction_type: 'customer_payment', debit_amount: 1000, credit_amount: 0 }, bank),
+    accountRow({ transaction_id: 'd2', transaction_date: '2026-08-02', transaction_type: 'vendor_payment', debit_amount: 0, credit_amount: 250.5 }, bank),
+    // Only an amount and Zoho's side: a credit is money out.
+    accountRow({ transaction_id: 'd3', transaction_date: '2026-08-03', transaction_type: 'expense', amount: 49.5, debit_or_credit: 'credit' }, bank),
+  ];
+  const cardRows = [accountRow({ transaction_id: 'c1', transaction_date: '2026-08-05', transaction_type: 'expense', debit_amount: 0, credit_amount: 100 }, card)];
+  assert.deepEqual(rows.map(r => r.direction), ['in', 'out', 'out']);
+  const accounts = ACCOUNTS.map(a => (a.accountID === 'a-bank' ? { ...a, reconciliation: reconOf(rows) } : a.accountID === 'a-card' ? { ...a, reconciliation: reconOf(cardRows) } : a));
+  const check = run({ accounts }).byType.unreconciled_bank_items;
+  assert.deepEqual(check.items.map(i => [i.direction, i.amount]), [['Money in', 1000], ['Money out', 250.5], ['Money out', 49.5], ['Money out', 100]]);
+  assert.equal(check.potential_value_gbp, 1400, 'gross (score and finding values), as on the Xero rows');
+  const totals = unreconciledTotals(check.detail_json);
+  assert.deepEqual({ count: totals.count, moneyIn: totals.moneyIn, moneyOut: totals.moneyOut, net: totals.net, gross: totals.gross },
+    { count: 4, moneyIn: 1000, moneyOut: 400, net: 600, gross: 1400 });
+  assert.deepEqual(totals.accounts.map(a => [a.account, a.count, a.net]), [['Main Bank Account', 3, 700], ['Company Card', 1, -100]]);
+  // Rows cached before the direction was kept: their signed amount says it.
+  const legacy = rows.map(({ direction, ...rest }) => rest);
+  const again = run({ accounts: ACCOUNTS.map(a => (a.accountID === 'a-bank' ? { ...a, reconciliation: reconOf(legacy) } : a)) }).byType.unreconciled_bank_items;
+  assert.deepEqual(again.items.map(i => i.direction), ['Money in', 'Money out', 'Money out']);
+  // Previous-months (display only) rows, rows in another currency and rows with no direction are left out; nothing to add up gives null.
+  assert.equal(unreconciledTotals([{ direction: 'Money in', amount: 5, displayOnly: true }, { direction: 'Money out', amount: 9, currency: 'USD' }, { amount: 3 }]), null);
+  assert.equal(unreconciledTotals('not json'), null);
+});
+
+test('Unreconciled Bank (Zoho) totals: rows in another currency are counted as left out, so the page can say why its count is below the issue count', () => {
+  const totals = unreconciledTotals([
+    { account: 'Main Bank Account', direction: 'Money in', amount: 100 },
+    { account: 'Made Up USD Bank', direction: 'Money out', amount: 9, currency: 'USD', potentialValue: 0 },
+    { account: 'Made Up USD Bank', direction: 'Money in', amount: 4, currency: 'USD', potentialValue: 0 },
+    { account: 'Main Bank Account', direction: 'Money in', amount: 7, displayOnly: true },
+  ]);
+  assert.equal(totals.count, 1);
+  assert.equal(totals.otherCurrency, 2, 'the two USD rows are listed but not added');
+  assert.deepEqual(totals.accounts.map(a => a.account), ['Main Bank Account']);
+  assert.equal(unreconciledTotals([{ account: 'Main Bank Account', direction: 'Money in', amount: 1 }]).otherCurrency, 0);
+});
+
+test('Unreconciled Bank (Zoho): the row shows the bank account, the payee (or the contact its id names) and Zoho\'s description, never the offset account', () => {
+  const bank = bankAccount();
+  const rows = [
+    // An expense with VAT: Zoho names the tax account as the offset account. No payee on the row, but a vendor id.
+    accountRow({ transaction_id: 'e1', transaction_date: '2026-08-01', transaction_type: 'expense', debit_amount: 0, credit_amount: 105, offset_account_name: 'Tax Payable', vendor_id: 'v-9' }, bank),
+    accountRow({ transaction_id: 'e2', transaction_date: '2026-08-02', transaction_type: 'customer_payment', debit_amount: 60, credit_amount: 0, payee: 'Made-up Customer', description: 'Made-up receipt' }, bank),
+    accountRow({ transaction_id: 'e3', transaction_date: '2026-08-03', transaction_type: 'transfer_fund', debit_amount: 0, credit_amount: 10, offset_account_name: 'Company Card' }, bank),
+  ];
+  const contacts = [{ contactID: 'v-9', name: 'Made-up Fuel Supplier' }];
+  const accounts = ACCOUNTS.map(a => (a.accountID === 'a-bank' ? { ...a, reconciliation: reconOf(rows) } : a));
+  const check = run({ accounts, contacts }).byType.unreconciled_bank_items;
+  const [e1, e2, e3] = check.items;
+  assert.deepEqual([e1.account, e1.contact, e1.description, e1.type], ['Main Bank Account', 'Made-up Fuel Supplier', null, 'Expense']);
+  assert.deepEqual([e2.contact, e2.description, e2.type], ['Made-up Customer', 'Made-up receipt', 'Customer payment']);
+  assert.deepEqual([e3.contact, e3.description, e3.type], [null, null, 'Transfer fund']);
+  assert.ok(!JSON.stringify(check.items).includes('Tax Payable'), 'the offset account is never shown');
+  // The Zoho ids are not columns: the identity is "id" and the bank account is bankAccountId (both hidden on the page).
+  for (const key of ['documentId', 'accountId', 'accountName', 'transactionId']) assert.ok(!(key in e1), key);
+  assert.equal(e1.bankAccountId, 'a-bank');
+  // Two rows with no description on the same account get different finding keys from their own ids, whatever their order.
+  const { addFindingKeys } = require('../src/services/checkRules');
+  const keys = items => Object.fromEntries(addFindingKeys('unreconciled_bank_items', items).map(i => [i.id, i.finding_key]));
+  const forward = keys([e1, e3]);
+  const backward = keys([e3, e1]);
+  assert.equal(forward[e1.id], backward[e1.id]);
+  assert.notEqual(forward[e1.id], forward[e3.id]);
+});
+
+test('Suspense & Clearing and Shareholder balances (Zoho): rows name the account, never show its Zoho id, and keep their finding keys', () => {
+  const accounts = [
+    ...ACCOUNTS.filter(a => a.accountID !== 'a-suspense'),
+    withBalance(['a-suspense', 'Suspense', 'other_current_liability'], -250),
+    withBalance(['a-sh1', 'Shareholder Loan Account - Made Up', 'other_current_asset'], 4000),
+  ];
+  const { byType } = run({ accounts, readStatus: { permissions: { banking: true, expenses: true }, sections: { balances: { read: true } } } });
+  for (const [checkType, id, name, amount] of [['suspense_open_balance', 'zoho-balance:a-suspense', 'Suspense', 250], ['directors_loan_overdrawn', 'dla:a-sh1', 'Shareholder Loan Account - Made Up', 4000]]) {
+    const row = byType[checkType].items[0];
+    assert.equal(row.id, id);
+    assert.equal(row.accountCode, name, 'the account name, shown in the account column');
+    assert.equal(row.amount, amount);
+    for (const key of ['documentId', 'accountID', 'number']) assert.ok(!(key in row), `${checkType}: no ${key}`);
+    assert.ok(!Object.values(row).some(v => typeof v === 'string' && /^a-/.test(v)), 'no account id in any shown field');
+    // The finding key is the one the earlier shape (documentId, number, accountID) gave, so review states carry over.
+    const { addFindingKeys } = require('../src/services/checkRules');
+    const { id: rowId, ...rest } = row;
+    const earlier = { documentId: rowId, number: null, ...rest, accountID: rowId.split(':')[1] };
+    assert.equal(addFindingKeys(checkType, [row])[0].finding_key, addFindingKeys(checkType, [earlier])[0].finding_key);
+  }
 });

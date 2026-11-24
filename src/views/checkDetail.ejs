@@ -113,13 +113,20 @@ function isNoRateRow(item) {
     <% } else if (issue) { %>
       <div class="check-stats">
         <div class="check-stat"><strong class="text-warning"><%= issue.count %></strong><span>issue<%= issue.count !== 1 ? 's' : '' %> found</span></div>
-        <% if (issue.potential_value_gbp > 0) { %>
+        <% if (typeof zohoUnreconciled !== 'undefined' && zohoUnreconciled) { %><%# Zoho Books Unreconciled Bank: Zoho's own total, money in minus money out (signed); the gross is in the note below. Zoho's report gives it per account, so with several accounts each has its own figure and the combined one is only in the note, labelled. %>
+          <% if (zohoUnreconciled.accounts.length > 1) { %><% zohoUnreconciled.accounts.forEach(function (a) { %>
+          <div class="check-stat"><strong class="text-error"><%= fmtMoney(a.net) %></strong><span>net unmatched value, <%= a.account || 'Unnamed account' %></span></div>
+          <% }) %><% } else { %>
+          <div class="check-stat"><strong class="text-error"><%= fmtMoney(zohoUnreconciled.net) %></strong><span>net unmatched value (money in minus money out)</span></div>
+          <% } %>
+        <% } else if (issue.potential_value_gbp > 0) { %>
           <div class="check-stat"><strong class="text-error"><%= cur %><%= Number(issue.potential_value_gbp).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}) %></strong><span>potential value</span></div>
         <% } %>
         <% if (issue.period_checked) { %>
           <div class="check-stat"><strong><%= (typeof periodCheckedLabel !== 'undefined' && periodCheckedLabel) || issue.period_checked.replace(/_/g, ' ') %></strong><span>period checked</span></div>
         <% } %>
-      </div>
+      </div><% if (typeof zohoUnreconciled !== 'undefined' && zohoUnreconciled) { %>
+      <p class="check-note"><% if (zohoUnreconciled.accounts.length > 1) { %>Per account, as Zoho Books' Reconciliation Status report gives it: <%= zohoUnreconciled.accounts.map(a => `${a.account || 'Unnamed account'}: ${a.count} transaction${a.count === 1 ? '' : 's'}, money in ${fmtMoney(a.moneyIn)} minus money out ${fmtMoney(a.moneyOut)} = ${fmtMoney(a.net)}`).join('; ') %>. All accounts combined: <% } else { %>As Zoho Books' Reconciliation Status report adds them up: <% } %>money in <%= fmtMoney(zohoUnreconciled.moneyIn) %> minus money out <%= fmtMoney(zohoUnreconciled.moneyOut) %> = <%= fmtMoney(zohoUnreconciled.net) %> over <%= zohoUnreconciled.count %> transaction<%= zohoUnreconciled.count === 1 ? '' : 's' %> (gross, money in plus money out: <%= fmtMoney(zohoUnreconciled.gross) %>, the value used for the score).<% if (zohoUnreconciled.otherCurrency) { %> <%= zohoUnreconciled.otherCurrency %> transaction<%= zohoUnreconciled.otherCurrency === 1 ? '' : 's' %> in another currency <%= zohoUnreconciled.otherCurrency === 1 ? 'is' : 'are' %> listed but not added to these figures.<% } %></p><% } %>
       <% if (issue.potential_value_gbp > 0 && (checkType === 'multi_account_suppliers' || checkType === 'multi_tax_suppliers')) { %>
         <p class="check-note">Value counts only the amount outside each supplier's main <%= checkType === 'multi_account_suppliers' ? 'account code' : 'tax code' %>, not the supplier's full total.</p>
       <% } %>

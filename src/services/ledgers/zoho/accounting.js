@@ -475,7 +475,7 @@ async function fetchBankActivity(externalId, read, { period = null, emit = () =>
 
   // Unreconciled Bank: recorded transactions and their reconcile status, per bank or card account (not cash).
   emit({ step: 'fetch_accounting', message: 'Reading which bank transactions are reconciled in Zoho Books...' });
-  const reconciliation = { read: true, from: start, to: end, accounts: 0, complete: 0, rows: 0, unreconciled: 0, unknown: 0, path: null };
+  const reconciliation = { read: true, from: start, to: end, accounts: 0, complete: 0, rows: 0, unreconciled: 0, matched: 0, unknown: 0, path: null };
   let pathIndex = 0;
   for (const account of banks.filter(a => a.zohoAccountType !== 'cash')) {
     reconciliation.accounts += 1;
@@ -499,15 +499,19 @@ async function fetchBankActivity(externalId, read, { period = null, emit = () =>
     }
     const rows = result.rows.map(raw => mapping.mapAccountTransaction(raw, account))
       .filter(row => within(row.date, start) && !/opening_?balance/i.test(String(row.transactionType || '')));
+    // Every unreconciled row is kept, with statementLinked saying whether it is already matched to a bank statement
+    // line; zohoChecks leaves those out (Zoho does not count them as unmatched), so the rule can change without a re-read.
     const unreconciled = rows.filter(row => row.reconcileState === 'unreconciled');
     account.reconciliation = {
       readAt: new Date().toISOString(), from: start, to: end, complete: result.complete,
       rows: rows.length, reconciled: rows.filter(row => row.reconcileState === 'reconciled').length,
       unknown: rows.filter(row => row.reconcileState === 'unknown').length, unreconciled,
+      matched: unreconciled.filter(row => row.statementLinked).length,
     };
     reconciliation.complete += result.complete ? 1 : 0;
     reconciliation.rows += rows.length;
     reconciliation.unreconciled += unreconciled.length;
+    reconciliation.matched += account.reconciliation.matched;
     reconciliation.unknown += account.reconciliation.unknown;
   }
   if (reconciliation.accounts && reconciliation.complete < reconciliation.accounts) reconciliation.read = false;

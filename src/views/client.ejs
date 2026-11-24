@@ -264,7 +264,7 @@ const isZohoPage = /^zoho-\d{5,20}$/.test(String(org.freeagent_company_id || '')
               </div>
               <div class="action-figures">
                 <strong><%= check.count.toLocaleString('en-GB') %></strong> issue<%= check.count === 1 ? '' : 's' %>
-                <% if (check.potential_value_gbp > 0) { %><span><%= cur %><%= Math.round(check.potential_value_gbp).toLocaleString('en-GB') %></span><% } %>
+                <% if (check.zohoUnreconciled) { %><span title="Net unmatched value in Zoho Books (money in minus money out), all bank and card accounts combined; the check page gives it per account"><%= check.zohoUnreconciled.net < 0 ? '-' : '' %><%= cur %><%= Math.round(Math.abs(check.zohoUnreconciled.net)).toLocaleString('en-GB') %> net</span><% } else if (check.potential_value_gbp > 0) { %><span><%= cur %><%= Math.round(check.potential_value_gbp).toLocaleString('en-GB') %></span><% } %>
               </div>
               <a class="btn btn-primary btn-sm" href="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= check.type %>?<%= periodQuery %>">Review</a>
             </li>
@@ -420,7 +420,7 @@ const isZohoPage = /^zoho-\d{5,20}$/.test(String(org.freeagent_company_id || '')
                 <% } else if (hasIssues) { %>
                   <span class="pill pill-issue pill-<%= check.importance %>"><%= check.count.toLocaleString('en-GB') %> issue<%= check.count === 1 ? '' : 's' %></span>
                   <% if (check.screenItems) { %><span class="check-value"><%= check.screenItems.toLocaleString('en-GB') %> item<%= check.screenItems === 1 ? '' : 's' %> to reconcile</span><% } %>
-                  <% if (check.potential_value_gbp > 0) { %><span class="check-value"><%= cur %><%= Math.round(check.potential_value_gbp).toLocaleString('en-GB') %></span><% } %>
+                  <% if (check.zohoUnreconciled) { %><span class="check-value" title="Net unmatched value in Zoho Books (money in minus money out), all bank and card accounts combined; the check page gives it per account"><%= check.zohoUnreconciled.net < 0 ? '-' : '' %><%= cur %><%= Math.round(Math.abs(check.zohoUnreconciled.net)).toLocaleString('en-GB') %> net</span><% } else if (check.potential_value_gbp > 0) { %><span class="check-value"><%= cur %><%= Math.round(check.potential_value_gbp).toLocaleString('en-GB') %></span><% } %>
                 <% } else { %>
                   <span class="pill pill-ok">OK</span>
                 <% } %>

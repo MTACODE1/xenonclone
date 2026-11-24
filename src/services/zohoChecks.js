@@ -25,6 +25,7 @@ const {
 const journalChecks = require('./journalChecks');
 const { isWithinPeriod, isWithinPatternWindow, resolvePeriod } = require('./periodResolver');
 const uae = require('./uaeRules');
+const mapping = require('./ledgers/zoho/mapping');
 const { bankFeedOf, STALE_AFTER_DAYS } = require('./zohoBankScreenReading');
 const { NOT_APPLICABLE_PERIODS } = require('./periodStatus');
 
@@ -729,6 +730,10 @@ function runZohoChecks({
     if (!candidates.length && !balanceSection && ![...accountById.values()].some(a => a.ledgerBalance)) return null; // balances never read
     return { rows: known.map(build).filter(Boolean), missing: candidates.length - known.length };
   };
+  // A balance row names its account (shown in the account column) and is identified by "id", which the page does not
+  // show: the Zoho account id is never a column (it was shown where the account name should be). "id" gives the
+  // finding the same identity, and so the same review state, that "documentId" gave it.
+  const balanceAccount = id => { const { accountID, ...rest } = shown(id); return rest; };
   const unreadNote = missing => (missing ? ` ${missing} other candidate account(s) had no balance from Zoho Books and were not checked.` : '');
   attempt('suspense_open_balance', () => {
     if (!accountsKnown) throw new Error('chart of accounts not read');
@@ -738,7 +743,7 @@ function runZohoChecks({
       if (Math.abs(balance) < 1) return null;
       const asOf = asOfOf(account);
       return {
-        documentId: `zoho-balance:${account.accountID}`, number: null, date: asOf, source: 'account_balance', ...shown(account.accountID),
+        id: `zoho-balance:${account.accountID}`, date: asOf, source: 'account_balance', ...balanceAccount(account.accountID),
         description: `Balance of ${Math.abs(balance).toFixed(2)} ${balance >= 0 ? 'debit' : 'credit'} left on ${account.name} in Zoho Books${asOf ? ` on ${asOf}` : ''} (the current balance: Zoho gives no balance at the period end).${account.ledgerBalance.stale ? ' Balance from an earlier sync.' : ''}`,
         amount: round2(Math.abs(balance)),
       };
@@ -762,7 +767,7 @@ function runZohoChecks({
       const asOf = asOfOf(account);
       const unit = isUae ? 'AED ' : money.base === 'GBP' ? '£' : `${money.base} `;
       return {
-        documentId: `dla:${account.accountID}`, number: null, date: asOf, source: 'account_balance', ...shown(account.accountID),
+        id: `dla:${account.accountID}`, date: asOf, source: 'account_balance', ...balanceAccount(account.accountID),
         level: isUae ? 'review' : 'critical', rule: isUae ? 'uae_related_party_owes_company' : 'dla_overdrawn',
         description: isUae
           ? `${account.name} shows ${unit}${overdrawn.toFixed(2)} owed to the company${asOf ? ` on ${asOf}` : ''} (current balance in Zoho Books). Check it is on arm's-length terms and documented for Corporate Tax.${account.ledgerBalance.stale ? ' Balance from an earlier sync.' : ''}`
@@ -776,11 +781,22 @@ function runZohoChecks({
   });
 
   // Unreconciled Bank (Xero: posted bank transactions in the review period not yet reconciled, valued at their
-  // amounts, selectAuthorisedUnreconciled). Zoho: each bank or card account's recorded transactions with
-  // reconcile_status "unreconciled" (accounting.fetchBankActivity reads the review period only). Cash accounts have
-  // no statement and are left out. A row whose status Zoho did not give is never counted; if no row had one the
-  // check is unavailable rather than a false OK. Its bank lines still waiting to be categorised are under
-  // Unprocessed Bank.
+  // amounts, selectAuthorisedUnreconciled). Zoho: each bank or card account's recorded transactions that Zoho's
+  // Reconciliation Status report lists as Unreconciled Transactions: every row with reconcile_status "unreconciled".
+  // Checked live (25 Nov 2026) quarter by quarter on one client's main bank account against Zoho's report: Apr-Jun,
+  // Jul-Sep and Oct-Dec all list exactly the same transactions, apart from the account's opening-balance entry, which
+  // is deliberately left out here (it is not a transaction). Zoho's summary figure "Unmatched Books Transactions" is a
+  // different, smaller headline that does not add up to its own lists, so it is not what this check matches.
+  // statementLinked (mapping.isStatementLinked) is kept on each row for information only and does NOT remove a row:
+  // an earlier guess that matched-but-unreconciled rows explain that headline was disproved by the quarterly lists.
+  // accounting.fetchBankActivity reads the review period only; opening balances are left
+  // out there. Cash accounts have no statement and are left out. A row whose status Zoho did not give is never
+  // counted; if no row had one the check is unavailable rather than a false OK. Its bank lines still waiting to be
+  // categorised are under Unprocessed Bank.
+  // Each row says which bank account it is on, the customer or vendor (Zoho's payee, else the contact its id names),
+  // Zoho's own description, the type, and whether the money came in or went out. The amount stays unsigned, as on
+  // the Xero rows (the value and finding values are shared out by it), and "direction" gives the sign: Zoho's report
+  // total is deposits minus withdrawals (unreconciledTotals, shown as the check's headline on the page).
   attempt('unreconciled_bank_items', () => {
     const reconciled = [...accountById.values()].filter(a => a.type === 'BANK' && a.status !== 'ARCHIVED' && a.zohoAccountType !== 'cash');
     const withData = reconciled.filter(a => a.reconciliation && Array.isArray(a.reconciliation.unreconciled));
@@ -790,16 +806,27 @@ function runZohoChecks({
     const unknownRows = withData.reduce((sum, a) => sum + (Number(a.reconciliation.unknown) || 0), 0);
     if (totalRows && unknownRows === totalRows) return mark('unreconciled_bank_items', LABELS.unavailable);
     const sameAsBaseCurrency = code => !code || String(code).toUpperCase() === money.base;
+    const contactNameById = new Map((contacts || []).filter(c => c && c.contactID != null && c.name).map(c => [String(c.contactID), c.name]));
+    // A row read before the direction was kept: the sign of its amount (a debit, money in, is positive).
+    const directionOf = t => (t.direction === 'in' || t.direction === 'out' ? t.direction : Number(t.amount) < 0 ? 'out' : 'in');
+    // id (not shown as a column) is the finding's identity, exactly as documentId was; the bank account's id is kept as
+    // bankAccountId (not shown), so a row without a description is still told apart by its own id.
     const toRow = (account, t) => ({
-      documentId: `zoho-unreconciled:${account.accountID}:${t.transactionID || `${t.date}:${t.amount}`}`,
-      transactionId: t.transactionID, date: t.date, number: t.entryNumber || null, reference: t.reference || null,
-      contact: t.payee || null, description: t.description || t.offsetAccountName || null, type: t.transactionType || null,
-      accountName: account.name, accountId: account.accountID, amount: Math.abs(Number(t.amount) || 0),
+      id: `zoho-unreconciled:${account.accountID}:${t.transactionID || `${t.date}:${t.amount}`}`,
+      date: t.date, number: t.entryNumber || null, reference: t.reference || null,
+      account: account.name || null,
+      contact: t.payee || (t.contactID != null ? contactNameById.get(String(t.contactID)) : null) || null,
+      description: t.description || null,
+      type: mapping.transactionTypeLabel(t.transactionType),
+      direction: directionOf(t) === 'in' ? 'Money in' : 'Money out',
+      amount: Math.abs(Number(t.amount) || 0),
+      bankAccountId: account.accountID,
       // A row read from Zoho's bcy_ fields is already in the client's currency, whatever the account's currency.
       ...(account.currencyCode && !sameAsBaseCurrency(account.currencyCode) && t.amountInBaseCurrency !== true ? { currency: account.currencyCode, potentialValue: 0 } : {}),
       ...(account.reconciliation.stale ? { stale: true } : {}),
     });
-    const all = withData.flatMap(account => account.reconciliation.unreconciled.map(t => toRow(account, t)));
+    const unmatched = account => account.reconciliation.unreconciled;
+    const all = withData.flatMap(account => unmatched(account).map(t => toRow(account, t)));
     const rows = all.filter(row => isWithinPeriod(row.date, period)).sort((a, b) => String(a.date).localeCompare(String(b.date)));
     const notes = withData.filter(a => a.reconciliation.complete === false || a.reconciliation.stale).map(a => a.name);
     const coverage = withData[0].reconciliation;
@@ -807,7 +834,9 @@ function runZohoChecks({
       ...row,
       ...(notes.length ? { note: `Read from Zoho Books for ${coverage.from} to ${coverage.to}; not complete for ${notes.join(', ')} (read limit or an earlier sync).` } : {}),
     }));
-    // An account in another currency is listed but not added to the total in the client's currency (as Bank Balance).
+    // The value (score, sorting, finding values) stays the gross amount at stake, as in Xero; the page's headline is
+    // the net figure Zoho shows. An account in another currency is listed but not added to the total in the client's
+    // currency (as Bank Balance).
     const value = items.filter(row => !row.currency).reduce((sum, row) => sum + Math.abs(Number(row.amount) || 0), 0);
     push('unreconciled_bank_items', { count: items.length, value: round2(value), items, periodChecked: period.key });
   });
@@ -1209,4 +1238,35 @@ function unreadLinesNote(checkType, coverage) {
   return `${parts.join('; ')}. Akrio reads a limited number of documents per sync; the rest are read at the next syncs.`;
 }
 
-module.exports = { runZohoChecks, LABELS, LINE_ITEM_CHECKS, unreadLinesNote, ZOHO_CAPITAL_EXCLUDED_NAME };
+// Unreconciled Bank's figures as Zoho Books' Reconciliation Status report gives them: money in, money out, and the
+// "Total value of unmatched transactions" (money in minus money out), for the rows a Zoho check stored (detail_json
+// items, or the items themselves). Overall and per bank account. Rows from the 3 months before the period
+// (display only) and rows in another currency (not converted) are left out, as they are of the check's value.
+// gross is money in plus money out (the check's stored value). otherCurrency: how many rows of the check (not display
+// only) are in another currency, listed and counted as issues but not added here, so the page can say why its count
+// is below the issue count. Zoho's report gives these figures per account; "accounts" has them, and the overall
+// figure is every account added together (the page labels it so). null when no row says its direction.
+function unreconciledTotals(itemsOrJson) {
+  let items = itemsOrJson;
+  if (typeof items === 'string') { try { items = JSON.parse(items); } catch (error) { return null; } }
+  if (!Array.isArray(items)) return null;
+  const otherCurrency = items.filter(row => row && !row.displayOnly && row.currency).length;
+  const rows = items.filter(row => row && !row.displayOnly && !row.currency && /^Money (in|out)$/.test(String(row.direction || '')));
+  if (!rows.length) return null;
+  const blank = name => ({ account: name, count: 0, moneyIn: 0, moneyOut: 0 });
+  const total = blank(null);
+  const byAccount = new Map();
+  for (const row of rows) {
+    const key = String(row.account || '');
+    if (!byAccount.has(key)) byAccount.set(key, blank(row.account || null));
+    const amount = Math.abs(Number(row.amount) || 0);
+    for (const target of [total, byAccount.get(key)]) {
+      target.count += 1;
+      if (row.direction === 'Money in') target.moneyIn += amount; else target.moneyOut += amount;
+    }
+  }
+  const finish = t => ({ ...t, moneyIn: round2(t.moneyIn), moneyOut: round2(t.moneyOut), net: round2(t.moneyIn - t.moneyOut), gross: round2(t.moneyIn + t.moneyOut) });
+  return { ...finish(total), otherCurrency, accounts: [...byAccount.values()].map(finish) };
+}
+
+module.exports = { runZohoChecks, LABELS, LINE_ITEM_CHECKS, unreadLinesNote, ZOHO_CAPITAL_EXCLUDED_NAME, unreconciledTotals };

@@ -9,7 +9,7 @@ const base = require('./checkDescriptions');
 
 const ZOHO = {
   unreconciled_bank_items: {
-    issue: "The following bank and card transactions recorded in Zoho Books in the review period have not been reconciled yet (Zoho's reconcile status on each account's transactions). Cash accounts are not included. Bank lines still waiting to be categorised in Zoho are listed under Unprocessed Bank.",
+    issue: "The following bank and card transactions recorded in Zoho Books in the review period are not reconciled. A transaction that Zoho marks as already matched to a line of an imported bank statement or bank feed is left out, even before the account is reconciled, as Zoho Books' Reconciliation Status report leaves it out of its unmatched transactions. Each row shows the bank account, the customer or vendor, Zoho's description and whether the money came in or went out. The figure shown is money in minus money out for each bank or card account, as that report gives it. The gross amount (money in plus money out) is given under it and is the value used for the score. Cash accounts are not included. Bank lines still waiting to be categorised in Zoho are listed under Unprocessed Bank.",
     soWhat: base.unreconciled_bank_items.soWhat.replace(/Xero/g, 'Zoho Books'),
     solution: "Reconcile each bank account in Zoho Books (Banking, then Reconcile) against the bank statement, and process each item listed.",
   },

@@ -494,8 +494,28 @@ function reconcileStateOf(value) {
   if (/reconciled/.test(text)) return 'reconciled';
   return 'unknown';
 }
+// A books transaction linked to a line of an imported bank statement or bank feed: matched to it, or created by
+// categorising it. Zoho keeps such a row "unreconciled" until the account is reconciled, but its Reconciliation Status
+// report does not count it among the "unmatched transactions in Zoho Books" (it is already matched to the bank), and
+// in Xero's terms it is reconciled (a Xero line is reconciled once it is matched to a statement line). ASSUMED (to be
+// confirmed live, the field is undocumented on this list): an imported_transaction_id that is not blank or 0, or a
+// status of "matched", marks the link. Nothing else does, so a row Zoho gives neither field for counts as unmatched.
+function isStatementLinked(raw) {
+  const imported = raw.imported_transaction_id;
+  if (imported != null && !/^\s*0*\s*$/.test(String(imported))) return true;
+  return [raw.transaction_status, raw.status].some(value => String(value == null ? '' : value).trim().toLowerCase() === 'matched');
+}
+// Zoho's own type names ("customer_payment") in words ("Customer payment").
+function transactionTypeLabel(type) {
+  const text = String(type == null ? '' : type).trim().replace(/_/g, ' ');
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : null;
+}
 // amountInBaseCurrency: true when the amount came from Zoho's bcy_ (base currency) fields, so a row on a foreign
 // currency account is already in the organisation's currency; false when only the account-currency fields were there.
+// direction: 'in' (a deposit: a debit on the bank or card account) or 'out' (a withdrawal: a credit), from the signed
+// amount. contactID: the customer or vendor the row names, so its name can be found when Zoho gives no payee.
+// offsetAccountName is kept for reference only: on an expense with VAT Zoho names the tax account there ("Tax
+// Payable"), not the expense account or the payee, so it is never shown as the contact or the description.
 function mapAccountTransaction(raw, account = {}) {
   const debit = moneyOrNull(raw.bcy_debit != null ? raw.bcy_debit : raw.debit_amount) || 0;
   const credit = moneyOrNull(raw.bcy_credit != null ? raw.bcy_credit : raw.credit_amount) || 0;
@@ -520,6 +540,10 @@ function mapAccountTransaction(raw, account = {}) {
     accountID: idOrNull(raw.account_id) || idOrNull(account.accountID),
     accountName: textOrNull(raw.account_name) || textOrNull(account.name),
     amount: round2(signed),
+    direction: signed < 0 ? 'out' : 'in',
+    contactID: idOrNull(raw.customer_id) || idOrNull(raw.vendor_id) || idOrNull(raw.contact_id),
+    statementLinked: isStatementLinked(raw),
+    transactionStatus: textOrNull(raw.transaction_status) || textOrNull(raw.status),
     amountInBaseCurrency,
     currencyCode: textOrNull(raw.currency_code),
   };
@@ -655,4 +679,5 @@ module.exports = {
   mapDocumentLine, documentDetail, mapJournalLine, mapManualJournal, journalStatus,
   mapUncategorisedLine, mapExpense, changeKey, isoUtc, currencyRateFrom,
   balanceOf, reconcileStateOf, mapAccountTransaction, mapCategorisedReceipt, INCOME_RECEIPT_TYPES,
+  isStatementLinked, transactionTypeLabel,
 };

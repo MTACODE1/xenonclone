@@ -43,7 +43,7 @@ const { accessChanges } = require('../services/staffAccess');
 const { hydrateOrgIfEmpty } = require('../db/xeroCacheStore');
 const checkDescriptions = require('../data/checkDescriptions');
 const { checkDescriptionsFor, checkLabelFor } = require('../data/checkDescriptionsUae');
-const { unreadLinesNote } = require('../services/zohoChecks');
+const { unreadLinesNote, unreconciledTotals } = require('../services/zohoChecks');
 const { getZohoTaxProfile } = require('../db/zohoTaxProfile');
 const { regionOf } = require('../services/uaeRules');
 const { buildBankEvidence, loadLatestBankScreenReading } = require('../services/bankEvidence');
@@ -200,6 +200,8 @@ function clientViewData(liveOrg, query = {}, clientCurrency = 'GBP', zohoCopy = 
     const merged = { ...def, ...(issue || { count: null, potential_value_gbp: 0 }) };
     if (issue && def.type === 'unprocessed_bank') merged.screenItems = getLiveScreenItemTotal(issue.id);
     if (zohoCopy && zohoCopy.labelFor(def.type)) merged.label = zohoCopy.labelFor(def.type);
+    // Zoho Books: Unreconciled Bank's headline is Zoho's net (money in minus money out), not the gross value.
+    if (zohoCopy && def.type === 'unreconciled_bank_items' && issue) merged.zohoUnreconciled = unreconciledTotals(issue.detail_json);
     // Single source of truth for what this check's state means — the template must never re-derive
     // this from its own period_checked string comparisons (see checkRules.js/periodStatus.js).
     return { ...merged, displayStatus: resolveCheckDisplayStatus(merged) };
@@ -647,6 +649,7 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
     displayStatus: issue ? resolveCheckDisplayStatus(issue) : null, ...extraData,
     // Zoho Books only (nothing is passed for any other client, so their pages are unchanged).
     ...(zohoCopy ? { zohoUnreadNote: zohoCopy.unreadNoteFor(checkType) } : {}),
+    ...(zohoCopy && checkType === 'unreconciled_bank_items' && issue ? { zohoUnreconciled: unreconciledTotals(issue.detail_json) } : {}),
   });
 });
 
