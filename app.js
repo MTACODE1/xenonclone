@@ -27,6 +27,8 @@ app.locals.ukDate = require('./src/services/displayDate').ukDate;
 app.locals.periodKeyLabel = require('./src/services/periodResolver').periodKeyLabel;
 // Which ledger a client is on (Xero, FreeAgent, QuickBooks, Zoho Books), for the views.
 Object.assign(app.locals, (({ ledgerOf, ledgerLabel, externalIdOf, ledgerReady }) => ({ ledgerOf, ledgerLabel, externalIdOf, ledgerReady }))(require('./src/services/ledgers')));
+// Amounts in the client's own currency: "£" for GBP as before, "AED " etc. for a client kept in another one.
+Object.assign(app.locals, (({ currencyPrefix, formatMoney }) => ({ currencyPrefix, formatMoney }))(require('./src/services/money')));
 
 if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) {
   throw new Error('SESSION_SECRET is required in production');

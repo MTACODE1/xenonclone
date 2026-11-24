@@ -38,7 +38,8 @@ function fmtDisplayDate(val) {
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
     </div>
     <div class="stat-body">
-      <div class="stat-value">£<%= totalErrors.toLocaleString('en-GB', {minimumFractionDigits:0,maximumFractionDigits:0}) %></div>
+      <div class="stat-value">£<%= totalErrors.toLocaleString('en-GB', {minimumFractionDigits:0,maximumFractionDigits:0}) %></div><% (typeof otherErrorTotals === 'undefined' ? [] : otherErrorTotals).forEach(other => { %>
+      <div class="stat-value" style="font-size: 0.9em;"><%= currencyPrefix(other.code) %><%= other.amount.toLocaleString('en-GB', {minimumFractionDigits:0,maximumFractionDigits:0}) %></div><% }) %>
       <div class="stat-label">Potential Errors</div>
     </div>
   </div>
@@ -91,7 +92,7 @@ function fmtDisplayDate(val) {
           <th>Client</th>
           <th class="text-center">Health Score</th>
           <th class="text-center">Issues</th>
-          <th class="text-right">Potential £</th>
+          <th class="text-right">Potential<%= typeof otherErrorTotals !== 'undefined' && otherErrorTotals.length ? '' : ' £' %></th>
           <th class="text-center">Last Transaction</th>
           <th class="text-center">Last Reconciled</th>
           <th class="text-center">Unreconciled</th>
@@ -140,7 +141,7 @@ function fmtDisplayDate(val) {
               <% } else { %><%= org.total_issues != null ? org.total_issues : '—' %><% } %>
             </td>
             <td class="text-right text-muted">
-              <%= org.total_potential_errors_gbp ? '£' + Number(org.total_potential_errors_gbp).toLocaleString('en-GB', {minimumFractionDigits:2,maximumFractionDigits:2}) : '—' %>
+              <%= org.total_potential_errors_gbp ? currencyPrefix(org.currency_code) + Number(org.total_potential_errors_gbp).toLocaleString('en-GB', {minimumFractionDigits:2,maximumFractionDigits:2}) : '—' %>
             </td>
             <td class="text-center text-muted" style="font-size: 0.75rem;"><%= org.most_recent_transaction ? fmtDisplayDate(org.most_recent_transaction) : '—' %></td>
             <td class="text-center text-muted" style="font-size: 0.75rem;"><%= org.last_bank_reconciled ? fmtDisplayDate(org.last_bank_reconciled) : '—' %></td>

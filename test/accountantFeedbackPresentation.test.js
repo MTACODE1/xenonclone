@@ -19,10 +19,11 @@ test('turnover is shown with pence so it can be compared with Xero to the penny'
 
 test('the client page uses the formatter for the turnover tile and keeps the per-month figure rounded', () => {
   const view = fs.readFileSync(path.join(__dirname, '../src/views/client.ejs'), 'utf8');
-  assert.match(view, /item\.isCurrency \? formatTurnoverGbp\(item\.raw\)/);
-  assert.match(view, /perMthDisplay = item\.isCurrency \? '£' \+ Math\.round\(item\.raw \/ mth\)/);
+  // In the client's own currency since 24 Nov 2026 ("£" for GBP as before, "AED " for a client kept in AED).
+  assert.match(view, /item\.isCurrency \? formatTurnoverGbp\(item\.raw, locals\.clientCurrency\)/);
+  assert.match(view, /perMthDisplay = item\.isCurrency \? cur \+ Math\.round\(item\.raw \/ mth\)/);
   const route = fs.readFileSync(path.join(__dirname, '../src/routes/client.js'), 'utf8');
-  assert.match(route, /formatTurnoverGbp,\n\s*\};/, 'the client page is given the formatter');
+  assert.match(route, /formatTurnoverGbp,\n\s*clientCurrency,\n\s*\};/, 'the client page is given the formatter and the currency');
 });
 
 const row = (n, inPeriod) => ({ n, ...(inPeriod === undefined ? {} : { inPeriod }) });

@@ -43,6 +43,7 @@ const { accessChanges } = require('../services/staffAccess');
 const { hydrateOrgIfEmpty } = require('../db/xeroCacheStore');
 const checkDescriptions = require('../data/checkDescriptions');
 const { buildBankEvidence, loadLatestBankScreenReading } = require('../services/bankEvidence');
+const { getOrgCurrency } = require('../db/orgCurrency');
 const {
   matchStatementLines, normalizeStatementLines, recomputeEvidenceIssues, sha256
 } = require('../services/statementEvidence');
@@ -148,7 +149,18 @@ function orgAsViewed(org, view, selectedPeriod, issues) {
   };
 }
 
-function clientViewData(liveOrg, query = {}) {
+// The currency the client's books are kept in, for showing its amounts ("£" for GBP, "AED " etc.).
+// Display only, so a failed look-up shows the page in GBP, as it was before, rather than failing it.
+async function currencyForOrg(org) {
+  try {
+    return await getOrgCurrency(org.id);
+  } catch (error) {
+    console.error(`[client] currency look-up failed for organisation ${org.id}: ${error.message}`);
+    return 'GBP';
+  }
+}
+
+function clientViewData(liveOrg, query = {}, clientCurrency = 'GBP') {
   const { selectedPeriod, view } = periodViewFor(liveOrg, query);
   const viewIssues = view ? getIssuesForView(view) : null;
   const org = view ? orgAsViewed(liveOrg, view, selectedPeriod, viewIssues) : liveOrg;
@@ -195,6 +207,7 @@ function clientViewData(liveOrg, query = {}) {
     insightWidgetVisibility: getInsightWidgetVisibility(org.id),
     checkDescriptions,
     formatTurnoverGbp,
+    clientCurrency,
   };
 }
 
@@ -239,7 +252,7 @@ router.get('/:tenantId', async (req, res) => {
   const org = await getOrganisationByTenantId(tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   try {
-    res.render('client', clientViewData(org, req.query));
+    res.render('client', clientViewData(org, req.query, await currencyForOrg(org)));
   } catch (error) {
     res.status(400).send(error.message);
   }
@@ -598,6 +611,7 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
         : issue.period_checked === org.period_key && org.period_label ? storedPeriodLabel(org)
           : periodKeyLabel(issue.period_checked),
     org, issue, def, items, pagination, previousItems, previousPagination, summary, status, contact, checkType, checkDescriptions, groupSupplierTransactions,
+    clientCurrency: await currencyForOrg(org),
     displayStatus: issue ? resolveCheckDisplayStatus(issue) : null, ...extraData,
   });
 });
@@ -1070,7 +1084,7 @@ router.get('/:tenantId/report', async (req, res) => {
   const org = await getOrganisationByTenantId(req.params.tenantId);
   if (!org) return res.status(404).send('Organisation not found');
   try {
-    const data = clientViewData(org, req.query);
+    const data = clientViewData(org, req.query, await currencyForOrg(org));
     const reportFindings = getReportFindings(org.id, 50);
     res.render('report', {
       ...data,

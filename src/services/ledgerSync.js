@@ -10,6 +10,7 @@ const {
 const { resolvePeriod } = require('./periodResolver');
 const { runLedgerChecks } = require('./ledgerChecks');
 const ledgers = require('./ledgers');
+const { saveOrgCurrency, getOrgCurrency } = require('../db/orgCurrency');
 
 const syncsInProgress = new Set();
 
@@ -85,14 +86,32 @@ async function runLedgerSync(key, identifier, org, progressCallback, options) {
   const contacts = await refreshCache(org.id, options.runId, 'contact', docs.contacts, options);
   const credits = await refreshCache(org.id, options.runId, 'credit_note', docs.credits, options);
 
+  // The client's own currency, so a document in another currency is marked as such on its check row.
+  // A cache-only run has not read the company settings, so it uses the currency the last sync stored.
+  const baseCurrency = info.baseCurrency
+    || await getOrgCurrency(org.id).catch(error => {
+      console.error(`[ledgerSync] currency not read for organisation ${org.id}: ${error.message}`);
+      return null;
+    });
+
   return runLedgerChecks({
     org, runId: options.runId, period, invoices, contacts, credits, options, emit,
     ledger: provider.ledger,
     lockDate: info.lockDate || null,
-    saveOrganisation: () => upsertFreeAgentOrganisation({
-      freeagent_company_id: identifier, name: info.name || org.name, client_ref: org.client_ref, tag: org.tag,
-      connection_status: 'connected', last_synced_at: null,
-    }),
+    baseCurrency,
+    saveOrganisation: async () => {
+      await upsertFreeAgentOrganisation({
+        freeagent_company_id: identifier, name: info.name || org.name, client_ref: org.client_ref, tag: org.tag,
+        connection_status: 'connected', last_synced_at: null,
+      });
+      // The currency the client's books are kept in (AED for the UAE Zoho clients), so the pages show
+      // it instead of "£". Display only: a failure here is logged and must not fail a good sync.
+      // A cache-only run has not read the company settings, so it leaves the stored value alone.
+      if (info.baseCurrency) {
+        await saveOrgCurrency(org.id, info.baseCurrency)
+          .catch(error => console.error(`[ledgerSync] currency not saved for organisation ${org.id}: ${error.message}`));
+      }
+    },
   });
 }
 

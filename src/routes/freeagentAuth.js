@@ -10,6 +10,7 @@ const {
   toggleStaffOrgAccess,
 } = require('../db/queries');
 const { isStaffManager } = require('../services/staffPermissions');
+const { saveOrgCurrency } = require('../db/orgCurrency');
 
 // Stage 1: mirrors src/routes/auth.js's Xero flow exactly (one OAuth grant -> one new Akrio
 // client) rather than FreeAgent's separate Practice Dashboard/company-picker flow — see
@@ -57,6 +58,17 @@ router.get('/callback', async (req, res) => {
       connection_status: 'connected',
       last_synced_at: null,
     });
+
+    // The company's currency (GBP for a UK company) is already in the profile read above, so it is kept
+    // for the pages at no extra cost. Display only: a failure here must not fail the connection.
+    if (company.currency) {
+      try {
+        const connected = await getOrganisationByFreeAgentCompanyId(companyId);
+        if (connected) await saveOrgCurrency(connected.id, company.currency);
+      } catch (error) {
+        console.error(`FreeAgent currency not saved for company ${companyId}: ${error.message}`);
+      }
+    }
 
     // Same reasoning as the Xero callback (src/routes/auth.js): a staff-tier account connecting a
     // brand-new client would otherwise be immediately locked out of it (zero access grants exist

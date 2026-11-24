@@ -272,6 +272,29 @@ test('ageing is as at the end of the current month, not today', async t => {
   assert.deepEqual(findingIds(903, 9103, 'old_sales_credits'), ['sc-old']);
 });
 
+// A document in another currency keeps its own figures (nothing is converted), so its row says which
+// currency it is in; a row in the client's own currency is left exactly as it was.
+test('a document in another currency is marked with that currency on its check row', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(TODAY) });
+  const { invoices, bills, credits, contacts } = sampleDocuments();
+  invoices[0].currencyCode = 'USD';
+  credits[0].currencyCode = 'AED';
+  bills[0].currencyCode = 'EUR';
+  getDb();
+  await runLedgerChecks({
+    org: { id: 908, name: 'Made Up Ltd' }, runId: 9108, period: period(),
+    invoices: [...invoices, ...bills], contacts, credits, options: {}, ledger: { key: 'zoho', purchaseCredits: true, drafts: true },
+    saveOrganisation: async () => {}, baseCurrency: 'AED',
+  });
+  const rows = checkType => getDb().prepare(
+    'SELECT detail_json FROM issue_findings WHERE org_id = ? AND run_id = ? AND check_type = ? ORDER BY id'
+  ).all(908, 9108, checkType).map(row => JSON.parse(row.detail_json));
+  assert.equal(rows('old_unpaid_invoices')[0].currency, 'USD');
+  assert.equal(rows('unapproved_bills').find(row => row.id === 'bill-draft').currency, 'EUR');
+  assert.ok(!('currency' in rows('old_sales_credits')[0]), 'a document in the client\'s own currency gets no field');
+  assert.ok(!('currency' in rows('old_purchase_credits')[0]), 'no currency on the document: no field');
+});
+
 test('transaction counts include purchase credit notes', async t => {
   const { counts } = await runChecks(t, 904, 9104, { key: 'quickbooks', purchaseCredits: true, drafts: false });
   assert.ok(counts, 'a transaction_counts row is written for the run');

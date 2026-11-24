@@ -24,8 +24,22 @@ const { isWithinPeriod } = require('./periodResolver');
 //           purchaseCredits: has supplier credits (old_purchase_credits runs, else not applicable),
 //           drafts: has draft invoices/bills (unapproved_* run, else not applicable) }
 // A check the ledger cannot supply gets period_checked "not_applicable_<key>" (periodStatus.js).
-async function runLedgerChecks({ org, runId, period, invoices, contacts, credits: allCredits, options = {}, emit = () => {}, ledger, saveOrganisation, lockDate = null }) {
+async function runLedgerChecks({ org, runId, period, invoices, contacts, credits: allCredits, options = {}, emit = () => {}, ledger, saveOrganisation, lockDate = null, baseCurrency = null }) {
   const orgId = org.id;
+  // A document raised in another currency (a USD invoice on an AED client) keeps its own figures:
+  // these ledgers give no rate the checks use, so nothing is converted. Its row records its own
+  // currency, the same "currency" field the Xero checks add, so the check page shows "USD 1,000.00"
+  // and not the client's currency in front of a dollar figure. A document in the client's own
+  // currency gets no field, so its row is exactly what it was. FreeAgent clients are UK (GBP).
+  const cleanCode = code => {
+    const text = String(code == null ? '' : code).trim().toUpperCase();
+    return /^[A-Z]{3}$/.test(text) ? text : null;
+  };
+  const base = cleanCode(baseCurrency) || 'GBP';
+  const ownCurrency = doc => {
+    const code = cleanCode(doc && doc.currencyCode);
+    return code && code !== base ? { currency: code } : {};
+  };
   const salesCredits = allCredits.filter(item => item.type === 'ACCRECCREDIT');
   const purchaseCredits = allCredits.filter(item => item.type === 'ACCPAYCREDIT');
   const notApplicable = `not_applicable_${ledger.key}`;
@@ -110,6 +124,7 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
       detail_json: JSON.stringify(overdue.map(i => ({
         id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
         date: toDateString(i.date), dueDate: toDateString(i.dueDate), amountDue: i.amountDue,
+        ...ownCurrency(i),
       }))),
       period_checked: 'document_date_over_60_days_ago_all_time',
     });
@@ -125,6 +140,7 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
       detail_json: JSON.stringify(credits.map(c => ({
         id: c.creditNoteID, number: c.creditNoteNumber, contact: c.contact?.name,
         date: toDateString(c.date), remaining: c.remainingCredit,
+        ...ownCurrency(c),
       }))),
       period_checked: 'older_than_60_days',
     });
@@ -140,6 +156,7 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
       detail_json: JSON.stringify(overdue.map(i => ({
         id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
         date: toDateString(i.date), dueDate: toDateString(i.dueDate), amountDue: i.amountDue,
+        ...ownCurrency(i),
       }))),
       period_checked: 'due_date_over_60_days_ago',
     });
@@ -158,6 +175,7 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
         detail_json: JSON.stringify(credits.map(c => ({
           id: c.creditNoteID, number: c.creditNoteNumber, contact: c.contact?.name,
           date: toDateString(c.date), remaining: c.remainingCredit,
+          ...ownCurrency(c),
         }))),
         period_checked: 'older_than_60_days',
       });
@@ -203,6 +221,7 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
         ...invoicesFinding.map(i => ({
           id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
           date: toDateString(i.date), total: i.total, status: i.status,
+          ...ownCurrency(i),
         })),
         ...duplicateInvoiceFindings,
       ]),
@@ -230,6 +249,7 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
         ...billsFinding.map(i => ({
           id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
           date: toDateString(i.date), total: i.total, status: i.status,
+          ...ownCurrency(i),
         })),
         ...duplicateBillFindings,
       ]),

@@ -19,7 +19,8 @@ function fmtDisplayDate(val) {
   const [y, m, d] = val.split('-');
   return `${d}/${m}/${y}`;
 }
-// Money is shown as £ with pence whatever its value: a whole-pound amount is stored as a plain integer (22, 1188),
+// Money is shown in the client's currency ("£" for GBP, "AED " for a client kept in AED; amounts are never
+// converted) with pence whatever its value: a whole-pound amount is stored as a plain integer (22, 1188),
 // which used to be shown bare. Decided by the column name, so counts (items to reconcile, days) stay plain numbers.
 const MONEY_KEY_RE = /(amount|total|value|balance|gross|net|spent|received|difference|outstanding|due)(gbp)?$/i;
 const NOT_MONEY_KEY_RE = /(date|days|count|items|lines|age|code|number|rate|percent)/i;
@@ -28,8 +29,18 @@ function isMoneyCell(key, val) {
   if (!Number.isInteger(val)) return true;
   return MONEY_KEY_RE.test(String(key)) && !NOT_MONEY_KEY_RE.test(String(key));
 }
-function fmtMoney(val) {
-  return (val < 0 ? '-£' : '£') + Math.abs(val).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const cur = currencyPrefix(locals.clientCurrency);
+function fmtMoney(val, prefix = cur) {
+  return (val < 0 ? '-' + prefix : prefix) + Math.abs(val).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+// A row for a document raised in another currency carries that currency ("currency": "USD"), and its
+// figures are in it, not converted. Its amounts take that code, so a dollar figure is never labelled
+// as the client's own currency. Rows without the field are in the client's currency, as before.
+function rowPrefix(item) {
+  return item && item.currency ? currencyPrefix(item.currency) : cur;
+}
+function isOtherCurrency(item) {
+  return rowPrefix(item) !== cur;
 }
 %>
 
@@ -79,7 +90,7 @@ function fmtMoney(val) {
       <div class="check-stats">
         <div class="check-stat"><strong class="text-warning"><%= issue.count %></strong><span>issue<%= issue.count !== 1 ? 's' : '' %> found</span></div>
         <% if (issue.potential_value_gbp > 0) { %>
-          <div class="check-stat"><strong class="text-error">£<%= Number(issue.potential_value_gbp).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}) %></strong><span>potential value</span></div>
+          <div class="check-stat"><strong class="text-error"><%= cur %><%= Number(issue.potential_value_gbp).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}) %></strong><span>potential value</span></div>
         <% } %>
         <% if (issue.period_checked) { %>
           <div class="check-stat"><strong><%= (typeof periodCheckedLabel !== 'undefined' && periodCheckedLabel) || issue.period_checked.replace(/_/g, ' ') %></strong><span>period checked</span></div>
@@ -133,7 +144,7 @@ function fmtMoney(val) {
     if (val == null) return null;
     const n = Number(val);
     const abs = Math.abs(n).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    return (n < 0 ? '-£' : '£') + abs;
+    return (n < 0 ? '-' + cur : cur) + abs;
   }
   // The active finding for each account, so "Mark as OK" marks that account's difference OK for this period.
   const findingKeyByAccount = {};
@@ -452,6 +463,9 @@ function toggleBbEditForm(id) {
     <% const mainHasSourceColumn = tableRows.some(item => item.source); %>
     <% const mainHasAge = tableRows.some(item => item.ageDays != null); %>
     <% const mainColorByCode = new Map(); %>
+    <% if (tableRows.some(isOtherCurrency)) { %>
+      <p class="check-note">Some documents are in another currency. Their amounts are shown in that currency, not converted.</p>
+    <% } %>
     <div class="table-wrap">
       <table class="data-table">
         <thead>
@@ -493,11 +507,11 @@ function toggleBbEditForm(id) {
               <% columns.forEach(key => { const val = item[key]; %>
                 <td>
                   <% if (isMoneyCell(key, val)) { %>
-                    <%= fmtMoney(val) %>
+                    <%= fmtMoney(val, rowPrefix(item)) %><% if (isOtherCurrency(item)) { %> <span style="font-size:0.7rem;color:#7C8FAC;">(not converted)</span><% } %>
                   <% } else if (Array.isArray(val)) { %>
                     <%# A group of bills/invoices is listed as "reference · amount · status · date", never as [object Object] %>
                     <%= val.length && val[0] !== null && typeof val[0] === 'object'
-                      ? val.map(d => [d.reference, d.amount != null ? '£' + Number(d.amount).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : null, d.status, fmtDisplayDate(d.date)].filter(Boolean).join(' · ')).join('   |   ')
+                      ? val.map(d => [d.reference, d.amount != null ? cur + Number(d.amount).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : null, d.status, fmtDisplayDate(d.date)].filter(Boolean).join(' · ')).join('   |   ')
                       : val.join(', ') %>
                   <% } else { %>
                     <%= val != null ? fmtDisplayDate(val) : '—' %>

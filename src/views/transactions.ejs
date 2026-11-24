@@ -67,10 +67,12 @@
       <tbody id="txBody">
         <% rows.forEach(row => {
           const mth = row.months_covered || 12;
-          const fmtGbp = v => v != null ? '£' + Math.round(v).toLocaleString('en-GB') : '—';
+          // Each client's turnover is in its own currency ("£" for GBP, "AED " for a client kept in AED).
+          const cur = currencyPrefix(row.currency_code);
+          const fmtGbp = v => v != null ? cur + Math.round(v).toLocaleString('en-GB') : '—';
           const fmtN = v => v != null ? Number(v).toLocaleString('en-GB') : '—';
           const perMth = (v, m) => v != null ? '(' + Math.round(v/m).toLocaleString('en-GB') + '/mth)' : '';
-          const perMthGbp = (v, m) => v != null ? '(£' + Math.round(v/m).toLocaleString('en-GB') + '/mth)' : '';
+          const perMthGbp = (v, m) => v != null ? '(' + cur + Math.round(v/m).toLocaleString('en-GB') + '/mth)' : '';
         %>
         <tr data-name="<%= row.name.toLowerCase() %>">
           <td>
@@ -154,7 +156,7 @@
       <tfoot style="background: var(--grey-100); border-top: 2px solid var(--divider); font-weight: 600;">
         <tr>
           <td>Totals (<%= rows.length %> clients)</td>
-          <td class="text-right">£<%= Math.round(totals.turnover).toLocaleString('en-GB') %></td>
+          <td class="text-right">£<%= Math.round(totals.turnover).toLocaleString('en-GB') %><% (totals.otherTurnover || []).forEach(other => { %><div><%= currencyPrefix(other.code) %><%= Math.round(other.amount).toLocaleString('en-GB') %></div><% }) %></td>
           <td class="text-right"><%= totals.total_transactions.toLocaleString('en-GB') %></td>
           <td class="text-right"><%= totals.customer_invoices.toLocaleString('en-GB') %></td>
           <td class="text-right"><%= totals.supplier_bills.toLocaleString('en-GB') %></td>
@@ -197,13 +199,16 @@ function toggleBankSplit() {
   });
 }
 
+// Turnover is in each client's own currency and is not converted, so the download says which one:
+// without it an AED figure and a GBP figure sit in one column and a sum of it means nothing.
 function exportCSV() {
-  const rows = [['Business Name','Ref','Turnover','Total Transactions','Customer Invoices','Supplier Bills','Credit Notes (Sales)','Credit Notes (Purchase)','Bank Processed','Customer Payments','Supplier Payments','Direct Deposits','Direct Payments','Transfers','Bank (Unprocessed)','Journals','Period From','Period To']];
+  const rows = [['Business Name','Ref','Turnover','Currency','Total Transactions','Customer Invoices','Supplier Bills','Credit Notes (Sales)','Credit Notes (Purchase)','Bank Processed','Customer Payments','Supplier Payments','Direct Deposits','Direct Payments','Transfers','Bank (Unprocessed)','Journals','Period From','Period To']];
   <% rows.forEach(row => { %>
   rows.push([
     '<%= (row.name||'').replace(/'/g,"\'") %>',
     '<%= row.client_ref||'' %>',
     '<%= row.turnover||0 %>',
+    '<%= row.currency_code||'GBP' %>',
     '<%= row.total_transactions||0 %>',
     '<%= row.customer_invoices||0 %>',
     '<%= row.supplier_bills||0 %>',

@@ -8,10 +8,37 @@ const { isStaffManager } = require('../services/staffPermissions');
 const { parseBankLineFilters, sendBankLinesCsv, bankLinesPageData } = require('./bankLinesShared');
 const { syncOrganisation } = require('../services/xeroSync');
 const { syncNonXeroOrganisation } = require('../services/ledgers');
+const { getOrgCurrencies } = require('../db/orgCurrency');
 const {
   periodInput, PERIOD_TYPES, resolvePeriod, shouldUseCacheOnlyForReanalysis,
 } = require('../services/periodResolver');
 const { cancelJob, getActiveJobsByOrg, getJob, startJob, subscribe } = require('../services/syncJobs');
+
+// Each client's currency for an all-clients page, from one query. Display only, so if it cannot be
+// read every row is shown in GBP, as before, rather than the page failing.
+async function currenciesFor(orgIds) {
+  try {
+    return await getOrgCurrencies(orgIds);
+  } catch (error) {
+    console.error('[dashboard] client currencies unavailable:', error.message);
+    return new Map();
+  }
+}
+
+// Amounts are not converted, so a total across clients is only meaningful within one currency. GBP
+// stays the main figure (what the page always showed); clients kept in another currency are added
+// up separately and listed after it, e.g. [{ code: 'AED', amount: 163290 }].
+function splitTotalByCurrency(rows, valueOf) {
+  let gbp = 0;
+  const others = new Map();
+  for (const row of rows) {
+    const value = valueOf(row) || 0;
+    const code = row.currency_code || 'GBP';
+    if (code === 'GBP') gbp += value;
+    else others.set(code, (others.get(code) || 0) + value);
+  }
+  return { gbp, others: [...others].sort(([a], [b]) => a.localeCompare(b)).map(([code, amount]) => ({ code, amount })) };
+}
 
 function requestedPeriod(query) {
   return periodInput(query, getSetting('default_sync_period') || 'since_lock_date');
@@ -95,21 +122,25 @@ router.get('/panorama', async (req, res, next) => {
   else if (sort === 'lock_date') orgs.sort((a, b) => String(a.lock_date || '9999').localeCompare(String(b.lock_date || '9999')));
   else if (sort === 'name') orgs.sort((a, b) => a.name.localeCompare(b.name));
   const staleBefore = Date.now() - 36 * 60 * 60 * 1000;
+  const orgCurrencies = await currenciesFor(orgs.map(org => org.id));
   orgs = orgs.map(org => ({
     ...org,
+    currency_code: orgCurrencies.get(Number(org.id)) || 'GBP',
     isStale: !org.last_successful_sync_at ||
       new Date(org.last_successful_sync_at).getTime() < staleBefore,
   }));
 
   const totalIssues = orgs.reduce((s, o) => s + (o.total_issues || 0), 0);
-  const totalErrors = orgs.reduce((s, o) => s + (o.total_potential_errors_gbp || 0), 0);
+  const errorTotals = splitTotalByCurrency(orgs, o => o.total_potential_errors_gbp);
+  const totalErrors = errorTotals.gbp;
+  const otherErrorTotals = errorTotals.others;
   const totalUnreconciled = orgs.reduce((s, o) => s + (o.unreconciled_bank_items || 0), 0);
   const avgScore = orgs.filter(o => o.score != null).length
     ? Math.round(orgs.filter(o => o.score != null).reduce((s, o) => s + o.score, 0) / orgs.filter(o => o.score != null).length)
     : null;
   const allTags = [...new Set((await getAllOrganisations()).map(o => o.tag).filter(Boolean))];
 
-  res.render('panorama', { orgs, totalIssues, totalErrors, totalUnreconciled, avgScore, allTags, query: req.query });
+  res.render('panorama', { orgs, totalIssues, totalErrors, otherErrorTotals, totalUnreconciled, avgScore, allTags, query: req.query });
   } catch (error) {
     next(error);
   }
@@ -233,14 +264,18 @@ router.get('/transactions', async (req, res, next) => {
   } catch (error) {
     console.error('[transactions] bank readings unavailable:', error.message);
   }
+  const rowCurrencies = await currenciesFor(rows.map(row => row.org_id));
+  rows = rows.map(row => ({ ...row, currency_code: rowCurrencies.get(Number(row.org_id)) || 'GBP' }));
   const { sort, search } = req.query;
   if (search) rows = rows.filter(r => r.name.toLowerCase().includes(search.toLowerCase()));
   if (sort === 'turnover') rows.sort((a, b) => (b.turnover || 0) - (a.turnover || 0));
   else if (sort === 'transactions') rows.sort((a, b) => (b.total_transactions || 0) - (a.total_transactions || 0));
   else rows.sort((a, b) => a.name.localeCompare(b.name));
 
+  const turnoverTotals = splitTotalByCurrency(rows, r => r.turnover);
   const totals = {
-    turnover: rows.reduce((s, r) => s + (r.turnover || 0), 0),
+    turnover: turnoverTotals.gbp,
+    otherTurnover: turnoverTotals.others,
     total_transactions: rows.reduce((s, r) => s + (r.total_transactions || 0), 0),
     customer_invoices: rows.reduce((s, r) => s + (r.customer_invoices || 0), 0),
     supplier_bills: rows.reduce((s, r) => s + (r.supplier_bills || 0), 0),

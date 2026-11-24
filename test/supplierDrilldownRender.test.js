@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const ejs = require('ejs');
+const { currencyPrefix } = require('../src/services/money');
 const { groupSupplierTransactions } = require('../src/services/checkPresentation');
 
 const locals = {
@@ -16,6 +17,7 @@ const locals = {
   groupSupplierTransactions,
   // the globals app.js puts on every page
   practiceName: 'Synthetic Practice', cssVersion: 'test', staffName: null, staffRole: null, isStaffManager: false, canAccessSettings: false,
+  currencyPrefix,
 };
 const tx = (date, inPeriod, extra = {}) => ({
   date, reference: `REF-${date}`, source: 'bill', invoiceId: `inv-${date}`, taxCode: 'INPUT2', accountCode: '400',

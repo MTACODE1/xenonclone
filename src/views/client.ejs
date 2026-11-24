@@ -16,6 +16,8 @@ const score = org.score || 0;
 const scoreColor = score >= 80 ? '#13DEB9' : score >= 60 ? '#FFAE1F' : '#FA896B';
 const totalIssues = org.total_issues || 0;
 const totalErrors = org.total_potential_errors_gbp || 0;
+// Amounts are in the client's own currency, not converted: "£" for GBP as always, "AED " for a client kept in AED.
+const cur = currencyPrefix(locals.clientCurrency);
 
 const importanceBadge = {
   critical: { bg: '#dc2626', color: 'white' },
@@ -138,7 +140,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
       <div class="card period-data" style="padding: 16px;">
         <div style="text-align: center; color: #7C8FAC; font-size: 0.875rem; margin-bottom: 4px;">Issues Identified: <strong style="color: #2A3547;"><%= totalIssues.toLocaleString('en-GB') %></strong></div>
         <div style="text-align: center; color: #7C8FAC; font-size: 0.875rem;">Total Potential Errors:</div>
-        <div style="text-align: center; font-weight: 700; font-size: 1.1rem; margin-top: 2px;">£<%= Math.round(totalErrors).toLocaleString('en-GB') %></div>
+        <div style="text-align: center; font-weight: 700; font-size: 1.1rem; margin-top: 2px;"><%= cur %><%= Math.round(totalErrors).toLocaleString('en-GB') %></div>
       </div>
 
       <div class="card period-data" style="padding: 16px;">
@@ -210,7 +212,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
       </div>
       <div class="overview-tile period-data">
         <span class="overview-label">Potential financial errors</span>
-        <span class="overview-value">£<%= Math.round(totalErrors).toLocaleString('en-GB') %></span>
+        <span class="overview-value"><%= cur %><%= Math.round(totalErrors).toLocaleString('en-GB') %></span>
         <span class="overview-note">Estimated exposure</span>
       </div>
       <div class="overview-tile">
@@ -254,7 +256,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
               </div>
               <div class="action-figures">
                 <strong><%= check.count.toLocaleString('en-GB') %></strong> issue<%= check.count === 1 ? '' : 's' %>
-                <% if (check.potential_value_gbp > 0) { %><span>£<%= Math.round(check.potential_value_gbp).toLocaleString('en-GB') %></span><% } %>
+                <% if (check.potential_value_gbp > 0) { %><span><%= cur %><%= Math.round(check.potential_value_gbp).toLocaleString('en-GB') %></span><% } %>
               </div>
               <a class="btn btn-primary btn-sm" href="<%= basePath %>/client/<%= orgIdentifier %>/check/<%= check.type %>?<%= periodQuery %>">Review</a>
             </li>
@@ -303,7 +305,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
                 <td style="padding: 8px;"><%= (checkDefs.find(check => check.type === item.checkType) || {}).label || item.checkType %></td>
                 <td><%= item.importance %></td>
                 <td><%= Number(item.count).toLocaleString('en-GB') %> <small style="color:#7C8FAC;">(<%= item.source === 'active_findings' ? 'normalized' : 'aggregate' %>)</small></td>
-                <td>£<%= Math.round(item.exposure).toLocaleString('en-GB') %></td>
+                <td><%= cur %><%= Math.round(item.exposure).toLocaleString('en-GB') %></td>
                 <td><%= item.ageDays ? Math.round(item.ageDays).toLocaleString('en-GB') + ' days' : 'Unavailable' %></td>
                 <td style="text-align: right; font-weight: 600;">−<%= Number(item.deduction).toFixed(1) %></td>
               </tr>
@@ -392,7 +394,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
                 <% } else if (hasIssues) { %>
                   <span class="pill pill-issue pill-<%= check.importance %>"><%= check.count.toLocaleString('en-GB') %> issue<%= check.count === 1 ? '' : 's' %></span>
                   <% if (check.screenItems) { %><span class="check-value"><%= check.screenItems.toLocaleString('en-GB') %> item<%= check.screenItems === 1 ? '' : 's' %> to reconcile</span><% } %>
-                  <% if (check.potential_value_gbp > 0) { %><span class="check-value">£<%= Math.round(check.potential_value_gbp).toLocaleString('en-GB') %></span><% } %>
+                  <% if (check.potential_value_gbp > 0) { %><span class="check-value"><%= cur %><%= Math.round(check.potential_value_gbp).toLocaleString('en-GB') %></span><% } %>
                 <% } else { %>
                   <span class="pill pill-ok">OK</span>
                 <% } %>
@@ -507,7 +509,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
               <td><%= fmtDisplayDate(item.statement_start_date) %> – <%= fmtDisplayDate(item.statement_end_date) %>
                 <% const evidenceAgeDays = Math.floor((Date.now() - new Date(item.statement_end_date + 'T00:00:00Z')) / 86400000); %>
                 <span class="chip" style="margin-left:4px;background:<%= evidenceAgeDays > 35 ? '#FFF4E5' : '#E6FFFA' %>;color:<%= evidenceAgeDays > 35 ? '#B45309' : '#047857' %>;"><%= evidenceAgeDays > 35 ? 'Stale evidence' : 'Current evidence' %></span>
-                <div>Opening: <%= item.opening_balance == null ? '—' : '£' + Number(item.opening_balance).toFixed(2) %> · Closing: £<%= Number(item.closing_balance).toFixed(2) %></div>
+                <div>Opening: <%= item.opening_balance == null ? '—' : cur + Number(item.opening_balance).toFixed(2) %> · Closing: <%= cur %><%= Number(item.closing_balance).toFixed(2) %></div>
               </td>
               <td><span style="color:#13DEB9;">Exact <%= item.exact_count || 0 %></span> · Probable <%= item.probable_count || 0 %> · Ambiguous <%= item.ambiguous_count || 0 %> · <span style="color:#FA896B;">Unmatched <%= item.unmatched_count || 0 %></span></td>
               <td style="padding-right:12px;">
@@ -618,7 +620,7 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
         <div style="border-top:1px solid #e5eaef;padding:12px 20px;font-size:0.8rem;">
           <% filedAccounts.forEach(item => { %>
             <div style="padding:6px 0;border-bottom:1px solid #f2f6fa;">
-              <strong><%= fmtDisplayDate(item.filing_date) %></strong> · Filed net assets £<%= Number(item.net_assets).toLocaleString('en-GB',{minimumFractionDigits:2}) %> · Xero: <%= item.xero_net_assets == null ? 'Needs sync' : '£' + Number(item.xero_net_assets).toLocaleString('en-GB',{minimumFractionDigits:2}) %>
+              <strong><%= fmtDisplayDate(item.filing_date) %></strong> · <%# A Companies House filing is in pounds. A figure typed in by the accountant is in the client's own currency (an AED client's net assets are AED), as is the ledger figure it is compared with. %><% const filedCur = item.source === 'companies_house' ? '£' : cur; %>Filed net assets <%= filedCur %><%= Number(item.net_assets).toLocaleString('en-GB',{minimumFractionDigits:2}) %> · Xero: <%= item.xero_net_assets == null ? 'Needs sync' : cur + Number(item.xero_net_assets).toLocaleString('en-GB',{minimumFractionDigits:2}) %>
               <span style="font-size:0.7rem;padding:1px 6px;border-radius:3px;background:<%= item.source === 'companies_house' ? '#E1F5EE' : '#F1EFE8' %>;color:<%= item.source === 'companies_house' ? '#0F6E56' : '#5F5E5A' %>;"><%= item.source === 'companies_house' ? 'Companies House (automatic)' : 'Accountant entered' %></span>
               <% if (item.source_note) { %> · <%= ukText(item.source_note) %><% } %><% if (item.source_document_path) { %> · document stored privately<% } %>
               <% if (item.taxonomy_concept) { %>
@@ -761,19 +763,19 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
         <input type="hidden" name="csrf_token" value="<%= csrfToken %>">
         <div style="display: flex; align-items: center; gap: 20px; flex-wrap: wrap;">
           <label style="font-size: 0.875rem; display: flex; align-items: center; gap: 8px;">
-            Opening Balance threshold (£)
+            Opening Balance threshold (<%= cur.trim() %>)
             <input type="number" min="0" step="0.01" name="opening_balance_threshold_gbp"
               value="<%= org.opening_balance_threshold_gbp == null ? '' : org.opening_balance_threshold_gbp %>"
               placeholder="1 (Xenon default)" class="form-input" style="width: 140px; padding: 4px 6px;">
           </label>
           <label style="font-size: 0.875rem; display: flex; align-items: center; gap: 8px;">
-            Capital Review default threshold (£)
+            Capital Review default threshold (<%= cur.trim() %>)
             <input type="number" min="0" step="0.01" name="capital_review_default_threshold_gbp"
               value="<%= org.capital_review_default_threshold_gbp == null ? '' : org.capital_review_default_threshold_gbp %>"
               placeholder="2000 (minimum)" class="form-input" style="width: 130px; padding: 4px 6px;">
           </label>
           <label style="font-size: 0.875rem; display: flex; align-items: center; gap: 8px;">
-            Misallocated Items default threshold (£)
+            Misallocated Items default threshold (<%= cur.trim() %>)
             <input type="number" min="0" step="0.01" name="misallocated_items_default_threshold_gbp"
               value="<%= org.misallocated_items_default_threshold_gbp == null ? '' : org.misallocated_items_default_threshold_gbp %>"
               placeholder="1 (maximum)" class="form-input" style="width: 130px; padding: 4px 6px;">
@@ -781,13 +783,13 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
         </div>
         <div style="display: flex; align-items: center; gap: 20px; flex-wrap: wrap;">
           <label style="font-size: 0.875rem; display: flex; align-items: center; gap: 8px;">
-            Multi-Account Suppliers minimum value (£)
+            Multi-Account Suppliers minimum value (<%= cur.trim() %>)
             <input type="number" min="0" step="0.01" name="multi_account_suppliers_min_value_gbp"
               value="<%= org.multi_account_suppliers_min_value_gbp == null ? '' : org.multi_account_suppliers_min_value_gbp %>"
               placeholder="0 (no floor)" class="form-input" style="width: 120px; padding: 4px 6px;">
           </label>
           <label style="font-size: 0.875rem; display: flex; align-items: center; gap: 8px;">
-            Multi-Tax Suppliers minimum value (£)
+            Multi-Tax Suppliers minimum value (<%= cur.trim() %>)
             <input type="number" min="0" step="0.01" name="multi_tax_suppliers_min_value_gbp"
               value="<%= org.multi_tax_suppliers_min_value_gbp == null ? '' : org.multi_tax_suppliers_min_value_gbp %>"
               placeholder="0 (no floor)" class="form-input" style="width: 120px; padding: 4px 6px;">
@@ -913,13 +915,13 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
                     <label><input type="checkbox" name="capital_accounts" value="<%= acc.account_code %>" <%= acc.is_capital_candidate ? 'checked' : '' %>> Monitor</label>
                     <% if (acc.capitalDefault) { %><div style="font-size: 0.7rem; color: #7C8FAC;">Watched by the practice default</div><% } %>
                     <input type="number" min="0.01" step="0.01" name="capital_threshold[<%= acc.account_code %>]"
-                      value="<%= acc.capital_review_threshold == null ? '' : acc.capital_review_threshold %>" placeholder="£500"
+                      value="<%= acc.capital_review_threshold == null ? '' : acc.capital_review_threshold %>" placeholder="<%= cur %>500"
                       class="form-input" style="width: 85px; padding: 4px 6px;">
                   </td>
                   <td style="padding: 8px 12px; white-space: nowrap;">
                     <label><input type="checkbox" name="misallocated_accounts" value="<%= acc.account_code %>" <%= acc.monitor_misallocated ? 'checked' : '' %>> Monitor</label>
                     <input type="number" min="0.01" step="0.01" name="misallocated_threshold[<%= acc.account_code %>]"
-                      value="<%= acc.misallocated_threshold == null ? '' : acc.misallocated_threshold %>" placeholder="£100"
+                      value="<%= acc.misallocated_threshold == null ? '' : acc.misallocated_threshold %>" placeholder="<%= cur %>100"
                       class="form-input" style="width: 85px; padding: 4px 6px;">
                   </td>
                   <td style="padding: 8px 12px;">
@@ -986,8 +988,8 @@ const orgIdentifier = org.xero_tenant_id || org.freeagent_company_id;
         { label: 'Journals', raw: (txCounts.manual_journals != null ? txCounts.manual_journals : txCounts.journals) || 0, isCurrency: false, unknown: txCounts.manual_journals == null && txCounts.journals == null },
       ];
       txItems.forEach(item => {
-        const display = item.isCurrency ? formatTurnoverGbp(item.raw) : item.raw.toLocaleString('en-GB');
-        const perMthDisplay = item.isCurrency ? '£' + Math.round(item.raw / mth).toLocaleString('en-GB') + '/mth' : Math.round(item.raw / mth).toLocaleString('en-GB') + '/mth';
+        const display = item.isCurrency ? formatTurnoverGbp(item.raw, locals.clientCurrency) : item.raw.toLocaleString('en-GB');
+        const perMthDisplay = item.isCurrency ? cur + Math.round(item.raw / mth).toLocaleString('en-GB') + '/mth' : Math.round(item.raw / mth).toLocaleString('en-GB') + '/mth';
       %>
       <div style="background: white; padding: 16px; text-align: center;">
         <div style="font-size: 0.75rem; color: #7C8FAC; margin-bottom: 4px;"><%= item.label %></div>

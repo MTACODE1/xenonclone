@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const ejs = require('ejs');
+const { currencyPrefix } = require('../src/services/money');
 const { buildBankEvidence } = require('../src/services/bankEvidence');
 const { groupSupplierTransactions } = require('../src/services/checkPresentation');
 
@@ -14,6 +15,7 @@ const locals = {
   summary: { active: 1, dismissed: 0, ignored: 0, ok: 0 }, status: 'active', contact: '', checkDescriptions: {},
   groupSupplierTransactions,
   practiceName: 'Synthetic Practice', cssVersion: 'test', staffName: null, staffRole: null, isStaffManager: false, canAccessSettings: false,
+  currencyPrefix,
 };
 const screen = (name, extra = {}) => ({
   accountName: name, accountNumber: null, itemsToReconcile: 0, reconciled: false, balancesDiffer: false,

@@ -1,12 +1,11 @@
 // Small display helpers for the client and check pages, kept out of the templates so they can be tested.
+const { formatMoney } = require('./money');
 
 // Turnover with pence ("£181,990.37"), so it can be compared with Xero to the penny. A negative figure reads
-// "-£50.00", not "£-50".
-function formatTurnoverGbp(value) {
-  const number = Number(value);
-  const amount = Number.isFinite(number) ? number : 0;
-  const text = Math.abs(amount).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return `${amount < 0 && Number(text.replace(/,/g, '')) !== 0 ? '-' : ''}£${text}`;
+// "-£50.00", not "£-50". The client's currency is optional: without one it is GBP, as it always was, and a
+// client kept in another currency reads "AED 181,990.37" (see money.js).
+function formatTurnoverGbp(value, currency) {
+  return formatMoney(value, currency, { decimals: 2 });
 }
 
 // Multi-Account and Multi-Tax list each supplier's underlying transactions, including ones from the lookback window

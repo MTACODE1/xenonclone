@@ -34,7 +34,7 @@
   <div class="grid">
     <div class="card"><div class="muted">Health score</div><div class="value"><%= org.score == null ? 'N/A' : `${org.score}%` %></div></div>
     <div class="card"><div class="muted">Active scored issues</div><div class="value"><%= Number(org.total_issues || 0).toLocaleString('en-GB') %></div></div>
-    <div class="card"><div class="muted">Potential exposure</div><div class="value">£<%= Number(org.total_potential_errors_gbp || 0).toLocaleString('en-GB',{maximumFractionDigits:0}) %></div></div>
+    <div class="card"><div class="muted">Potential exposure</div><div class="value"><%= currencyPrefix(locals.clientCurrency) %><%= Number(org.total_potential_errors_gbp || 0).toLocaleString('en-GB',{maximumFractionDigits:0}) %></div></div>
     <div class="card"><div class="muted">Score profile</div><div class="value" style="font-size:12px"><%= scoreBreakdown?.profileStatus || 'Unavailable' %></div><div class="muted"><%= scoreBreakdown?.profileVersion || '' %></div></div>
   </div>
 
@@ -71,7 +71,7 @@
         <td><span class="badge <%= check.importance %>"><%= check.importance %></span></td>
         <td class="<%= !isReviewable ? 'muted' : hasIssues ? 'issue' : 'ok' %>"><%= isReviewable ? (hasIssues ? 'Review' : 'OK') : (check.period_checked === 'needs_bank_update' ? 'Needs Xero update' : statusLabel[status]) %></td>
         <td><%= isReviewable ? Number(check.count).toLocaleString('en-GB') : '—' %></td>
-        <td><%= check.potential_value_gbp ? `£${Number(check.potential_value_gbp).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2})}` : '—' %></td>
+        <td><%= check.potential_value_gbp ? `${currencyPrefix(locals.clientCurrency)}${Number(check.potential_value_gbp).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2})}` : '—' %></td>
       </tr>
       <% }) %>
     </tbody>

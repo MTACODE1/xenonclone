@@ -138,6 +138,7 @@ test('the normal period is decided by its kind, not by today\'s date in its key'
 // ---- the check page keeps the viewed period in every link and form ----
 test('check page in a period view: links, filter form, review and note forms all carry the period', async () => {
   const ejs = require('ejs');
+  const { currencyPrefix } = require('../src/services/money');
   const { groupSupplierTransactions } = require('../src/services/checkPresentation');
   const items = [{ finding_key: 'k1', number: 'INV-1', contact: 'A', amount: 10, date: '2026-10-02', review_state: 'active', xero_links: [], standaloneNote: null }];
   const locals = {
@@ -146,6 +147,7 @@ test('check page in a period view: links, filter form, review and note forms all
     items, pagination: { page: 2, totalPages: 3, total: 120, items }, summary: { active: 1, dismissed: 0, ignored: 0, ok: 0 },
     status: 'active', contact: '', checkType: 'old_unpaid_invoices', checkDescriptions: {}, groupSupplierTransactions,
     practiceName: 'P', cssVersion: 't', staffName: null, staffRole: null, isStaffManager: false, canAccessSettings: false,
+    currencyPrefix,
   };
   const file = path.join(__dirname, '../src/views/checkDetail.ejs');
   const viewed = await ejs.renderFile(file, { ...locals, viewQuery: 'period=custom&from=2026-07-01&to=2026-09-30', periodView: { label: 'Custom (2026-07-01 to 2026-09-30)', normalLabel: 'Since Xero Lock Date (30/04/2025)' } });
@@ -163,6 +165,7 @@ test('check page in a period view: links, filter form, review and note forms all
 
 test('money shows as £ with pence even for whole pounds; counts stay plain numbers', async () => {
   const ejs = require('ejs');
+  const { currencyPrefix } = require('../src/services/money');
   const { groupSupplierTransactions } = require('../src/services/checkPresentation');
   // Shapes from Manchesterhub's Old Unpaid Bills (21 Nov 2026): whole-pound amounts used to show as "22", "1188".
   const items = [
@@ -176,6 +179,7 @@ test('money shows as £ with pence even for whole pounds; counts stay plain numb
     items, pagination: { page: 1, totalPages: 1, total: 3, items }, summary: { active: 3, dismissed: 0, ignored: 0, ok: 0 },
     status: 'active', contact: '', checkType: 'old_unpaid_bills', checkDescriptions: {}, groupSupplierTransactions,
     practiceName: 'P', cssVersion: 't', staffName: null, staffRole: null, isStaffManager: false, canAccessSettings: false,
+    currencyPrefix,
   };
   const html = await ejs.renderFile(path.join(__dirname, '../src/views/checkDetail.ejs'), locals);
   const cells = [...html.matchAll(/<td>\s*([^<]*?)\s*<\/td>/g)].map(m => m[1]);
