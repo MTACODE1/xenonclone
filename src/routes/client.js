@@ -555,7 +555,8 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
       : {};
     return {
       ...item,
-      xero_links: xeroLinks(checkType, item, linkContext),
+      // A FreeAgent client's documents are not in Xero, so Xero links would open the wrong place.
+      xero_links: org.xero_tenant_id ? xeroLinks(checkType, item, linkContext) : [],
       standaloneNote: findingNotes[item.finding_key] || null,
       ageDays: (showAge && item.date) ? Math.floor((Date.now() - new Date(item.date).getTime()) / 86400000) : undefined,
       accountName: item.accountCode ? (item.accountName || accountNameByCode[item.accountCode] || null) : item.accountName,
@@ -565,7 +566,7 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
             return {
               ...tx,
               accountName: tx.accountCode ? (tx.accountName || accountNameByCode[tx.accountCode] || null) : tx.accountName,
-              xero_links: xeroLinks(checkType, tx, linkContext), lineKey, ...(lineKey ? lineReviews[lineKey] : {}),
+              xero_links: org.xero_tenant_id ? xeroLinks(checkType, tx, linkContext) : [], lineKey, ...(lineKey ? lineReviews[lineKey] : {}),
             };
           })
         : undefined,

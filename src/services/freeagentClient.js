@@ -160,7 +160,10 @@ async function apiCall(companyId, path, { params } = {}, retries = 6) {
       const isTransient = err.code === 'ETIMEDOUT' ||
         (err.response && TRANSIENT_STATUS_CODES.has(err.response.statusCode));
       if (isTransient && attempt < retries) {
-        const delay = Math.min(Math.pow(2, attempt) * 1000, 15000);
+        // FreeAgent sends Retry-After (seconds) with a 429; waiting less just earns another 429.
+        const retryAfter = Number(err.response?.headers?.['retry-after']);
+        const backoff = Math.min(Math.pow(2, attempt) * 1000, 15000);
+        const delay = Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(Math.max(retryAfter * 1000, backoff), 120000) : backoff;
         console.log(`FreeAgent transient error (attempt ${attempt}/${retries}), waiting ${delay}ms...`);
         await new Promise(r => setTimeout(r, delay));
         continue;

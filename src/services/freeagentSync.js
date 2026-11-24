@@ -1,6 +1,6 @@
 const { hydrateOrgIfEmpty, drain: drainXeroCacheSaves } = require('../db/xeroCacheStore');
 const {
-  fetchAllInvoices, fetchAllBills, fetchAllContacts, fetchAllCreditNotes,
+  fetchAllInvoices, fetchAllBills, fetchAllContacts, fetchAllCreditNotes, fetchContactsById,
 } = require('./freeagentAdapter');
 const {
   getOrganisationByFreeAgentCompanyId, upsertFreeAgentOrganisation,
@@ -36,8 +36,13 @@ const { isWithinPeriod, resolvePeriod } = require('./periodResolver');
 // transactions/explanations + chart of accounts (categories) + tax rates to unlock the remaining
 // ~14 checks.
 
+// Every FreeAgent sync reads the whole list (since 24 Nov 2026). A full read is what removes a
+// document deleted in FreeAgent from the cache, and it replaced the caches built while paging was
+// broken (first 25 rows only). FreeAgent clients are few; set FREEAGENT_INCREMENTAL=1 to go back
+// to reading only what changed since the last sync.
 function incrementalSince(orgId, entityType, options) {
   if (options.cacheOnly || options.forceFullRefresh) return undefined;
+  if (process.env.FREEAGENT_INCREMENTAL !== '1') return undefined;
   const watermark = getEntityCacheWatermark(orgId, entityType);
   if (!watermark) return undefined;
   return new Date(new Date(watermark).getTime() - 5 * 60 * 1000);
@@ -95,10 +100,18 @@ async function runFreeAgentSync(companyId, progressCallback, options = {}) {
   // client would get before its first-ever sync populates one.
   const period = resolvePeriod(options.period || {}, { lockDate: null, asOf: options.asOf });
 
+  // Contacts are read once and shared by the invoice, bill and credit note reads (they used to be
+  // read four times per sync).
+  let contactsByUrl = null;
+  const contactMap = async () => (contactsByUrl = contactsByUrl || await fetchContactsById(companyId));
+
   emit({ step: 'fetch_invoices', message: 'Refreshing invoice and bill cache...' });
   const invoices = await refreshCachedEntities(
     orgId, runId, 'invoice',
-    async since => [...(await fetchAllInvoices(companyId, since)), ...(await fetchAllBills(companyId, since))],
+    async since => [
+      ...(await fetchAllInvoices(companyId, since, await contactMap())),
+      ...(await fetchAllBills(companyId, since, await contactMap())),
+    ],
     options
   );
 
@@ -109,7 +122,7 @@ async function runFreeAgentSync(companyId, progressCallback, options = {}) {
 
   emit({ step: 'fetch_credits', message: 'Refreshing credit note cache...' });
   const allCredits = await refreshCachedEntities(
-    orgId, runId, 'credit_note', since => fetchAllCreditNotes(companyId, since), options
+    orgId, runId, 'credit_note', async since => fetchAllCreditNotes(companyId, since, await contactMap()), options
   );
   // FreeAgent's /v2/credit_notes is sales-side only — there is no purchase/supplier credit note
   // concept, so purchaseCredits is always empty and old_purchase_credits is marked not-applicable
