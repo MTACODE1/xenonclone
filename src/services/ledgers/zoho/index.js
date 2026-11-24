@@ -2,13 +2,16 @@
 // and hands them to ledgerSync.js in the Xero shapes checkRules/ledgerChecks already read, so
 // Zoho clients run the same checks as FreeAgent and QuickBooks clients.
 //
-// Only list endpoints are read, never one document at a time: Zoho caps API calls per
+// The list endpoints are read, not one document at a time: Zoho caps API calls per
 // organisation per day (1,000 on Free up to 10,000 on Premium and above), and a call per invoice
-// would use that up on a mid-sized client. The lists carry no line items and no net/tax split, so
+// would use that up on a mid-sized client. The only single-document reads are the exchange rate
+// of open foreign vendor credits and the opening-balance documents of contacts whose unpaid total
+// the lists do not explain (see fetchOpeningBalances). The lists carry no line items and no net/tax split, so
 // those fields are empty here (see the notes on mapInvoice).
 // Field names and status values checked against https://www.zoho.com/books/api/v3/ (invoices,
 // bills, credit-notes, vendor-credits, contacts, organizations, transaction-locking), 24 Nov 2026.
 const client = require('./client');
+const { amountInBase } = require('../../checkRules');
 
 // exchangeRates: every document carries currencyRate (Xero's convention), so the checks convert.
 const ledger = { key: 'zoho', purchaseCredits: true, drafts: true, exchangeRates: true };
@@ -281,14 +284,208 @@ async function vendorCreditRates(externalId, rawCredits, mapped, { baseCurrency 
   return mapped;
 }
 
+// Opening balances. A client that started in Zoho with balances brought forward has, per customer and
+// per supplier, a hidden opening-balance document ("Customer opening balance" / "Vendor opening
+// balance") that the invoice and bill lists never return. Each contact row on the contact list carries
+// its total unpaid in the organisation's currency (outstanding_receivable_amount_bcy,
+// outstanding_payable_amount_bcy), opening balances included, so a contact whose total is more than
+// its open listed invoices (or bills) add up to, converted the same way the checks convert them
+// (checkRules.amountInBase with currencyRate, rounded per document), is the only one worth a call.
+// For each such contact: GET /contacts/{id} gives opening_balances[].ob_invoice_id; the customer side
+// is read with GET /invoices/{id}, the supplier side with GET /bills/{id}. The documents are mapped
+// with mapInvoice/mapBill and marked isOpeningBalance, so Old Unpaid Invoices/Bills count them while
+// duplicates, unapproved, undocumented bills, turnover and the transaction counts leave them out
+// (ledgerChecks.js). Reads are one at a time through client.apiGet, with the vendor credit rule for
+// errors: a refused sign-in, a throttled refresh or a configuration fault stops the sync, Zoho's daily
+// limit stops further reads, anything else is logged and that read skipped; a contact whose opening balances
+// were not all read keeps its cached copies (see fetchDocuments).
+const GAP_TOLERANCE = 0.01;
+
+function roundMoney(value) {
+  const number = Number(value) || 0;
+  const sign = number < 0 ? -1 : 1;
+  return sign * Number(`${Math.round(Number(`${Math.abs(number).toFixed(8)}e2`))}e-2`);
+}
+
+function hasUsableRate(doc) {
+  const rate = Number(doc?.currencyRate);
+  return Number.isFinite(rate) && rate > 0;
+}
+
+// What a contact's open listed documents (approved, something still due) add up to in the
+// organisation's currency, and whether any of them could not be converted (a foreign document with
+// no rate). A document in the organisation's own currency, or with no currency, is taken as it stands.
+function openTotalsByContact(docs, base) {
+  const totals = new Map();
+  for (const doc of docs) {
+    const id = doc.contact?.contactID;
+    if (!id || doc.status !== 'AUTHORISED' || !(Number(doc.amountDue) > 0)) continue;
+    const entry = totals.get(id) || { total: 0, unconvertible: false };
+    const code = currencyCodeOf(doc.currencyCode);
+    // With the organisation's currency unknown, a document is taken as foreign only when its rate says so.
+    const foreign = base ? Boolean(code) && code !== base : hasUsableRate(doc) && Number(doc.currencyRate) !== 1;
+    if (foreign && !hasUsableRate(doc)) entry.unconvertible = true;
+    else entry.total += roundMoney(amountInBase(doc.amountDue, doc));
+    totals.set(id, entry);
+  }
+  return totals;
+}
+
+// The contacts (raw list rows) whose unpaid total is more than their listed open documents explain,
+// per side. A contact with an open document that cannot be converted is a candidate on that side
+// whenever Zoho says it is owed anything (the gap cannot be worked out, so it is read rather than missed).
+function openingBalanceCandidates(contactRows, invoices, bills, { baseCurrency = null } = {}) {
+  const base = currencyCodeOf(baseCurrency);
+  const invoiceTotals = openTotalsByContact(invoices, base);
+  const billTotals = openTotalsByContact(bills, base);
+  const candidates = [];
+  for (const row of contactRows) {
+    const id = row?.contact_id == null || row.contact_id === '' ? null : String(row.contact_id);
+    if (!id) continue;
+    const side = (outstanding, totals) => {
+      const owed = numberOrNull(outstanding);
+      if (owed == null || !(owed > GAP_TOLERANCE)) return false;
+      const entry = totals.get(id) || { total: 0, unconvertible: false };
+      return entry.unconvertible || owed - roundMoney(entry.total) > GAP_TOLERANCE;
+    };
+    const customer = side(row.outstanding_receivable_amount_bcy, invoiceTotals);
+    const supplier = side(row.outstanding_payable_amount_bcy, billTotals);
+    if (customer || supplier) candidates.push({ contactId: id, name: contactName(row), customer, supplier });
+  }
+  return candidates;
+}
+
+function isFatal(error) {
+  return Boolean(error && (error.authFailure || error.retryLater || error.configurationError));
+}
+
+// Zoho's own marks for the two kinds of opening-balance document. The customer one is checked by its type
+// (customer_ob_invoice) or, with no type given, by its number; a bill body marked as the customer one is
+// refused. The ids share one field (opening_balances[].ob_invoice_id), so a body one endpoint answers with for
+// the other side's id must not be taken: a vendor opening balance mapped as a customer invoice would swap the
+// sides of a real debt.
+const CUSTOMER_OB_NUMBER = 'customer opening balance';
+const lowerText = value => String(value == null ? '' : value).trim().toLowerCase();
+
+function isCustomerOpeningBalance(raw) {
+  const type = lowerText(raw?.type);
+  if (type) return type === 'customer_ob_invoice';
+  return lowerText(raw?.invoice_number) === CUSTOMER_OB_NUMBER;
+}
+
+function isVendorOpeningBalance(raw) {
+  if (lowerText(raw?.type).includes('customer')) return false;
+  return lowerText(raw?.bill_number) !== CUSTOMER_OB_NUMBER;
+}
+
+// "Not found" on one side's endpoint means the id is the other side's document, not a failed read.
+const isNotFound = error => Number(error?.status) === 404;
+
+// Reads and maps the opening-balance documents of the candidate contacts. knownIds: the invoiceIDs
+// already returned by the lists (and filled in as documents are added), so nothing is added twice.
+// notRead: the candidate contacts whose opening balances could not all be read (a failed read, or
+// never reached after Zoho's daily limit), so fetchDocuments can keep their cached copies.
+async function fetchOpeningBalances(externalId, candidates, knownIds, { emit = () => {} } = {}) {
+  const invoices = [];
+  const bills = [];
+  const notRead = new Set();
+  let stopped = false;
+  let calls = 0;
+  // failed: set when a read threw anything but "not found" (or was skipped after the daily limit).
+  let failed = false;
+  const read = async (pathName, what) => {
+    if (stopped) { failed = true; return null; }
+    try {
+      calls++;
+      return await client.apiGet(externalId, pathName);
+    } catch (error) {
+      if (isFatal(error)) throw error;
+      console.log(`Zoho Books ${what}: not read for organisation ${externalId}: ${error.message}`);
+      if (error.dailyLimit) stopped = true;
+      if (!isNotFound(error)) failed = true;
+      return null;
+    }
+  };
+  const addInvoice = (raw, contact) => {
+    if (!raw || raw.invoice_id == null || raw.invoice_id === '') return false;
+    if (!isCustomerOpeningBalance(raw)) return false;
+    const doc = { ...mapInvoice(raw), isOpeningBalance: true };
+    if (!doc.contact.contactID) doc.contact = documentContact(contact.contactId, contact.name);
+    if (!doc.contact.name) doc.contact.name = contact.name;
+    if (knownIds.has(doc.invoiceID)) return true;
+    knownIds.add(doc.invoiceID);
+    invoices.push(doc);
+    return true;
+  };
+  const addBill = (raw, contact) => {
+    if (!raw || raw.bill_id == null || raw.bill_id === '') return false;
+    if (!isVendorOpeningBalance(raw)) return false;
+    const doc = { ...mapBill(raw), isOpeningBalance: true };
+    if (!doc.contact.contactID) doc.contact = documentContact(contact.contactId, contact.name);
+    if (!doc.contact.name) doc.contact.name = contact.name;
+    if (knownIds.has(doc.invoiceID)) return true;
+    knownIds.add(doc.invoiceID);
+    bills.push(doc);
+    return true;
+  };
+
+  for (const candidate of candidates) {
+    if (stopped) { notRead.add(candidate.contactId); continue; }
+    failed = false;
+    const body = await read(`/contacts/${encodeURIComponent(candidate.contactId)}`, `contact ${candidate.contactId} opening balances`);
+    const contact = body?.contact;
+    if (!contact) {
+      if (failed) notRead.add(candidate.contactId);
+      continue;
+    }
+    // Only the sides that are short on the list and that Zoho says still have an opening balance owed
+    // (when it says so at all).
+    const obOwed = field => {
+      const value = numberOrNull(contact[field]);
+      return value == null ? null : value > 0;
+    };
+    const customerOwed = obOwed('outstanding_ob_receivable_amount');
+    const supplierOwed = obOwed('outstanding_ob_payable_amount');
+    const customer = candidate.customer && customerOwed !== false;
+    const supplier = candidate.supplier && supplierOwed !== false;
+    if (!customer && !supplier) continue;
+    const ids = [...new Set((Array.isArray(contact.opening_balances) ? contact.opening_balances : [])
+      .map(entry => entry?.ob_invoice_id)
+      .filter(id => id != null && id !== '')
+      .map(String))];
+    let contactIncomplete = false;
+    for (const id of ids) {
+      if (knownIds.has(id) || knownIds.has(`bill-${id}`)) continue;
+      failed = false;
+      let found = false;
+      if (customer) {
+        const answer = await read(`/invoices/${encodeURIComponent(id)}`, `opening balance ${id} (customer)`);
+        found = addInvoice(answer?.invoice, candidate);
+      }
+      if (!found && supplier) {
+        const answer = await read(`/bills/${encodeURIComponent(id)}`, `opening balance ${id} (supplier)`);
+        found = addBill(answer?.bill, candidate);
+      }
+      if (!found && failed) contactIncomplete = true;
+    }
+    if (contactIncomplete) notRead.add(candidate.contactId);
+  }
+  if (invoices.length || bills.length) {
+    emit({ step: 'fetch_documents', message: `Read ${invoices.length + bills.length} opening balances from Zoho Books.` });
+  }
+  return { invoices, bills, calls, stopped, notRead };
+}
+
 // Every document in every status and date: filter_by=Status.All is the documented "all" filter
 // for bills, credit notes, vendor credits and contacts, and the invoice list example shows it as
 // the applied filter. baseCurrency is the organisation's currency (fetchCompanyInfo), used to tell
 // which vendor credits need their rate read.
-async function fetchDocuments(externalId, { emit = () => {}, baseCurrency = null } = {}) {
+async function fetchDocuments(externalId, { emit = () => {}, baseCurrency = null, cachedOpeningBalances = null } = {}) {
   const all = { filter_by: 'Status.All' };
   emit({ step: 'fetch_documents', message: 'Reading contacts from Zoho Books...' });
-  const contacts = (await fetchAllPages(externalId, '/contacts', 'contacts', all, emit)).map(mapContact);
+  // The raw rows are kept: their outstanding_*_bcy totals pick out the contacts with opening balances.
+  const contactRows = await fetchAllPages(externalId, '/contacts', 'contacts', all, emit);
+  const contacts = contactRows.map(mapContact);
   emit({ step: 'fetch_documents', message: 'Reading invoices from Zoho Books...' });
   const invoiceRows = await fetchAllPages(externalId, '/invoices', 'invoices', all, emit);
   emit({ step: 'fetch_documents', message: 'Reading bills from Zoho Books...' });
@@ -303,11 +500,49 @@ async function fetchDocuments(externalId, { emit = () => {}, baseCurrency = null
     .filter(Boolean));
   const vendorCredits = await vendorCreditRates(externalId, vendorCreditRows, vendorCreditRows.map(mapVendorCredit),
     { baseCurrency, sameCurrencyHints, emit });
+  const invoices = invoiceRows.map(mapInvoice);
+  const bills = billRows.map(mapBill);
+  const candidates = openingBalanceCandidates(contactRows, invoices, bills, { baseCurrency });
+  let openingBalances = { invoices: [], bills: [], calls: 0, stopped: false, notRead: new Set() };
+  if (candidates.length) {
+    emit({ step: 'fetch_documents', message: `Reading opening balances of ${candidates.length} contacts from Zoho Books...` });
+    const knownIds = new Set([...invoices, ...bills].map(doc => doc.invoiceID));
+    openingBalances = await fetchOpeningBalances(externalId, candidates, knownIds, { emit });
+  }
+  // A contact whose opening balances could not all be read keeps the copies the last good sync cached:
+  // ledgerSync refreshes the cache in full, so leaving them out would delete them and Old Unpaid
+  // Invoices/Bills would drop by that amount with nothing to say why (the lists themselves are never
+  // returned short, see fetchAllPages). A cached copy whose id this run already has is not added again.
+  const carried = { invoices: [], bills: [] };
+  if (openingBalances.notRead.size && typeof cachedOpeningBalances === 'function') {
+    const seen = new Set([...invoices, ...bills, ...openingBalances.invoices, ...openingBalances.bills].map(doc => doc.invoiceID));
+    for (const doc of (await cachedOpeningBalances()) || []) {
+      if (!doc || !doc.isOpeningBalance || doc.invoiceID == null || seen.has(doc.invoiceID)) continue;
+      if (!openingBalances.notRead.has(String(doc.contact?.contactID))) continue;
+      seen.add(doc.invoiceID);
+      (doc.type === 'ACCPAY' ? carried.bills : carried.invoices).push(doc);
+    }
+  }
+  const carriedForward = carried.invoices.length + carried.bills.length;
+  if (openingBalances.notRead.size) {
+    const message = `Not all opening balances could be read from Zoho Books (${openingBalances.notRead.size} contacts`
+      + `${openingBalances.stopped ? ', daily API limit reached' : ''}); `
+      + `${carriedForward} kept from the last sync. Old Unpaid Invoices/Bills may be incomplete.`;
+    console.log(`Zoho Books organisation ${externalId}: ${message}`);
+    emit({ step: 'fetch_documents', message });
+  }
   return {
-    invoices: invoiceRows.map(mapInvoice),
-    bills: billRows.map(mapBill),
+    invoices: [...invoices, ...openingBalances.invoices, ...carried.invoices],
+    bills: [...bills, ...openingBalances.bills, ...carried.bills],
     credits: [...creditRows.map(mapSalesCredit), ...vendorCredits],
     contacts,
+    openingBalances: {
+      complete: openingBalances.notRead.size === 0,
+      stopped: openingBalances.stopped,
+      contactsNotRead: openingBalances.notRead.size,
+      carriedForward,
+      calls: openingBalances.calls,
+    },
   };
 }
 
@@ -390,5 +625,5 @@ module.exports = {
   fetchDocuments,
   // For tests and support scripts.
   mapInvoice, mapBill, mapSalesCredit, mapVendorCredit, mapContact, financialYearEnd, fetchAllPages,
-  currencyRateFrom, vendorCreditRates,
+  currencyRateFrom, vendorCreditRates, openingBalanceCandidates, fetchOpeningBalances,
 };

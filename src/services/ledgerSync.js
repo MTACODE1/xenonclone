@@ -6,6 +6,7 @@ const { hydrateOrgIfEmpty, drain: drainCacheSaves } = require('../db/xeroCacheSt
 const {
   getOrganisationByFreeAgentCompanyId, upsertFreeAgentOrganisation, markOrganisationDisconnectedByFreeAgentCompany,
   mergeEntityCacheAsync, getCachedEntitiesAsync, createSyncRun, finishSyncRun,
+  updateOrganisationAccountingSettings,
 } = require('../db/queries');
 const { resolvePeriod } = require('./periodResolver');
 const { runLedgerChecks } = require('./ledgerChecks');
@@ -30,6 +31,15 @@ async function refreshCache(orgId, runId, entityType, rows, options) {
 // disconnected, as a dead Xero connection does, so Sync All stops retrying it every night.
 function isAuthFailure(error) {
   return Boolean(error) && (error.authFailure === true || /invalid_grant/i.test(String(error.message)));
+}
+
+// A year end the company settings gave that can be saved: a whole day 1-31 and month 1-12, or null.
+function validYearEnd(info) {
+  const day = Number(info && info.financialYearEndDay);
+  const month = Number(info && info.financialYearEndMonth);
+  if (info?.financialYearEndDay == null || info?.financialYearEndMonth == null) return null;
+  if (!Number.isInteger(day) || !Number.isInteger(month) || day < 1 || day > 31 || month < 1 || month > 12) return null;
+  return { financialYearEndDay: day, financialYearEndMonth: month };
 }
 
 async function syncLedgerOrganisation(identifier, progressCallback, options = {}) {
@@ -81,7 +91,16 @@ async function runLedgerSync(key, identifier, org, progressCallback, options) {
   if (!options.cacheOnly) {
     emit({ step: 'fetch_documents', message: `Reading invoices, bills, credit notes and contacts from ${label}...` });
     // The organisation's currency, so Zoho reads the exchange rate only of vendor credits in another one.
-    docs = await provider.fetchDocuments(externalId, { emit, baseCurrency: info.baseCurrency || null });
+    // cachedOpeningBalances: the opening balances the last good sync cached, which Zoho keeps for a contact
+    // whose opening balances could not be read this time (so the full cache refresh does not delete them).
+    docs = await provider.fetchDocuments(externalId, {
+      emit,
+      baseCurrency: info.baseCurrency || null,
+      cachedOpeningBalances: async () => {
+        await hydrateOrgIfEmpty(org.id);
+        return (await getCachedEntitiesAsync(org.id, 'invoice')).filter(doc => doc && doc.isOpeningBalance);
+      },
+    });
   }
   const invoices = await refreshCache(org.id, options.runId, 'invoice', [...docs.invoices, ...docs.bills], options);
   const contacts = await refreshCache(org.id, options.runId, 'contact', docs.contacts, options);
@@ -114,8 +133,17 @@ async function runLedgerSync(key, identifier, org, progressCallback, options) {
         await saveOrgCurrency(org.id, info.baseCurrency)
           .catch(error => console.error(`[ledgerSync] currency not saved for organisation ${org.id}: ${error.message}`));
       }
+      // The client's year end (31/12 for a Zoho organisation whose year starts in January), saved the
+      // way the Xero sync saves it, so the client page's period menu uses it instead of the default
+      // 31/03. Only a valid day and month are saved: none given (or a cache-only run) leaves the stored
+      // year end alone. A failure is logged and does not fail a good sync.
+      const yearEnd = validYearEnd(info);
+      if (yearEnd) {
+        await updateOrganisationAccountingSettings(org.id, yearEnd)
+          .catch(error => console.error(`[ledgerSync] year end not saved for organisation ${org.id}: ${error.message}`));
+      }
     },
   });
 }
 
-module.exports = { syncLedgerOrganisation, isAuthFailure };
+module.exports = { syncLedgerOrganisation, isAuthFailure, validYearEnd };

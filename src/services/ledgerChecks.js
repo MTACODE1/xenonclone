@@ -130,6 +130,12 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
   const purchaseCredits = allCredits.filter(item => item.type === 'ACCPAYCREDIT');
   const notApplicable = `not_applicable_${ledger.key}`;
 
+  // Opening balances brought forward (Zoho's hidden "Customer/Vendor opening balance" documents, marked
+  // isOpeningBalance by the Zoho adapter) are money still owed, so Old Unpaid Invoices/Bills count them.
+  // They are not sales or purchases raised in the period: duplicates, unapproved, undocumented bills,
+  // turnover and the transaction counts leave them out (two of them for one contact are not a duplicate).
+  const isOpeningBalance = doc => Boolean(doc && doc.isOpeningBalance);
+  const notOpeningBalance = items => items.filter(item => !isOpeningBalance(item));
   const accrecAuthorised = invoices.filter(i => i.type === 'ACCREC' && ['AUTHORISED', 'PAID'].includes(i.status));
   const accrecDraft = invoices.filter(i => i.type === 'ACCREC' && ['DRAFT', 'SUBMITTED'].includes(i.status));
   const accpayAuthorised = invoices.filter(i => i.type === 'ACCPAY' && ['AUTHORISED', 'PAID'].includes(i.status));
@@ -154,10 +160,10 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
   };
 
   try {
-    const duplicateInvoicePool = inPeriod([
+    const duplicateInvoicePool = notOpeningBalance(inPeriod([
       ...accrecAuthorised.filter(i => i.status === 'AUTHORISED'),
       ...accrecDraft.filter(i => i.status === 'SUBMITTED'),
-    ]);
+    ]));
     const duplicates = findDuplicatesByCurrency(
       duplicateInvoicePool,
       resolveDuplicateInvoiceWindowDays(org),
@@ -177,10 +183,10 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
   }
 
   try {
-    const duplicateBillPool = inPeriod([
+    const duplicateBillPool = notOpeningBalance(inPeriod([
       ...accpayAuthorised,
       ...accpayDraft.filter(i => i.status === 'DRAFT'),
-    ]);
+    ]));
     const duplicates = findDuplicatesByCurrency(
       duplicateBillPool,
       resolveDuplicateBillWindowDays(org),
@@ -211,6 +217,7 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
         id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
         date: toDateString(i.date), dueDate: toDateString(i.dueDate), amountDue: i.amountDue,
         ...currencyFields(i, i.amountDue),
+        ...(isOpeningBalance(i) ? { openingBalance: true } : {}),
       }))),
       period_checked: 'document_date_over_60_days_ago_all_time',
     });
@@ -243,6 +250,7 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
         id: i.invoiceID, number: i.invoiceNumber, contact: i.contact?.name,
         date: toDateString(i.date), dueDate: toDateString(i.dueDate), amountDue: i.amountDue,
         ...currencyFields(i, i.amountDue),
+        ...(isOpeningBalance(i) ? { openingBalance: true } : {}),
       }))),
       period_checked: 'due_date_over_60_days_ago',
     });
@@ -290,7 +298,7 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
     }
   }
   if (ledger.drafts) try {
-    const draftInvoices = inPeriod(accrecDraft);
+    const draftInvoices = notOpeningBalance(inPeriod(accrecDraft));
     const duplicateInvoiceGroups = findDuplicatesByCurrency(draftInvoices);
     const invoicesFinding = excludeDuplicateDrafts(draftInvoices, undefined, duplicateInvoiceGroups);
     const duplicateInvoiceFindings = duplicateInvoiceGroups.flatMap(group => group.documents.map(doc => ({
@@ -319,7 +327,7 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
   }
 
   if (ledger.drafts) try {
-    const draftBills = inPeriod(accpayDraft);
+    const draftBills = notOpeningBalance(inPeriod(accpayDraft));
     const duplicateBillGroups = findDuplicatesByCurrency(draftBills);
     const billsFinding = excludeDuplicateDrafts(draftBills, undefined, duplicateBillGroups);
     const duplicateBillFindings = duplicateBillGroups.flatMap(group => group.documents.map(doc => ({
@@ -348,7 +356,7 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
   }
 
   try {
-    const billsSinceLD = inPeriod(accpayAuthorised).filter(b => b.status === 'AUTHORISED');
+    const billsSinceLD = notOpeningBalance(inPeriod(accpayAuthorised)).filter(b => b.status === 'AUTHORISED');
     const undocumented = billsSinceLD.filter(b => !b.hasAttachments);
     persistIssue({
       org_id: orgId, check_type: 'undocumented_bills', importance: 'medium',
@@ -431,8 +439,9 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
   // fields are 0 rather than omitted; everything else uses the same data the checks above already
   // computed.
   emit({ step: 'transaction_counts', message: 'Calculating transaction counts...' });
-  const recentAccrec = inPeriod(invoices.filter(i => i.type === 'ACCREC' && ['AUTHORISED', 'PAID', 'VOIDED'].includes(i.status)));
-  const recentAccpay = inPeriod(invoices.filter(i => i.type === 'ACCPAY' && ['AUTHORISED', 'PAID', 'VOIDED'].includes(i.status)));
+  // Opening balances are not documents raised in the period (see isOpeningBalance above).
+  const recentAccrec = notOpeningBalance(inPeriod(invoices.filter(i => i.type === 'ACCREC' && ['AUTHORISED', 'PAID', 'VOIDED'].includes(i.status))));
+  const recentAccpay = notOpeningBalance(inPeriod(invoices.filter(i => i.type === 'ACCPAY' && ['AUTHORISED', 'PAID', 'VOIDED'].includes(i.status))));
   const recentSalesCN = inPeriod(salesCredits).filter(c => ['AUTHORISED', 'PAID', 'VOIDED'].includes(c.status));
   const recentPurchaseCN = inPeriod(purchaseCredits).filter(c => ['AUTHORISED', 'PAID', 'VOIDED'].includes(c.status));
   // Turnover still has two known gaps vs. the Xero calculation (currency conversion and account
