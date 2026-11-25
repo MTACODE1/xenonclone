@@ -748,6 +748,27 @@ test('Unreconciled Bank (Zoho): a foreign-currency account\'s rows read in the b
   assert.equal(check.potential_value_gbp, 367.3, 'the USD-only row is not added to the AED total');
 });
 
+test('Unreconciled Bank (Zoho): a /chartofaccounts/transactions row (debit_amount in base, fcy_ in the account currency) shows the account currency with the base amount beside it', () => {
+  const usd = mapping.mapAccount(rawAccount(['a-usd', 'Made Up USD Bank', 'bank'], { currency_code: 'USD' }));
+  const inRow = mapping.mapAccountTransaction({ transaction_id: 'g1', transaction_date: '2026-09-06', debit_amount: 897.02, credit_amount: 0,
+    fcy_debit_amount: 244.42, fcy_credit_amount: 0, reconcile_status: 'unreconciled', currency_code: 'USD' }, usd);
+  const outRow = mapping.mapAccountTransaction({ transaction_id: 'g2', transaction_date: '2026-09-07', debit_amount: 0, credit_amount: 220.2,
+    fcy_debit_amount: 0, fcy_credit_amount: 60, reconcile_status: 'unreconciled', currency_code: 'USD' }, usd);
+  assert.equal(inRow.amountInBaseCurrency, true);
+  assert.equal(inRow.amount, 897.02);
+  assert.equal(inRow.accountAmount, 244.42);
+  assert.equal(outRow.direction, 'out');
+  const recon = { readAt: '2026-11-10T00:00:00Z', from: '2026-07-01', to: '2026-11-10', complete: true, rows: 2, reconciled: 0, unknown: 0, unreconciled: [inRow, outRow] };
+  const check = run({ accounts: [...ACCOUNTS, { ...usd, reconciliation: recon }] }).byType.unreconciled_bank_items;
+  const row = id => check.items.find(i => i.id === `zoho-unreconciled:a-usd:${id}`);
+  assert.equal(row('g1').amount, 244.42, 'shown in USD, as in Zoho');
+  assert.equal(row('g1').currency, 'USD');
+  assert.equal(row('g1').baseAmount, 897.02);
+  assert.equal(row('g2').amount, 60);
+  assert.equal(row('g2').direction, 'Money out');
+  assert.equal(check.potential_value_gbp, 1117.22);
+});
+
 test('Journals to Bank (Zoho): a reversal dated after the period end does not cancel the original inside the period', () => {
   const period = resolvePeriod({ type: 'custom', from: '2026-07-01', to: '2026-09-30' }, { asOf: '2026-11-10', ledgerName: 'Zoho Books' });
   const journals = [

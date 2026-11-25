@@ -823,6 +823,10 @@ function runZohoChecks({
       bankAccountId: account.accountID,
       // A row read from Zoho's bcy_ fields is already in the client's currency, whatever the account's currency.
       ...(account.currencyCode && !sameAsBaseCurrency(account.currencyCode) && t.amountInBaseCurrency !== true ? { currency: account.currencyCode, potentialValue: 0 } : {}),
+      // A foreign-currency account whose row has both amounts: shown in the account's currency, as in Zoho, with the
+      // client's-currency amount beside it (the value counted).
+      ...(account.currencyCode && !sameAsBaseCurrency(account.currencyCode) && t.amountInBaseCurrency === true && t.accountAmount != null
+        ? { amount: Math.abs(Number(t.accountAmount) || 0), currency: account.currencyCode, baseAmount: Math.abs(Number(t.amount) || 0), potentialValue: Math.abs(Number(t.amount) || 0) } : {}),
       ...(account.reconciliation.stale ? { stale: true } : {}),
     });
     const unmatched = account => account.reconciliation.unreconciled;
@@ -837,7 +841,9 @@ function runZohoChecks({
     // The value (score, sorting, finding values) stays the gross amount at stake, as in Xero; the page's headline is
     // the net figure Zoho shows. An account in another currency is listed but not added to the total in the client's
     // currency (as Bank Balance).
-    const value = items.filter(row => !row.currency).reduce((sum, row) => sum + Math.abs(Number(row.amount) || 0), 0);
+    // A foreign row Zoho also gave in the client's currency counts at that amount (baseAmount).
+    const value = items.reduce((sum, row) => sum + (!row.currency ? Math.abs(Number(row.amount) || 0)
+      : typeof row.baseAmount === 'number' ? Math.abs(row.baseAmount) : 0), 0);
     push('unreconciled_bank_items', { count: items.length, value: round2(value), items, periodChecked: period.key });
   });
 

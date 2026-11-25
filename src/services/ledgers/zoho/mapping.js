@@ -521,6 +521,15 @@ function mapAccountTransaction(raw, account = {}) {
   const credit = moneyOrNull(raw.bcy_credit != null ? raw.bcy_credit : raw.credit_amount) || 0;
   let signed = debit - credit;
   let amountInBaseCurrency = raw.bcy_debit != null || raw.bcy_credit != null;
+  // GET /chartofaccounts/transactions gives no bcy_ fields: there debit_amount/credit_amount are in the organisation's
+  // currency and fcy_debit_amount/fcy_credit_amount in the account's own (checked live: a USD account's USD 244.42
+  // row has debit_amount 897.02 AED). With the fcy_ fields present the amount is the base-currency one, and the
+  // account-currency amount is kept as accountAmount.
+  let accountAmount = null;
+  if (!amountInBaseCurrency && (raw.fcy_debit_amount != null || raw.fcy_credit_amount != null)) {
+    amountInBaseCurrency = true;
+    accountAmount = round2((moneyOrNull(raw.fcy_debit_amount) || 0) - (moneyOrNull(raw.fcy_credit_amount) || 0));
+  }
   if (!debit && !credit) {
     const amount = moneyOrNull(raw.bcy_amount != null ? raw.bcy_amount : raw.amount) || 0;
     signed = String(raw.debit_or_credit || '').toLowerCase() === 'credit' ? -Math.abs(amount) : Math.abs(amount);
@@ -545,6 +554,7 @@ function mapAccountTransaction(raw, account = {}) {
     statementLinked: isStatementLinked(raw),
     transactionStatus: textOrNull(raw.transaction_status) || textOrNull(raw.status),
     amountInBaseCurrency,
+    ...(accountAmount != null ? { accountAmount } : {}),
     currencyCode: textOrNull(raw.currency_code),
   };
 }
