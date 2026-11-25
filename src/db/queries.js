@@ -303,6 +303,11 @@ function insertIssue(data) {
       run_id: null, is_active: 1, ...filteredData,
       detail_json: hadDetails ? null : (data.detail_json || '[]'),
     });
+    // A brand-new issue cannot own any findings yet. After a restart the saved copies of issues and issue_findings
+    // can come from different moments, so a finding left from an earlier run may still carry this (reused) id; without
+    // this delete the check page showed that stale finding beside the new ones, and INSERT OR IGNORE below kept the
+    // stale row instead of the new one when both had the same finding key.
+    db.prepare(`DELETE FROM issue_findings WHERE issue_id = ?`).run(result.lastInsertRowid);
     const insertFinding = db.prepare(`
       INSERT OR IGNORE INTO issue_findings
         (issue_id, org_id, check_type, finding_key, detail_json, display_only,

@@ -160,3 +160,60 @@ test('a failed post-sync save is tried again at the next cycle', async () => {
   assert.ok(saved() >= 2, 'the retried save includes the new row');
   swapExec(realQuery);
 });
+
+// issues and issue_findings are saved at different moments (issue_findings is far larger), so a restart can restore
+// findings whose issue the restored issues copy does not have: either a replaced issue, or (the usual case, as
+// issues is saved first) an issue a later copy of issues will bring in. They are kept for the second case; the next
+// new issue must never be given their id, so it cannot inherit them.
+test('a saved finding whose issue is not in the restored issues is kept, and its id is never handed out again', async () => {
+  lease = null;
+  store._resetForTests();
+  const db = getDb();
+  db.prepare('DELETE FROM issue_findings').run();
+  db.prepare('DELETE FROM issues').run();
+  const addIssue = id => db.prepare("INSERT INTO issues (id, org_id, check_type, importance, count, run_id, is_active) VALUES (?, 7001, 'old_unpaid_invoices', 'medium', 1, 11, 1)").run(id);
+  const addFinding = (issueId, key) => db.prepare("INSERT INTO issue_findings (issue_id, org_id, check_type, finding_key, detail_json, run_id, is_active) VALUES (?, 7001, 'old_unpaid_invoices', ?, '{}', 11, 1)").run(issueId, key);
+  addIssue(500); addFinding(500, 'made-up-a');
+  addIssue(501); addFinding(501, 'made-up-stale');
+  await store.saveTable('issue_findings'); // the older findings copy still names issue 501
+  db.prepare('DELETE FROM issues WHERE id = 501').run(); // a later sync replaced that issue
+  await store.saveTable('issues');
+
+  // A fresh container: empty tables and no id counter.
+  db.prepare('DELETE FROM issue_findings').run();
+  db.prepare('DELETE FROM issues').run();
+  db.prepare("DELETE FROM sqlite_sequence WHERE name = 'issues'").run();
+  store._resetForTests();
+  await store.restoreSnapshots();
+
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM issue_findings WHERE issue_id = 501').get().n, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM issue_findings WHERE issue_id = 500').get().n, 1);
+  const fresh = db.prepare("INSERT INTO issues (org_id, check_type, importance, count) VALUES (7001, 'old_unpaid_invoices', 'medium', 1)").run().lastInsertRowid;
+  assert.ok(fresh > 501, `new issue id ${fresh} must be past every id a saved finding used`);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM issue_findings WHERE issue_id = ?').get(fresh).n, 0);
+});
+
+// The usual order: issues is saved first, issue_findings minutes later, so the findings copy can name an issue the
+// issues copy does not have yet. When a later copy of issues brings that issue in, its findings must still be there.
+test('findings saved before their issue reached the saved issues are still there when the issue arrives', async () => {
+  lease = null;
+  store._resetForTests();
+  const db = getDb();
+  db.prepare('DELETE FROM issue_findings').run();
+  db.prepare('DELETE FROM issues').run();
+  const addIssue = id => db.prepare("INSERT INTO issues (id, org_id, check_type, importance, count, run_id, is_active) VALUES (?, 7002, 'old_unpaid_bills', 'medium', 1, 12, 1)").run(id);
+  const addFinding = (issueId, key) => db.prepare("INSERT INTO issue_findings (issue_id, org_id, check_type, finding_key, detail_json, run_id, is_active) VALUES (?, 7002, 'old_unpaid_bills', ?, '{}', 12, 1)").run(issueId, key);
+  addIssue(600); addFinding(600, 'made-up-a');
+  await store.saveTable('issues'); // issues saved first: no 601 yet
+  addIssue(601); addFinding(601, 'made-up-new');
+  await store.saveTable('issue_findings'); // findings saved later: names 601
+
+  db.prepare('DELETE FROM issue_findings').run();
+  db.prepare('DELETE FROM issues').run();
+  db.prepare("DELETE FROM sqlite_sequence WHERE name = 'issues'").run();
+  store._resetForTests();
+  await store.restoreSnapshots();
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM issue_findings WHERE issue_id = 601').get().n, 1);
+  addIssue(601); // the next copy of issues brings it in
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM issue_findings f JOIN issues i ON i.id = f.issue_id WHERE f.issue_id = 601').get().n, 1);
+});

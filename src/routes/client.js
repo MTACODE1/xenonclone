@@ -636,7 +636,8 @@ router.get('/:tenantId/check/:checkType', async (req, res) => {
   const items = pagination.items.map(decorate);
   const previousItems = previousPagination.items.map(decorate);
   const extraData = {};
-  if (checkType === 'bank_balance') {
+  // Zoho Books: the check's own findings are listed in the generic table (the Xero evidence cards below read Xero data).
+  if (checkType === 'bank_balance' && !zohoCopy) {
     // Same evidence builder the check itself uses, so the cards always show the figures it compared.
     const bank = buildBankEvidence({
       reconciliation: getBankReconciliationForOrg(org.id),

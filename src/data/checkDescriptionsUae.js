@@ -39,7 +39,7 @@ const ZOHO = {
     solution: "Review the account in Zoho Books' Banking page and process outstanding items. An account with no bank feed cannot be compared and is not listed. An overdrawn bank account usually means a receipt has not been recorded or a payment was posted to the wrong account.",
   },
   bank_statements_review: {
-    issue: "A reminder to check Zoho Books' Banking page for each bank, card and cash account. Zoho Books has not given Akrio access to banking data, so this always shows Review unless the bank data or the extension's reading of the Banking page shows no uncategorised transactions.",
+    issue: "A reminder to check Zoho Books' Banking page for each bank, card and cash account. An account is cleared once Zoho's bank data (or the extension's reading of the Banking page) shows it has no uncategorised transactions; an account with some, or whose count is not known, stays listed.",
     soWhat: "Uncategorised bank transactions mean the books do not yet reflect every bank transaction, which makes profit, VAT and balance sheet figures unreliable.",
     solution: "For each account listed, open Banking in Zoho Books and confirm it shows no Uncategorized transactions. Process any that remain.",
   },

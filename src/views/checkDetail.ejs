@@ -160,7 +160,7 @@ function isNoRateRow(item) {
 </details>
 <% } %>
 
-<% if (checkType === 'bank_balance') { %>
+<% if (checkType === 'bank_balance' && !/^zoho-/.test(String(org.freeagent_company_id || ''))) { %>
 <%
   // One record per bank account, built by bankEvidence.js — the same function that calculated the check, so
   // the figures and differences here always match the dashboard.

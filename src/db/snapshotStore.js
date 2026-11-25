@@ -200,12 +200,36 @@ async function loadTable(table, hash) {
       }
     })();
     total += rows.length;
+    // Raised chunk by chunk, not only after the whole (minutes-long) load, so a sync inserting an issue in between
+    // is not given an id a chunk just loaded uses.
+    if (table === 'issue_findings') raiseIssueIdCounter(db);
     await tick();
   }
   knownHash.set(table, hash);
   remoteRows.set(table, total);
   if (total) seenNonEmpty.add(table);
   return total;
+}
+
+// issues and issue_findings are saved separately (issue_findings, ~10M rows, takes minutes), so the two restored copies
+// can come from different moments. A saved finding may name an issue id the restored issues do not have (yet): it may
+// belong to an issue a later copy of issues brings in, so it is kept. To stop a new issue ever being given such an id
+// (it then showed the old finding as its own), the issues id counter is moved past every id a finding names.
+// insertIssue also clears any finding already carrying a new issue's id.
+function raiseIssueIdCounter(db = getDb()) {
+  if (!tableExists(db, 'issues') || !tableExists(db, 'issue_findings')) return 0;
+  const top = db.prepare(`
+    SELECT MAX(COALESCE((SELECT MAX(id) FROM issues), 0), COALESCE((SELECT MAX(issue_id) FROM issue_findings), 0),
+      COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'issues'), 0)) AS top
+  `).get().top;
+  if (top > 0) {
+    db.transaction(() => {
+      const changed = db.prepare("UPDATE sqlite_sequence SET seq = ? WHERE name = 'issues' AND seq < ?").run(top, top).changes;
+      const exists = db.prepare("SELECT 1 FROM sqlite_sequence WHERE name = 'issues'").get();
+      if (!changed && !exists) db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES ('issues', ?)").run(top);
+    })();
+  }
+  return top;
 }
 
 // Start-up: fill any empty local table from the saved copy.
@@ -215,14 +239,18 @@ async function restoreSnapshots() {
   const remote = await remoteHashes();
   const db = getDb();
   let restored = 0;
+  let issuesLoaded = false;
   for (const table of ALL_TABLES) {
     const saved = remote.get(table);
     if (!saved || !tableExists(db, table)) continue;
     remoteRows.set(table, saved.rows);
     const local = db.prepare(`SELECT COUNT(*) AS n FROM "${table}"`).get().n;
-    if (local === 0 && saved.rows > 0) restored += await loadTable(table, saved.hash);
-    else if (local > 0) seenNonEmpty.add(table);
+    if (local === 0 && saved.rows > 0) {
+      restored += await loadTable(table, saved.hash);
+      if (LARGE_RESULT_TABLES.includes(table)) issuesLoaded = true;
+    } else if (local > 0) seenNonEmpty.add(table);
   }
+  if (issuesLoaded) raiseIssueIdCounter(db);
   return { restored };
 }
 
@@ -260,6 +288,7 @@ async function releaseLease() {
 async function pullChanges() {
   const remote = await remoteHashes();
   let pulled = 0;
+  let issuesLoaded = false;
   for (const table of ALL_TABLES) {
     const saved = remote.get(table);
     if (!saved || knownHash.get(table) === saved.hash) continue;
@@ -267,7 +296,9 @@ async function pullChanges() {
     if (saved.rows === 0 && !knownHash.has(table) && tableExists(getDb(), table)
       && getDb().prepare(`SELECT COUNT(*) AS n FROM "${table}"`).get().n > 0) continue;
     pulled += await loadTable(table, saved.hash);
+    if (LARGE_RESULT_TABLES.includes(table)) issuesLoaded = true;
   }
+  if (issuesLoaded) raiseIssueIdCounter();
   return pulled;
 }
 
@@ -357,6 +388,6 @@ function requestResultSave() {
 
 module.exports = {
   REVIEW_TABLES, RESULT_TABLES, SMALL_RESULT_TABLES, LARGE_RESULT_TABLES, restoreSnapshots, startSnapshotSync, runCycle,
-  saveTable, loadTable, requestResultSave,
+  saveTable, loadTable, requestResultSave, raiseIssueIdCounter,
   _resetForTests: () => { knownHash.clear(); seenNonEmpty.clear(); remoteRows.clear(); isLeader = false; lastSmallResultsRun = 0; smallResultsPending = false; },
 };
