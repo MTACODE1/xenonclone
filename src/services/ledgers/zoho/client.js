@@ -241,7 +241,24 @@ let sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const CALLS_PER_MINUTE = 90;
 const callTimes = new Map(); // organisation id -> times of its calls in the last minute
 
+// Zoho also limits how many requests one Zoho user account sends a minute, across all its organisations (going
+// over it blocks the user's account for a while, in the web app too, and API calls then get a non-JSON page). Every
+// client here is read with the same sign-in, so all calls together are kept under ACCOUNT_CALLS_PER_MINUTE as well.
+const ACCOUNT_CALLS_PER_MINUTE = Number(process.env.ZOHO_ACCOUNT_CALLS_PER_MINUTE) || 60;
+const accountCallTimes = [];
+async function paceAccount() {
+  const now = Date.now();
+  while (accountCallTimes.length && now - accountCallTimes[0] >= 60000) accountCallTimes.shift();
+  if (accountCallTimes.length >= ACCOUNT_CALLS_PER_MINUTE) {
+    const wait = Math.max(0, 60000 - (now - accountCallTimes[0]));
+    accountCallTimes.shift(); // reserved before the wait, so calls waiting together queue one behind another
+    await sleep(wait);
+  }
+  accountCallTimes.push(Date.now());
+}
+
 async function paceCall(externalId) {
+  await paceAccount();
   const key = String(externalId);
   const times = callTimes.get(key) || [];
   const now = Date.now();
@@ -364,6 +381,14 @@ async function apiGet(externalId, path, params = {}, { optionalScope = false } =
       if (response.status === 401 && forced) error.notAuthorized = true;
       throw error;
     }
+    // A 200 that is not JSON is Zoho's page for a user account that has sent too many requests a minute (or a
+    // gateway page): it passes, so wait well past the minute and try again.
+    if (!body && attempt < MAX_ATTEMPTS) {
+      const delay = Math.min(30000 * attempt, 120000);
+      console.log(`Zoho Books answered ${path} with a page, not JSON (${response.status}, "${text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120)}"); attempt ${attempt}/${MAX_ATTEMPTS}, waiting ${delay}ms...`);
+      await sleep(delay);
+      continue;
+    }
     // Zoho answers code 0 for success; anything else is an error even with HTTP 200.
     if (!body || Number(body.code) !== 0) {
       throw new Error(`Zoho Books ${path} failed: ${body?.message || 'the answer was not Zoho JSON'}`);
@@ -393,10 +418,11 @@ async function fetchOrganizations(apiDomain, accessToken) {
 
 // For tests only: no real waiting, and no tokens remembered from an earlier test.
 function __setSleep(fn) { sleep = fn; }
-function __reset() { refreshesInFlight.clear(); freshTokens.clear(); callTimes.clear(); goodTokens.clear(); dailyCalls.clear(); goodSignIns.clear(); }
+function __resetAccountPace() { accountCallTimes.length = 0; }
+function __reset() { accountCallTimes.length = 0; refreshesInFlight.clear(); freshTokens.clear(); callTimes.clear(); goodTokens.clear(); dailyCalls.clear(); goodSignIns.clear(); }
 
 module.exports = {
   SCOPES, isConfigured, buildConsentUrl, defaultAccountsUrl, safeAccountsServer, safeApiDomain,
   exchangeCode, tokenFromAnswer, parseDbDate, getConnection, getValidAccessToken, apiGet,
-  fetchOrganizations, callsToday, __setSleep, __reset,
+  fetchOrganizations, callsToday, __setSleep, __reset, __resetAccountPace,
 };

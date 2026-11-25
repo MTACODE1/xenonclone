@@ -430,3 +430,27 @@ test('a stored API domain that is not Zoho is never sent the token', async () =>
 test('ledger flags for the shared checks', () => {
   assert.deepEqual(zoho.ledger, { key: 'zoho', purchaseCredits: true, drafts: true, exchangeRates: true });
 });
+
+test('a 200 answer that is not JSON (Zoho\'s too-many-requests page) is waited out and retried', async () => {
+  client.__reset();
+  storeToken(ORG);
+  requests = [];
+  sleeps.length = 0;
+  let served = 0;
+  handlers = [r => isBooks(r, '/contacts') && (served++ === 0
+    ? new Response('<html><body>For security reasons your account has been blocked</body></html>', { status: 200, headers: { 'Content-Type': 'text/html' } })
+    : json({ code: 0, message: 'success', contacts: [] }))];
+  const body = await client.apiGet(ORG, '/contacts');
+  assert.deepEqual(body.contacts, []);
+  assert.equal(served, 2);
+  assert.ok(sleeps.some(ms => ms >= 30000), 'waited at least half a minute before trying again');
+});
+
+test('all organisations together stay under the per-account calls a minute', async () => {
+  client.__reset();
+  for (const id of ['600000011', '600000012']) storeToken(id);
+  sleeps.length = 0;
+  handlers = [r => /\/books\/v3\/contacts$/.test(r.url.pathname) && json({ code: 0, message: 'success', contacts: [] })];
+  for (let i = 0; i < 61; i++) await client.apiGet(i % 2 ? '600000011' : '600000012', '/contacts');
+  assert.ok(sleeps.some(ms => ms > 0), 'the 61st call across two organisations waited');
+});
