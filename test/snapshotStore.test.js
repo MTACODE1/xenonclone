@@ -217,3 +217,21 @@ test('findings saved before their issue reached the saved issues are still there
   addIssue(601); // the next copy of issues brings it in
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM issue_findings f JOIN issues i ON i.id = f.issue_id WHERE f.issue_id = 601').get().n, 1);
 });
+
+// Findings of issues that no longer exist are removed by the leader, but only below the highest issue id: a finding
+// above it may belong to an issue a newer copy of issues has not brought in yet.
+test('dead findings below the highest issue id are removed; live ones and ones above it are kept', async () => {
+  const db = getDb();
+  db.prepare('DELETE FROM issue_findings').run();
+  db.prepare('DELETE FROM issues').run();
+  const addIssue = id => db.prepare("INSERT INTO issues (id, org_id, check_type, importance, count, run_id, is_active) VALUES (?, 7003, 'old_unpaid_bills', 'medium', 1, 13, 1)").run(id);
+  const addFinding = (issueId, key) => db.prepare("INSERT INTO issue_findings (issue_id, org_id, check_type, finding_key, detail_json, run_id, is_active) VALUES (?, 7003, 'old_unpaid_bills', ?, '{}', 13, 1)").run(issueId, key);
+  addFinding(700, 'made-up-dead-1'); addFinding(700, 'made-up-dead-2'); addFinding(702, 'made-up-dead-3'); // issues gone
+  addIssue(701); addFinding(701, 'made-up-live');
+  addIssue(703); addFinding(703, 'made-up-live-2');
+  addFinding(705, 'made-up-not-arrived'); // above the highest issue id: kept
+  const removed = await store.pruneOrphanFindings(db);
+  assert.equal(removed, 3);
+  const left = db.prepare('SELECT issue_id FROM issue_findings ORDER BY issue_id').pluck().all();
+  assert.deepEqual(left, [701, 703, 705]);
+});

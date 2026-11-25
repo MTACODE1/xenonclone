@@ -232,6 +232,40 @@ function raiseIssueIdCounter(db = getDb()) {
   return top;
 }
 
+// Saved findings whose issue is gone were never cleaned up: each restart could restore findings of issues a later
+// sync had already replaced, and they stayed for good (about five in six of the ~10M saved findings), which made
+// every save and restore of issue_findings slow enough to miss the shutdown deadline. The leader removes them in
+// small batches. Only ids at or below the highest issue id are touched: ids are handed out in increasing order, so
+// a missing issue with a lower id was deleted, whereas a finding above it may belong to an issue that a newer copy
+// of issues (saved before issue_findings) has not brought in yet.
+const PRUNE_EVERY_MS = Number(process.env.SNAPSHOT_PRUNE_MS) || 60 * 60 * 1000;
+const PRUNE_BATCH_IDS = 2000;
+const PRUNE_MAX_BATCHES = 50;
+let lastPruneRun = 0;
+async function pruneOrphanFindings(db = getDb(), { maxBatches = PRUNE_MAX_BATCHES } = {}) {
+  if (!tableExists(db, 'issues') || !tableExists(db, 'issue_findings')) return 0;
+  const top = db.prepare('SELECT MAX(id) AS top FROM issues').get().top;
+  if (!top) return 0;
+  const findIds = db.prepare(`
+    SELECT DISTINCT f.issue_id FROM issue_findings f
+    WHERE f.issue_id > ? AND f.issue_id <= ? AND NOT EXISTS (SELECT 1 FROM issues i WHERE i.id = f.issue_id)
+    ORDER BY f.issue_id LIMIT ${PRUNE_BATCH_IDS}
+  `).pluck();
+  const del = db.prepare('DELETE FROM issue_findings WHERE issue_id = ? AND NOT EXISTS (SELECT 1 FROM issues WHERE id = ?)');
+  let removed = 0;
+  let after = 0; // each batch carries on from the last id the one before looked at
+  for (let batch = 0; batch < maxBatches; batch++) {
+    const ids = findIds.all(after, top);
+    if (!ids.length) break;
+    after = ids[ids.length - 1];
+    db.transaction(() => { for (const id of ids) removed += del.run(id, id).changes; })();
+    await tick();
+    if (ids.length < PRUNE_BATCH_IDS) break;
+  }
+  if (removed) console.log(`[snapshot] removed ${removed} finding(s) whose check result no longer exists`);
+  return removed;
+}
+
 // Start-up: fill any empty local table from the saved copy.
 async function restoreSnapshots() {
   if (!enabled()) return { restored: 0 };
@@ -332,6 +366,10 @@ async function runCycle({ force = false } = {}) {
     if (force || Date.now() - lastResultsRun >= RESULT_EVERY_MS) {
       smallResultsPending = false;
       await saveTables(SMALL_RESULT_TABLES);
+      if (Date.now() - lastPruneRun >= PRUNE_EVERY_MS) {
+        lastPruneRun = Date.now();
+        await pruneOrphanFindings().catch(err => console.error('[snapshot] removing old findings failed:', err.message));
+      }
       await saveTables(LARGE_RESULT_TABLES);
       lastResultsRun = Date.now();
       lastSmallResultsRun = lastResultsRun;
@@ -388,6 +426,6 @@ function requestResultSave() {
 
 module.exports = {
   REVIEW_TABLES, RESULT_TABLES, SMALL_RESULT_TABLES, LARGE_RESULT_TABLES, restoreSnapshots, startSnapshotSync, runCycle,
-  saveTable, loadTable, requestResultSave, raiseIssueIdCounter,
-  _resetForTests: () => { knownHash.clear(); seenNonEmpty.clear(); remoteRows.clear(); isLeader = false; lastSmallResultsRun = 0; smallResultsPending = false; },
+  saveTable, loadTable, requestResultSave, raiseIssueIdCounter, pruneOrphanFindings,
+  _resetForTests: () => { knownHash.clear(); seenNonEmpty.clear(); remoteRows.clear(); isLeader = false; lastSmallResultsRun = 0; smallResultsPending = false; lastPruneRun = 0; },
 };
