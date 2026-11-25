@@ -72,7 +72,10 @@ const routes = {
   '/journals/j1': () => json({ journal: { journal_id: 'j1', journal_date: '2026-11-03', status: 'published', last_modified_time: '2026-11-03T09:00:00+0400',
     line_items: [{ account_id: 'a-sales', debit_or_credit: 'credit', amount: 50, bcy_amount: 50 }, { account_id: 'a-bank', debit_or_credit: 'debit', amount: 50, bcy_amount: 50 }] } }),
   '/bankaccounts': () => list('bankaccounts', [{ account_id: 'a-bank', account_name: 'Example Bank', account_type: 'bank', balance: 700, bcy_balance: 700, bank_balance: 650, uncategorized_transactions: 1 }]),
-  '/banktransactions': () => list('banktransactions', [{ transaction_id: 'bt1', date: '2026-11-20', amount: 50, transaction_type: 'withdrawal', status: 'uncategorized', account_id: 'a-bank' }]),
+  // Real Zoho answers 400 zb.banking.status.params.mismatch when filter_by and status are both sent.
+  '/banktransactions': url => (url.searchParams.has('filter_by') && url.searchParams.has('status')
+    ? new Response(JSON.stringify({ code: 400, message: 'zb.banking.status.params.mismatch' }), { status: 400, headers: { 'Content-Type': 'application/json' } })
+    : null) || list('banktransactions', [{ transaction_id: 'bt1', date: '2026-11-20', amount: 50, transaction_type: 'withdrawal', status: 'uncategorized', account_id: 'a-bank' }]),
   '/expenses': () => list('expenses', []),
 };
 global.fetch = async input => {
@@ -80,7 +83,7 @@ global.fetch = async input => {
   requests.push(url);
   const route = routes[url.pathname.replace('/books/v3', '')];
   if (!route) throw new Error(`Unexpected request in test: ${url}`);
-  return route();
+  return route(url);
 };
 const detailCalls = () => requests.map(u => u.pathname.replace('/books/v3', '')).filter(p => /^\/(journals|invoices|bills|expenses)\/[^/]+$/.test(p));
 

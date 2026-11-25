@@ -268,10 +268,10 @@ async function readBanking(externalId, budget) {
   const lines = [];
   for (const bank of banks) {
     if (!(Number(bank.uncategorized_transactions) > 0) || bank.account_id == null) continue;
-    // filter_by and status both name the uncategorised lines in Zoho's docs; the status is checked again
-    // here in case Zoho ignores one of them.
+    // Zoho rejects filter_by and status sent together (400 zb.banking.status.params.mismatch), so only
+    // filter_by is sent; the status is checked again here in case Zoho ignores it.
     const rows = await readAllPages(externalId, '/banktransactions', 'banktransactions',
-      { account_id: bank.account_id, filter_by: 'Status.Uncategorized', status: 'uncategorized' }, budget, { optionalScope: true });
+      { account_id: bank.account_id, filter_by: 'Status.Uncategorized' }, budget, { optionalScope: true });
     for (const raw of rows) {
       if (raw?.transaction_id == null) continue;
       if (raw.status && String(raw.status).toLowerCase() !== 'uncategorized') continue;
