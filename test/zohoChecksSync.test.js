@@ -93,6 +93,19 @@ test('Duplicate Contacts (Zoho): every active contact is compared, as for Xero, 
   assert.equal(issuesOf(966, 9966).duplicate_contacts.count, 1);
 });
 
+test('Zoho only: a customer kept twice with a currency added is a duplicate; the same bill under two suppliers is a duplicate bill', async t => {
+  const people = [...contacts, { contactID: 'k1', name: 'Made Up Tech  Trading', contactStatus: 'ACTIVE', isCustomer: true },
+    { contactID: 'k2', name: 'Made Up Tech Trading (EUR)', contactStatus: 'ACTIVE', isCustomer: true },
+    { contactID: 'v2', name: 'Supplier Two', contactStatus: 'ACTIVE' }];
+  const twin = (id, vendor, name) => ({ ...zoho.mapBill({ ...billRaw, bill_id: id, bill_number: 'TEL-77', vendor_id: vendor, vendor_name: name, status: 'open', balance: 100 }),
+    ...mapping.documentDetail({ ...billRaw, line_items: [{ line_item_id: 'l' + id, account_id: 'a-office', item_total: 100, tax_id: '' }] }) });
+  await run(t, 967, 9967, { accounting, contacts: people, invoices: [twin('t1', 'v1', 'Supplier One'), twin('t2', 'v2', 'Supplier Two')],
+    taxProfile: { isTaxRegistered: true, isFreeZone: false, taxRegNoLabel: 'TRN' } });
+  const issues = issuesOf(967, 9967);
+  assert.equal(issues.duplicate_contacts.count, 1, 'Made Up Tech Trading and its (EUR) copy');
+  assert.equal(issues.duplicate_bills.count, 1, 'TEL-77 under two suppliers');
+});
+
 test('a cache-only re-run (no fresh profile) uses the stored one: not registered means no Purchase Tax Missing', async t => {
   profiles.set(962, { region: 'AE', profile_json: JSON.stringify({ isTaxRegistered: false }) });
   await run(t, 962, 9962, { accounting, taxProfile: null });

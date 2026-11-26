@@ -216,6 +216,24 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
         requireExactTotal: resolveDuplicateBillRequireExactTotal(org),
       }
     );
+    // Zoho Books only: the same bill (same number and total) entered under two different suppliers ("Etisalat" and
+    // "Emirates Telecommunications eand PJSC"). The shared rule compares bills within one supplier, as for Xero.
+    if (ledger.key === 'zoho') {
+      const byId = new Map(duplicateBillPool.map(item => [item.invoiceID, item]));
+      const anySupplier = duplicateBillPool.filter(item => item.invoiceNumber || item.reference)
+        .map(item => ({ ...item, contact: { contactID: 'zoho-any-supplier', name: item.contact?.name } }));
+      const across = findDuplicatesByCurrency(anySupplier, resolveDuplicateBillWindowDays(org), {
+        requireUnpaidPair: !resolveDuplicateBillIncludeFullyPaid(org), requireExactReference: true, requireExactTotal: true,
+      });
+      for (const group of across) {
+        const members = (group.documentIds || []).map(id => byId.get(id)).filter(Boolean);
+        const suppliers = new Set(members.map(item => item.contact?.contactID).filter(Boolean));
+        if (suppliers.size < 2) continue; // one supplier: the shared rule already covers it
+        const names = [...new Set(members.map(item => item.contact?.name).filter(Boolean))];
+        duplicates.push({ ...group, contact: names.join(' / '), rule: 'same_bill_two_suppliers',
+          note: 'The same bill number and total entered under different suppliers.' });
+      }
+    }
     persistIssue({
       org_id: orgId, check_type: 'duplicate_bills', importance: 'high',
       count: duplicates.length, potential_value_gbp: sumAbsoluteExposure(duplicates, groupExposure),
@@ -424,6 +442,30 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
     const duplicates = uaeNames
       ? await uaeDuplicateContactPairs(activeContacts, findDuplicateContactsAsync)
       : await findDuplicateContactsAsync(activeContacts);
+    // Zoho Books only: one name kept twice with a currency added ("Kumo Tech International" / "Kumo Tech International
+    // (EUR)"). The shared rule does not pair two customers whose names differ by extra words, as for Xero.
+    if (ledger.key === 'zoho') {
+      const CURRENCY_TAIL = /[\s\-_]*[(\[]?\s*(AED|USD|EUR|GBP|SAR|INR|QAR|OMR|KWD|BHD|CHF|CAD|AUD|JPY|CNY|PKR)\s*[)\]]?\s*$/i;
+      const plain = name => String(name || '').replace(CURRENCY_TAIL, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      const paired = new Set(duplicates.map(pair => [pair.id1, pair.id2].sort().join('|')));
+      const groups = new Map();
+      for (const contact of activeContacts) {
+        const key = plain(contact.name);
+        if (!key) continue;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(contact);
+      }
+      for (const members of groups.values()) {
+        if (members.length < 2 || !members.some(c => CURRENCY_TAIL.test(String(c.name || '')))) continue;
+        for (let i = 0; i < members.length; i++) for (let j = i + 1; j < members.length; j++) {
+          const key = [members[i].contactID, members[j].contactID].sort().join('|');
+          if (paired.has(key)) continue;
+          paired.add(key);
+          duplicates.push({ id1: members[i].contactID, name1: members[i].name, id2: members[j].contactID, name2: members[j].name,
+            rule: 'same_name_with_currency' });
+        }
+      }
+    }
     persistIssue({
       org_id: orgId, check_type: 'duplicate_contacts', importance: 'low',
       count: duplicates.length, potential_value_gbp: 0,

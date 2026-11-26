@@ -875,9 +875,12 @@ function runZohoChecks({
       const groups = new Map();
       const add = (side, doc, line, net, tax) => {
         const reverse = uae.isReverseChargeLine(doc, line);
-        const key = isUae ? `${side}|${taxLabel(line)}|${reverse ? 'rc' : ''}` : taxLabel(line);
+        // A negative line on a sales invoice posted to a non-income account (platform fees taken off the sale) is
+        // its own row, so the sales rows match the income accounts and the deductions show beside them.
+        const deduction = side === 'sales' && net < 0 && !revenueIds.has(idOfLine(line));
+        const key = (isUae ? `${side}|${taxLabel(line)}|${reverse ? 'rc' : ''}` : taxLabel(line)) + (deduction ? `|ded:${nameOf(idOfLine(line)) || ''}` : '');
         const group = groups.get(key) || {
-          key, side, label: taxLabel(line), reverse, count: 0, net: 0, tax: 0,
+          key, side, label: taxLabel(line), reverse, count: 0, net: 0, tax: 0, deductionAccount: deduction ? (nameOf(idOfLine(line)) || 'another account') : null,
           taxType: line.taxType || 'NONE', flags: new Set(), emirates: new Map(),
         };
         group.count += 1;
@@ -922,8 +925,9 @@ function runZohoChecks({
           ? ` By emirate: ${[...group.emirates].map(([e, v]) => `${e} ${unit}${v.toFixed(2)}`).join(', ')}.` : '';
         return {
           documentId: `tax-code:${group.key}`, number: null, date: null, source: 'tax_review',
-          accountCode: group.label + (group.reverse ? ' (reverse charge)' : ''), accountName: bySide ? bySide.slice(0, -2) : group.label,
-          description: `${bySide}${group.count} line(s), net ${unit}${group.net.toFixed(2)}, VAT ${unit}${group.tax.toFixed(2)}.${emirates}${flags.length ? ` Review: ${flags.join('; ')}.` : ''}`,
+          accountCode: group.label + (group.reverse ? ' (reverse charge)' : '') + (group.deductionAccount ? ` - deducted on invoices (${group.deductionAccount})` : ''),
+          accountName: bySide ? bySide.slice(0, -2) : group.label,
+          description: `${bySide}${group.deductionAccount ? `deductions on sales invoices posted to ${group.deductionAccount}: ` : ''}${group.count} line(s), net ${unit}${group.net.toFixed(2)}, VAT ${unit}${group.tax.toFixed(2)}.${emirates}${flags.length ? ` Review: ${flags.join('; ')}.` : ''}`,
           amount: round2(group.net), lineCount: group.count, taxAmount: round2(group.tax),
           ...(flags.length ? { level: 'review', rule: 'uae_tax_treatment_review' } : {}),
         };

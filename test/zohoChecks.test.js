@@ -408,6 +408,17 @@ test('Unprocessed Bank: a line on a EUR account (Zoho gives no rate) is listed b
   assert.equal(check.potential_value_gbp, 100);
 });
 
+test('Tax Review by Code: fees taken off a sales invoice to an expense account are their own row; sales match the income account', () => {
+  const { byType } = run({ invoices: [
+    invoice('d1', '2026-08-01', 'c1', [line('a-sales', 1000), line('a-office', -150)]),
+  ] });
+  const rows = counted(byType.tax_review_by_code).filter(r => r.accountName === 'Sales');
+  const sales = rows.find(r => !/deducted/.test(r.accountCode));
+  const fees = rows.find(r => /deducted on invoices \(Office Supplies\)/.test(r.accountCode));
+  assert.equal(sales.amount, 1000);
+  assert.equal(fees.amount, -150);
+});
+
 // ---------------- tax review and thresholds ----------------
 
 test('Tax Review by Code (UAE): split by side and treatment, emirates shown, the three review flags raised', () => {
