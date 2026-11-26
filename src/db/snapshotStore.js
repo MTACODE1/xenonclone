@@ -366,10 +366,9 @@ async function runCycle({ force = false } = {}) {
     if (force || Date.now() - lastResultsRun >= RESULT_EVERY_MS) {
       smallResultsPending = false;
       await saveTables(SMALL_RESULT_TABLES);
-      if (Date.now() - lastPruneRun >= PRUNE_EVERY_MS) {
-        lastPruneRun = Date.now();
-        await pruneOrphanFindings().catch(err => console.error('[snapshot] removing old findings failed:', err.message));
-      }
+      // pruneOrphanFindings is not run on a timer: its scan of the ~10M saved findings held the server for 10-19 s
+      // every hour (25-26 Nov 2026) and found almost nothing (25 rows). insertIssue and raiseIssueIdCounter already
+      // stop a stale finding being shown.
       await saveTables(LARGE_RESULT_TABLES);
       lastResultsRun = Date.now();
       lastSmallResultsRun = lastResultsRun;
