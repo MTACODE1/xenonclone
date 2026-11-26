@@ -395,6 +395,19 @@ test('Tax Review by Code: a negative line (a fee taken off a sale) reduces the g
   assert.equal(std.taxAmount, 40);
 });
 
+test('Unprocessed Bank: a line on a EUR account (Zoho gives no rate) is listed but not added to the AED total', () => {
+  const eur = mapping.mapAccount(rawAccount(['a-eur', 'Made Up EUR Bank', 'bank'], { currency_code: 'EUR' }));
+  const aed = mapping.mapAccount(rawAccount(['a-aed', 'Made Up AED Bank', 'bank']));
+  const withBank = (a, bal) => ({ ...a, bank: { bookBalance: bal, bankBalance: bal, uncategorizedCount: 1, currencyCode: a.currencyCode, feedsActive: false } });
+  const lines = [
+    mapping.mapUncategorisedLine({ transaction_id: 'u1', date: '2026-08-01', amount: 100, transaction_type: 'deposit', status: 'uncategorized', account_id: 'a-aed', currency_code: 'AED' }, { account_id: 'a-aed', account_name: 'Made Up AED Bank' }),
+    mapping.mapUncategorisedLine({ transaction_id: 'u2', date: '2026-08-02', amount: 50, transaction_type: 'deposit', status: 'uncategorized', account_id: 'a-eur', currency_code: 'EUR' }, { account_id: 'a-eur', account_name: 'Made Up EUR Bank' }),
+  ];
+  const check = run({ accounts: [...ACCOUNTS.filter(a => a.type !== 'BANK'), withBank(aed, 1000), withBank(eur, 500)], bankTransactions: lines }).byType.unprocessed_bank;
+  assert.equal(check.count, 2);
+  assert.equal(check.potential_value_gbp, 100);
+});
+
 // ---------------- tax review and thresholds ----------------
 
 test('Tax Review by Code (UAE): split by side and treatment, emirates shown, the three review flags raised', () => {

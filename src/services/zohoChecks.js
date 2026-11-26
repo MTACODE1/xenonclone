@@ -183,7 +183,10 @@ function runZohoChecks({
     const amount = round2(docNet(doc, line));
     return { amount, ...money.currencyFields(doc, amount), ...extra };
   };
-  const rowValue = row => (row.noExchangeRate ? 0 : typeof row.baseAmount === 'number' ? row.baseAmount : Number(row.amount) || 0);
+  // A row in another currency counts only by its converted amount (baseAmount); one Zoho gives no rate for (an
+  // uncategorised line on a EUR account) is listed in its own currency and kept out of the client-currency total.
+  const rowValue = row => (row.noExchangeRate ? 0 : typeof row.baseAmount === 'number' ? row.baseAmount
+    : row.currency && String(row.currency).toUpperCase() !== money.base ? 0 : Number(row.amount) || 0);
   const exposure = rows => sumAbsoluteExposure(rows.filter(row => !row.displayOnly), rowValue);
   const docRef = doc => doc.invoiceID
     ? { invoiceId: doc.invoiceID, number: doc.invoiceNumber || null, type: doc.type, source: doc.type === 'ACCREC' ? 'invoice' : 'bill' }
