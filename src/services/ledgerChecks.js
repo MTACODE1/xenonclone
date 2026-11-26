@@ -404,8 +404,10 @@ async function runLedgerChecks({ org, runId, period, invoices, contacts, credits
     const supplierContactIds = new Set(
       invoices.filter(i => i.type === 'ACCPAY' && i.contact?.contactID).map(i => i.contact.contactID)
     );
+    // Zoho Books: every active contact is compared, as for Xero (xeroSync.js): a contact used only on expenses, or not
+    // yet used, can still be a duplicate staff should merge. FreeAgent and QuickBooks keep the invoice/bill role rule.
     const activeContacts = contacts.filter(c =>
-      c.contactStatus === 'ACTIVE' && (customerContactIds.has(c.contactID) || supplierContactIds.has(c.contactID))
+      c.contactStatus === 'ACTIVE' && (ledger.key === 'zoho' || customerContactIds.has(c.contactID) || supplierContactIds.has(c.contactID))
     );
     // Pauses now and then so the server keeps answering while a large contact list is compared.
     // A UAE Zoho Books client: names are compared without UAE legal endings and noise (L.L.C, FZE, FZCO, DMCC,

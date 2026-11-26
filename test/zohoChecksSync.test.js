@@ -87,6 +87,12 @@ test('a Zoho UAE sync stores the Zoho checks with the document checks, and saves
   assert.equal(JSON.parse(profiles.get(961).profile_json).isTaxRegistered, true);
 });
 
+test('Duplicate Contacts (Zoho): every active contact is compared, as for Xero, not only those used on an invoice or bill', async t => {
+  const both = [...contacts, { contactID: 'v9', name: 'Supplier One', contactStatus: 'ACTIVE' }]; // the copy is on no bill
+  await run(t, 966, 9966, { accounting, contacts: both, taxProfile: { isTaxRegistered: true, isFreeZone: false, taxRegNoLabel: 'TRN' } });
+  assert.equal(issuesOf(966, 9966).duplicate_contacts.count, 1);
+});
+
 test('a cache-only re-run (no fresh profile) uses the stored one: not registered means no Purchase Tax Missing', async t => {
   profiles.set(962, { region: 'AE', profile_json: JSON.stringify({ isTaxRegistered: false }) });
   await run(t, 962, 9962, { accounting, taxProfile: null });
