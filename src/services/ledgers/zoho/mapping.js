@@ -337,6 +337,9 @@ function mapDocumentLine(line, { inclusive = false, net = false } = {}) {
     taxAmountEstimated: estimated,
     lineAmount: round2(number(line.item_total != null ? line.item_total : line.amount)),
     isReverseCharge: Boolean(idOrNull(line.reverse_charge_tax_id)),
+    // Reverse charge: Zoho gives the VAT the client accounts for itself in these fields, not in tax_amount.
+    reverseChargeTaxPercentage: numberOrNull(line.reverse_charge_tax_percentage),
+    reverseChargeTaxAmount: numberOrNull(line.reverse_charge_tax_amount),
     // UAE VAT: a line with no tax_id may be exempt or out of scope on purpose (tax_exemption_id/code,
     // or the treatment code), which is not the same as a missing VAT rate. itc_eligibility says
     // whether the input VAT on a bill line may be recovered. Null when Zoho does not send them.

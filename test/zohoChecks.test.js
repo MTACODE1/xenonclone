@@ -419,6 +419,16 @@ test('Tax Review by Code: fees taken off a sales invoice to an expense account a
   assert.equal(fees.amount, -150);
 });
 
+test('Tax Review by Code: a reverse-charge bill shows the VAT the client accounts for (Zoho keeps it off the line tax)', () => {
+  const { byType } = run({ invoices: [
+    bill('rc1', '2026-08-04', 'v1', [line('a-office', 1000, { reverse_charge_tax_id: 't-std', reverse_charge_tax_percentage: 5, reverse_charge_tax_amount: 50 })], { is_reverse_charge_applied: true }),
+    bill('rc2', '2026-08-05', 'v1', [line('a-office', 400, { reverse_charge_tax_id: 't-std' })], { is_reverse_charge_applied: true }),
+  ] });
+  const rc = counted(byType.tax_review_by_code).find(r => /reverse charge/.test(r.accountCode));
+  assert.equal(rc.amount, 1400);
+  assert.equal(rc.taxAmount, 70, '50 from Zoho plus 5% of 400 for a line read without the field');
+});
+
 // ---------------- tax review and thresholds ----------------
 
 test('Tax Review by Code (UAE): split by side and treatment, emirates shown, the three review flags raised', () => {

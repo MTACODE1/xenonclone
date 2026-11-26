@@ -908,7 +908,18 @@ function runZohoChecks({
         for (const doc of scope.docs(docs)) {
           if (cannotConvert(doc) || beforeVat(doc)) continue;
           const rate = hasRate(doc) ? Number(doc.currencyRate) : 1;
-          for (const line of doc.lineItems || []) add(side, doc, line, netLineAmount(doc, line), (Number(line.taxAmount) || 0) / rate);
+          for (const line of doc.lineItems || []) {
+            const net = netLineAmount(doc, line);
+            let tax = (Number(line.taxAmount) || 0) / rate;
+            // Reverse charge: the line carries no tax of its own; the VAT the client accounts for is on the reverse
+            // charge rate (Zoho's reverse_charge_tax_amount; lines read before 26 Nov 2026 lack it, so the rate is used,
+            // 5% for a UAE client). It goes to both Input and Output VAT in Zoho.
+            if (!tax && uae.isReverseChargeLine(doc, line)) {
+              const pct = Number(line.reverseChargeTaxPercentage) || (isUae ? 5 : 0);
+              tax = Number(line.reverseChargeTaxAmount) ? Number(line.reverseChargeTaxAmount) / rate : net * pct / 100;
+            }
+            add(side, doc, line, net, tax);
+          }
         }
       }
       for (const journal of scope.docs(journals)) {
