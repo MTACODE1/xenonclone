@@ -491,9 +491,14 @@ async function fetchBankActivity(externalId, read, { period = null, emit = () =>
       if (attempt.reason === 'error' && /\b404\b/.test(String(attempt.error || '')) && pathIndex + 1 < ACCOUNT_TRANSACTION_PATHS.length) { pathIndex += 1; continue; }
       break;
     }
+    // Nothing read because the budget had already run out: keep what the last sync read (marked stale) instead of
+    // replacing it with an empty, incomplete read.
+    if (result && !result.complete && !(result.rows || []).length) result = null;
     if (!result) {
       const old = await previousOf(account.accountID);
       if (old && old.reconciliation) account.reconciliation = { ...old.reconciliation, stale: true };
+      else account.reconciliation = { readAt: new Date().toISOString(), from: start, to: end, complete: false, rows: 0, reconciled: 0, unknown: 0, unreconciled: [], matched: 0 };
+      reconciliation.read = false;
       if (failure && failure.reason === 'daily_limit') break;
       continue;
     }

@@ -809,6 +809,10 @@ function runZohoChecks({
     const withData = reconciled.filter(a => a.reconciliation && Array.isArray(a.reconciliation.unreconciled));
     if (!reconciled.length) return mark('unreconciled_bank_items', 'not_configured');
     if (!withData.length) return mark('unreconciled_bank_items', 'needs_sync');
+    // An account whose read was cut short before any row came back (the sync's read budget ran out) was not read at
+    // all: if every account with data is like that, there is no result, never a false OK.
+    const unread = a => a.reconciliation.complete === false && !(Number(a.reconciliation.rows) > 0);
+    if (withData.every(unread)) return mark('unreconciled_bank_items', 'needs_sync');
     const totalRows = withData.reduce((sum, a) => sum + (Number(a.reconciliation.rows) || 0), 0);
     const unknownRows = withData.reduce((sum, a) => sum + (Number(a.reconciliation.unknown) || 0), 0);
     if (totalRows && unknownRows === totalRows) return mark('unreconciled_bank_items', LABELS.unavailable);

@@ -785,6 +785,14 @@ test('Unreconciled Bank (Zoho): a /chartofaccounts/transactions row (debit_amoun
   assert.equal(check.potential_value_gbp, 1117.22);
 });
 
+test('Unreconciled Bank (Zoho): bank accounts whose read was cut short with no rows give "needs sync", never a false OK', () => {
+  const bank = mapping.mapAccount(rawAccount(['a-bk2', 'Made Up Bank Two', 'bank']));
+  const cut = { readAt: '2026-11-10T00:00:00Z', from: '2026-07-01', to: '2026-11-10', complete: false, rows: 0, reconciled: 0, unknown: 0, unreconciled: [] };
+  const check = run({ accounts: [...ACCOUNTS.filter(a => a.type !== 'BANK'), { ...bank, reconciliation: cut }] }).byType.unreconciled_bank_items;
+  assert.equal(check.period_checked, 'needs_sync');
+  assert.equal(check.count, null);
+});
+
 test('Journals to Bank (Zoho): a reversal dated after the period end does not cancel the original inside the period', () => {
   const period = resolvePeriod({ type: 'custom', from: '2026-07-01', to: '2026-09-30' }, { asOf: '2026-11-10', ledgerName: 'Zoho Books' });
   const journals = [

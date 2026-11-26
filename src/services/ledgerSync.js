@@ -189,14 +189,16 @@ async function readAccounting(provider, externalId, org, docs, emit, cachedDocum
   const read = await provider.fetchAccounting(externalId, {
     emit, readBudget: budget, cached: type => cachedRows(org.id, type),
   });
-  const lineItems = await provider.fetchLineItems(externalId, docs, { emit, readBudget: budget, cachedDocuments });
   // Zoho: which bank transactions are reconciled, and the deposits categorised straight to income, for the review
-  // period, with what is left of the same budget (after the line items, which more checks need).
+  // period. Read before the line items: a client with a large backlog of unread lines used up the whole budget
+  // first, so the bank reads got nothing and Unreconciled Bank showed a false OK. They take a few list pages per
+  // account; the line items carry on from where they stopped at the next sync.
   if (typeof provider.fetchBankActivity === 'function') {
     await provider.fetchBankActivity(externalId, read, {
       period: options.period || null, emit, readBudget: budget, cached: type => cachedRows(org.id, type),
     });
   }
+  const lineItems = await provider.fetchLineItems(externalId, docs, { emit, readBudget: budget, cachedDocuments });
   const out = {};
   for (const [name, type] of Object.entries(ACCOUNTING_TYPES)) {
     const section = read[name];
