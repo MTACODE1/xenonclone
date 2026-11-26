@@ -57,6 +57,17 @@ test('Zoho amounts: currency prefix, sign before or after it, brackets; anything
   }
 });
 
+test('Zoho euro amounts with a decimal comma ("€89,05", "€1.234,56") are read; other comma decimals still are not', () => {
+  const read = value => { const parsed = zoho.parseZohoAmount(value); return parsed && [parsed.amount, parsed.currency]; };
+  assert.deepEqual(read('€89,05'), [89.05, '€']);
+  assert.deepEqual(read('€0,00'), [0, '€']);
+  assert.deepEqual(read('€1.234,56'), [1234.56, '€']);
+  assert.deepEqual(read('€-61,38'), [-61.38, '€']);
+  assert.deepEqual(read('EUR 12.345,6'), [12345.6, 'EUR']);
+  assert.deepEqual(read('€1,234.56'), [1234.56, '€'], 'the English form still reads');
+  for (const text of ['AED98.765,43', '1.234,56', '89,05', '€1.23,45']) assert.equal(zoho.parseZohoAmount(text), null, text);
+});
+
 test('the Uncategorized cell: empty is none, "1 transaction" and "n transactions" are counts, anything else unknown', () => {
   assert.equal(zoho.parseUncategorised(''), 0);
   assert.equal(zoho.parseUncategorised('<!---->'), 0);
@@ -412,7 +423,7 @@ test('a Zoho read without the Zoho permission opens the allow page and reads not
 
 test('the manifest keeps exactly the Xero sites as required and asks for the Zoho sites only as optional', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '../extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '1.5.0');
+  assert.equal(manifest.version, '1.5.1');
   assert.deepEqual(manifest.permissions, ['scripting', 'storage']);
   // Required sites unchanged from 1.4.3: a new required site makes Chrome disable the extension on update until
   // each user approves it, which would stop the Xero reads.

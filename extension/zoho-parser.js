@@ -60,15 +60,30 @@
   // the reading rather than saving a wrong figure.
   const CURRENCY = "[A-Za-z]{1,4}\\$?|[$£€₹¥]";
   const AMOUNT = new RegExp('^(\\()?\\s*(-)?\\s*(' + CURRENCY + ')?\\s*(-)?\\s*(\\d{1,3}(?:,\\d{2,3})*|\\d+)(\\.\\d{1,3})?\\s*(\\))?$');
+  // Euro amounts: Zoho shows them with a comma for the decimals and dots for thousands ("€89,05", "€1.234,56") when
+  // the client's euro currency is set up that way. Only read with € or EUR in front, so nothing else is guessed.
+  const EURO_AMOUNT = /^(\()?\s*(-)?\s*(€|EUR)\s*(-)?\s*(\d{1,3}(?:\.\d{3})+|\d+)(,\d{1,2})?\s*(\))?$/;
+  function parseEuroAmount(text) {
+    const match = text.match(EURO_AMOUNT);
+    if (!match) return null;
+    const [, open, minusBefore, currency, minusAfter, whole, decimals, close] = match;
+    if (Boolean(open) !== Boolean(close) || (minusBefore && minusAfter)) return null;
+    const amount = Number(whole.replace(/\./g, '') + (decimals ? '.' + decimals.slice(1) : ''));
+    if (!Number.isFinite(amount)) return null;
+    const negative = Boolean(open || minusBefore || minusAfter) && amount !== 0;
+    return { amount: negative ? -amount : amount, currency };
+  }
+
   function parseZohoAmount(value) {
     if (value == null) return null;
-    const match = decode(String(value)).replace(/[  ]/g, ' ').trim().match(AMOUNT);
-    if (!match) return null;
+    const text = decode(String(value)).replace(/[  ]/g, ' ').trim();
+    const match = text.match(AMOUNT);
+    if (!match) return parseEuroAmount(text);
     const [, open, minusBefore, currency, minusAfter, whole, decimals, close] = match;
     if (Boolean(open) !== Boolean(close)) return null;
     if (minusBefore && minusAfter) return null;
     // Commas must group in threes at the right-hand end ("1,234" or Indian "1,23,456"), never "12,34".
-    if (whole.includes(',') && !/,\d{3}$/.test(whole)) return null;
+    if (whole.includes(',') && !/,\d{3}$/.test(whole)) return parseEuroAmount(text);
     const amount = Number(whole.replace(/,/g, '') + (decimals || ''));
     if (!Number.isFinite(amount)) return null;
     const negative = Boolean(open || minusBefore || minusAfter) && amount !== 0;

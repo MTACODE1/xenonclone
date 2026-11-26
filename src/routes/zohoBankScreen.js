@@ -79,6 +79,10 @@ function createZohoBankScreenRouter(deps) {
       const zohoOrgId = zohoOrgIdOf(org);
       if (!zohoOrgId) return res.status(404).json({ error: 'Zoho Books client not found' });
       if (!(await canAccess(req, org.id))) return res.status(403).json({ error: 'You do not have access to this client' });
+      // The entity cache is not kept across a restart: load this client's copy from MySQL first (as a sync does), or
+      // every client not synced since the last deploy showed "Zoho Books has not been synced yet".
+      await require('../db/xeroCacheStore').hydrateOrgIfEmpty(org.id)
+        .catch(error => console.error(`[zohoBankScreen] cache load failed for organisation ${org.id}: ${error.message}`));
       const [reading, accounts, statusRows] = await Promise.all([
         getLatestZohoReading(org.id), getCachedEntitiesAsync(org.id, 'account'), getCachedEntitiesAsync(org.id, 'organisation'),
       ]);
