@@ -199,6 +199,10 @@ function runZohoChecks({
     return rate && rate.effectiveRate != null ? Number(rate.effectiveRate) : null;
   };
   const vatRegistered = uae.isVatRegistered(taxProfile, taxRates);
+  // The date VAT registration took effect (Zoho's tax settings). Before it the client could not charge or reclaim VAT,
+  // so documents dated earlier are left out of the tax-code checks.
+  const vatFrom = /^\d{4}-\d{2}-\d{2}$/.test(String(taxProfile?.taxRegisteredDate || '')) ? taxProfile.taxRegisteredDate : null;
+  const beforeVat = doc => Boolean(vatFrom) && Boolean(dateOf(doc)) && dateOf(doc) < vatFrom;
   const accountsKnown = accountById.size > 0;
   const todayIso = now.toISOString().slice(0, 10);
 
@@ -279,6 +283,7 @@ function runZohoChecks({
     const isMileage = name => /^mileage(\s+expense)?$/i.test(String(name || '').trim());
     const suppliers = new Map();
     for (const doc of inWindow([...accpay, ...expenses])) {
+      if (beforeVat(doc)) continue;
       const contactId = doc.contact?.contactID;
       if (!contactId || isMileage(doc.contact?.name)) continue;
       const entryInPeriod = isWithinPeriod(dateOf(doc), period);
@@ -338,6 +343,7 @@ function runZohoChecks({
       for (const doc of scope.docs([...accpay, ...expenses])) {
         // UAE: a supplier that is not VAT-registered charges no VAT, so its bills rightly carry none.
         if (isUae && uae.isUnregisteredSupplier(doc)) continue;
+        if (beforeVat(doc)) continue;
         // An import from outside the GCC with no VAT and no reverse charge is right for goods whose VAT was paid at
         // customs, but not for services (they should be under reverse charge). Zoho does not say which, so these
         // lines are listed for review and add no value.
@@ -371,6 +377,7 @@ function runZohoChecks({
     const linesFor = scope => {
       const rows = [];
       for (const doc of scope.docs(accrec)) {
+        if (beforeVat(doc)) continue;
         for (const line of doc.lineItems || []) {
           const id = idOfLine(line);
           if (!missingTax(doc, line) || !id || !revenueIds.has(id)) continue;
@@ -945,17 +952,19 @@ function runZohoChecks({
     // Taxable supplies. A registered client: standard- (5%) and zero-rated (0%) sales lines, never exempt or
     // out-of-scope ones. A client that is not registered has no VAT rates in Zoho at all, so every sales line on an
     // income account that is not marked exempt or out of scope counts (its rate would be 5% or 0% once registered).
-    const taxableLine = line => {
+    const taxableLine = (line, doc) => {
       if (uae.isExemptLine(line)) return false;
-      if (!vatRegistered) return revenueIds.has(idOfLine(line));
-      if (!line.taxType || line.taxType === 'NONE') return false;
+      // Before registration (or not registered) every sale on an income account counts towards turnover; after it, a
+      // sales line left without a VAT code is still a supply (Sales Tax Missing lists it), so it counts too.
+      if (!vatRegistered || beforeVat(doc)) return revenueIds.has(idOfLine(line));
+      if (!line.taxType || line.taxType === 'NONE') return revenueIds.has(idOfLine(line));
       const pct = ratePercent(line);
       return pct === 5 || pct === 0;
     };
     let supplies = 0;
     for (const doc of accrec.filter(d => within(d, from, to))) {
       if (unread(doc)) { supplies += unreadNet(doc); continue; }
-      for (const line of doc.lineItems || []) if (taxableLine(line)) supplies += lineNet(doc, line);
+      for (const line of doc.lineItems || []) if (taxableLine(line, doc)) supplies += lineNet(doc, line);
     }
     // Sales credit notes, less: Zoho's credit note list has no lines, so its net total (or the gross total when
     // Zoho gives no net figure) is taken off in full. A credit against an exempt sale should not be, so the amount

@@ -221,6 +221,22 @@ test('Sales Tax Missing (UAE): a blank-rate export is a finding (it should carry
   assert.deepEqual(counted(byType.sales_tax_missing).map(i => [i.invoiceId, i.amount]), [['s1', 1000]]);
 });
 
+test('UAE tax checks leave out documents dated before the VAT registration date', () => {
+  const taxProfile = { isTaxRegistered: true, taxRegisteredDate: '2026-08-01' };
+  const { byType } = run({ taxProfile, invoices: [
+    invoice('s-pre', '2026-07-20', 'c1', [line('a-sales', 1000)]),
+    invoice('s-post', '2026-08-05', 'c1', [line('a-sales', 900)]),
+    bill('b-pre', '2026-07-21', 'v1', [line('a-office', 300)]),
+    bill('b-post', '2026-08-06', 'v1', [line('a-office', 200)]),
+    // Before registration "No VAT"; after it a 5% rate: one code once registered, so not a multi-tax supplier.
+    bill('m-pre', '2026-07-10', 'v2', [line('a-office', 400)]),
+    bill('m-post', '2026-08-10', 'v2', [line('a-office', 500, { tax: 't-std', pct: 5 })]),
+  ] });
+  assert.deepEqual(counted(byType.sales_tax_missing).map(i => i.invoiceId), ['s-post']);
+  assert.deepEqual(counted(byType.purchase_tax_missing).map(i => i.invoiceId).sort(), ['bill-b-post']);
+  assert.ok(!counted(byType.multi_tax_suppliers).some(i => i.contactId === 'v2'), 'the registration change is not a second tax code');
+});
+
 test('a USD bill with no exchange rate is listed but kept out of the money total; a USD bill with a rate is converted', () => {
   const { byType } = run({ invoices: [
     bill('f1', '2026-08-01', 'v1', [line('a-office', 100)], { currency_code: 'USD', exchange_rate: 3.6725 }),
