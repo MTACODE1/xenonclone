@@ -375,6 +375,26 @@ test('balance checks with no balance read are "unavailable", never a made-up fig
   assert.equal(run({ region: null }).byType.dividend_status.period_checked, LABELS.unavailable);
 });
 
+test('a tax-inclusive Zoho bill: line item_total is already net, so net is 5700 and gross 5985 (no second VAT deduction)', () => {
+  const { netLineAmount, grossLineAmount } = require('../src/services/checkRules');
+  const raw = { bill_id: 'inc1', is_inclusive_tax: true, sub_total: 5700, tax_total: 285, total: 5985,
+    line_items: [{ line_item_id: 'l1', account_id: 'a-office', rate: 5985, item_total: 5700, tax_id: 't-std', tax_percentage: 5, line_item_taxes: [{ tax_amount: 285 }] }] };
+  const doc = mapping.documentDetail(raw);
+  const l = doc.lineItems[0];
+  assert.equal(netLineAmount(doc, l), 5700);
+  assert.equal(grossLineAmount(doc, l), 5985);
+  assert.equal(doc.taxInclusive, true);
+});
+
+test('Tax Review by Code: a negative line (a fee taken off a sale) reduces the group\'s net and VAT', () => {
+  const { byType } = run({ invoices: [
+    invoice('n1', '2026-08-01', 'c1', [line('a-sales', 1000, { tax: 't-std', pct: 5, taxAmount: 50 }), line('a-sales', -200, { tax: 't-std', pct: 5, taxAmount: -10 })], { place_of_supply: 'DU' }),
+  ] });
+  const std = counted(byType.tax_review_by_code).find(r => r.accountName === 'Sales' && r.accountCode === 'Standard Rate');
+  assert.equal(std.amount, 800);
+  assert.equal(std.taxAmount, 40);
+});
+
 // ---------------- tax review and thresholds ----------------
 
 test('Tax Review by Code (UAE): split by side and treatment, emirates shown, the three review flags raised', () => {

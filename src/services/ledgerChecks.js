@@ -33,6 +33,13 @@ const { regionOf, uaeDuplicateContactPairs } = require('./uaeRules');
 // flags from this sync (null on a cache-only run, which uses the stored copy).
 async function runLedgerChecks({ org, runId, period, invoices, contacts, credits: allCredits, options = {}, emit = () => {}, ledger, saveOrganisation, lockDate = null, baseCurrency = null, accounting = null, taxProfile = null }) {
   const orgId = org.id;
+  // Zoho Books invoices and bills read before 26 Nov 2026 were stored as 'Inclusive' when entered tax-inclusive, but
+  // their lines hold Zoho's item_total, which is net of tax, so the VAT was taken off a second time (5% low). Their
+  // lines are net either way: treated as Exclusive, as new reads are stored (mapping.documentDetail).
+  if (ledger && ledger.key === 'zoho') {
+    invoices = (invoices || []).map(doc => (doc && (doc.type === 'ACCREC' || doc.type === 'ACCPAY') && doc.lineAmountTypes === 'Inclusive'
+      ? { ...doc, lineAmountTypes: 'Exclusive', taxInclusive: true } : doc));
+  }
   // A document raised in another currency (a USD invoice on an AED client) is converted to the
   // client's own currency for every total, with the same amountInBase the Xero checks use: each
   // document carries currencyRate in Xero's convention (units of its own currency per one unit of

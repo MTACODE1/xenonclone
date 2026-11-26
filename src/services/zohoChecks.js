@@ -878,8 +878,10 @@ function runZohoChecks({
           taxType: line.taxType || 'NONE', flags: new Set(), emirates: new Map(),
         };
         group.count += 1;
-        group.net += Math.abs(net);
-        group.tax += Math.abs(tax);
+        // A negative invoice or bill line (a platform fee taken off a sale) reduces the group, as it does Zoho's VAT
+        // ledger; journal lines carry their debit/credit in the sign, so they add their size.
+        group.net += side === 'journals' ? Math.abs(net) : net;
+        group.tax += side === 'journals' ? Math.abs(tax) : tax;
         if (isUae && side === 'sales') {
           const pct = ratePercent(line);
           if (pct === 5 && line.taxType && line.taxType !== 'NONE') {
@@ -898,7 +900,7 @@ function runZohoChecks({
       };
       for (const [side, docs] of [['sales', accrec], ['purchases', [...accpay, ...expenses]]]) {
         for (const doc of scope.docs(docs)) {
-          if (cannotConvert(doc)) continue;
+          if (cannotConvert(doc) || beforeVat(doc)) continue;
           const rate = hasRate(doc) ? Number(doc.currencyRate) : 1;
           for (const line of doc.lineItems || []) add(side, doc, line, netLineAmount(doc, line), (Number(line.taxAmount) || 0) / rate);
         }

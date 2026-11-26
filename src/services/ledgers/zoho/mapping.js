@@ -303,7 +303,10 @@ function mapTaxRate(tax) {
 // taxType names the rate ('NONE' for no tax, as Xero writes it); taxAmount is the line's tax.
 // Zoho gives the line's tax in line_item_taxes when it has it; otherwise it is worked out from the
 // rate and marked taxAmountEstimated, since Zoho may round tax per document instead.
-function lineTax(line, inclusive) {
+// net: the line's item_total is net of tax whatever the document's tax setting (Zoho invoices and bills: a
+// tax-inclusive bill line with rate 5985 has item_total 5700 and tax 285), so an estimate is item_total x rate.
+// An expense line is different: on a tax-inclusive expense its item_total is the gross (231 with 11 tax).
+function lineTax(line, inclusive, net = false) {
   const taxes = Array.isArray(line.line_item_taxes) ? line.line_item_taxes : [];
   const listed = taxes.filter(tax => tax && tax.tax_amount != null && tax.tax_amount !== '');
   if (listed.length) return { taxAmount: round2(listed.reduce((sum, tax) => sum + number(tax.tax_amount), 0)), estimated: false };
@@ -311,12 +314,12 @@ function lineTax(line, inclusive) {
   const percentage = numberOrNull(line.tax_percentage);
   const amount = number(line.item_total != null ? line.item_total : line.amount);
   if (!percentage || !idOrNull(line.tax_id)) return { taxAmount: 0, estimated: false };
-  const tax = inclusive ? amount * percentage / (100 + percentage) : amount * percentage / 100;
+  const tax = inclusive && !net ? amount * percentage / (100 + percentage) : amount * percentage / 100;
   return { taxAmount: round2(tax), estimated: true };
 }
 
-function mapDocumentLine(line, { inclusive = false } = {}) {
-  const { taxAmount, estimated } = lineTax(line, inclusive);
+function mapDocumentLine(line, { inclusive = false, net = false } = {}) {
+  const { taxAmount, estimated } = lineTax(line, inclusive, net);
   return {
     lineItemID: idOrNull(line.line_item_id),
     description: textOrNull(line.description) || textOrNull(line.name),
@@ -350,8 +353,11 @@ function documentDetail(raw) {
   const inclusive = Boolean(raw.is_inclusive_tax);
   const lines = Array.isArray(raw.line_items) ? raw.line_items : [];
   return {
-    lineItems: lines.map(line => mapDocumentLine(line, { inclusive })),
-    lineAmountTypes: inclusive ? 'Inclusive' : 'Exclusive',
+    // Invoice and bill lines are net of tax in Zoho even on a tax-inclusive document, so in Xero's terms the lines are
+    // Exclusive; taxInclusive keeps how the document was entered.
+    lineItems: lines.map(line => mapDocumentLine(line, { inclusive, net: true })),
+    lineAmountTypes: 'Exclusive',
+    taxInclusive: inclusive,
     subTotal: numberOrNull(raw.sub_total),
     totalTax: numberOrNull(raw.tax_total),
     // Discounts, adjustments and shipping are entered on the document in Zoho, not on a line, so they
@@ -371,7 +377,7 @@ function documentDetail(raw) {
   };
 }
 
-const DETAIL_FIELDS = ['lineItems', 'lineAmountTypes', 'subTotal', 'totalTax', 'discountTotal', 'adjustment',
+const DETAIL_FIELDS = ['lineItems', 'lineAmountTypes', 'taxInclusive', 'subTotal', 'totalTax', 'discountTotal', 'adjustment',
   'shippingCharge', 'isReverseChargeApplied', 'taxTreatment', 'placeOfSupply', 'filedInVatReturnID',
   'lineItemsRead', 'lineItemsStale', 'detailKey'];
 
