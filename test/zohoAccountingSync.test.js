@@ -155,3 +155,27 @@ test('sync: the bank reconcile status and categorised deposits are read after th
     routes['/banktransactions'] = plain;
   }
 });
+
+test('sync: the bank reconcile status is still read when journal detail reads have used up the sync\'s read budget', async () => {
+  routes['/chartofaccounts/transactions'] = () => list('transactions', [
+    { categorized_transaction_id: 'r9', transaction_date: '2026-11-04', transaction_type: 'expense', reconcile_status: 'unreconciled', debit_amount: 0, credit_amount: 40 },
+  ]);
+  const journals = routes['/journals'];
+  const journal = routes['/journals/j1'];
+  const changed = '2026-11-26T09:00:00+0400';
+  routes['/journals'] = () => list('journals', [{ journal_id: 'j1', journal_date: '2026-11-03', status: 'published', total: 50, bcy_total: 50, last_modified_time: changed }]);
+  routes['/journals/j1'] = () => json({ journal: { journal_id: 'j1', journal_date: '2026-11-03', status: 'published', last_modified_time: changed,
+    line_items: [{ account_id: 'a-sales', debit_or_credit: 'credit', amount: 50, bcy_amount: 50 }, { account_id: 'a-bank', debit_or_credit: 'debit', amount: 50, bcy_amount: 50 }] } });
+  process.env.ZOHO_MAX_DETAIL_READS = '1';
+  try {
+    await syncLedgerOrganisation('zoho-600000009', null, { period: { type: 'all_transactions' } });
+    const bank = given.accounting.accounts.find(a => a.accountID === 'a-bank');
+    assert.equal(bank.reconciliation.complete, true);
+    assert.deepEqual(bank.reconciliation.unreconciled.map(t => t.transactionID), ['r9']);
+  } finally {
+    delete process.env.ZOHO_MAX_DETAIL_READS;
+    delete routes['/chartofaccounts/transactions'];
+    routes['/journals'] = journals;
+    routes['/journals/j1'] = journal;
+  }
+});

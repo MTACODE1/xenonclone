@@ -324,6 +324,7 @@ async function readZohoBanking(orgId, booksHost, progress = () => {}) {
       return fail('wrong_organisation', 'Zoho Books did not open this client. Check that your Zoho login has access to it.');
     }
     if (!page.onBanking) return fail('unexpected_page', 'Zoho Books opened a different screen than Banking.');
+    if (!page.tableFound && page.noBankAccounts) return fail('no_bank_accounts', 'This client has no bank or card accounts in Zoho Books, so there is nothing to read. Nothing was saved.');
     if (!page.tableFound) return fail('not_readable', 'Zoho Books\' Banking page did not show the bank accounts table for this client.');
     if (Array.isArray(page.problems) && page.problems.length && (page.settled || page.stableWithProblems)) return zohoPageChanged(page.problems);
     if (!page.settled) return fail('not_settled', 'Zoho Books was too slow to show the bank accounts. Try again in a moment.');

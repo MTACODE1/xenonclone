@@ -143,6 +143,7 @@
       case 'wrong_organisation': return alertBox('bad', 'Zoho Books did not open this client', 'Your Zoho login may not have access to this organisation. Check you are signed in to Zoho with a login that can open it.', link);
       case 'timeout': case 'not_settled': return alertBox('bad', 'Zoho Books took too long to load', 'Nothing was saved. Try again in a minute.');
       case 'not_readable': case 'unexpected_page': return alertBox('bad', 'Zoho Books\' Banking page could not be read', (error.message || '') + ' Nothing was saved. Open the client\'s Banking page in Zoho Books to check it loads, then try again.', link);
+      case 'no_bank_accounts': return alertBox('warn', 'No bank accounts in Zoho Books', 'This client has no bank or card accounts on Zoho Books\' Banking page, so there is nothing to read.', link);
       case 'unsupported_format': return alertBox('bad', 'Amounts in a format the extension cannot read yet', error.message || 'Nothing was saved. Please tell Aditya.');
       case 'page_changed': return alertBox('bad', 'Zoho Books has changed its page', error.message || 'Nothing was saved. The extension needs an update: please tell Aditya.');
       case 'verify_signed_out': return alertBox('bad', 'Akrio Verify is signed out', 'Sign in to Akrio Verify again, then click "Update from Zoho Books".');

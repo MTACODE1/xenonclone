@@ -12,11 +12,15 @@
   // Zoho Books is a single-page app: the address changes and the table is drawn some seconds after the page
   // "loads". The page counts as read once the table's HTML has stayed the same for three checks in a row and
   // parses without a problem, for up to 50 seconds.
-  let last = null, stable = 0, settled = false, stableWithProblems = false;
+  let last = null, stable = 0, settled = false, stableWithProblems = false, emptyChecks = 0, noBankAccounts = false;
+  // A client with no bank or card account: Zoho shows its "connect a bank" screen and never draws the table.
+  const emptyBanking = () => !table() && /Connect\s+(?:your\s+)?Bank|Add\s+Bank\s+(?:Account|or\s+Credit)/i.test(text(document.body).slice(0, 20000));
   for (let i = 0; i < 50; i++) {
     await sleep(1000);
     // Signed out, or sent to another screen or organisation: stop waiting, the service worker says what happened.
     if (!parser.isBooksHost(location.host) || !parser.isBankingHash(location.hash)) break;
+    emptyChecks = emptyBanking() ? emptyChecks + 1 : 0;
+    if (i >= 5 && emptyChecks >= 5) { noBankAccounts = true; break; }
     const node = table();
     const html = node ? node.outerHTML : null;
     if (html === last) stable++; else { stable = 0; last = html; }
@@ -35,6 +39,7 @@
     onBanking: parser.isBankingHash(location.hash),
     pageTitle: document.title.slice(0, 200),
     tableFound: Boolean(node),
+    noBankAccounts,
     settled,
     stableWithProblems,
     problems: parsed.problems,

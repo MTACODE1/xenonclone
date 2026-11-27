@@ -193,9 +193,11 @@ async function readAccounting(provider, externalId, org, docs, emit, cachedDocum
   // period. Read before the line items: a client with a large backlog of unread lines used up the whole budget
   // first, so the bank reads got nothing and Unreconciled Bank showed a false OK. They take a few list pages per
   // account; the line items carry on from where they stopped at the next sync.
+  // It has a read budget of its own: the journal and expense detail reads in fetchAccounting can use up the shared one
+  // on a client with a large backlog (one client: every bank read came back empty, 27 Nov 2026).
   if (typeof provider.fetchBankActivity === 'function') {
     await provider.fetchBankActivity(externalId, read, {
-      period: options.period || null, emit, readBudget: budget, cached: type => cachedRows(org.id, type),
+      period: options.period || null, emit, readBudget: provider.createReadBudget(), cached: type => cachedRows(org.id, type),
     });
   }
   const lineItems = await provider.fetchLineItems(externalId, docs, { emit, readBudget: budget, cachedDocuments });

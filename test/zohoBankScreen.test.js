@@ -423,7 +423,7 @@ test('a Zoho read without the Zoho permission opens the allow page and reads not
 
 test('the manifest keeps exactly the Xero sites as required and asks for the Zoho sites only as optional', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '../extension/manifest.json'), 'utf8'));
-  assert.equal(manifest.version, '1.5.1');
+  assert.equal(manifest.version, '1.5.2');
   assert.deepEqual(manifest.permissions, ['scripting', 'storage']);
   // Required sites unchanged from 1.4.3: a new required site makes Chrome disable the extension on update until
   // each user approves it, which would stop the Xero reads.
