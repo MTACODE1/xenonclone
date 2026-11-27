@@ -12,8 +12,15 @@ const TOLERANCE = 0.005;
 // Name as Zoho shows it, made comparable: trimmed, runs of spaces collapsed, case ignored.
 const normaliseName = name => String(name == null ? '' : name).trim().replace(/\s+/g, ' ').toLowerCase();
 // Masked numbers ("xxxx0001", "****0001") are compared on their last four digits; null when there are none.
+// Zoho's Banking page shows an account with a bank feed as "xxxx1234 | Updated on: 26 Nov 2026"; only the part before
+// the bar is the account number (the date's digits made "2026" look like its last four).
+function cleanNumber(number) {
+  const text = String(number == null ? '' : number).split('|')[0].replace(/updated\s+on.*$/i, '').trim();
+  return text || null;
+}
+
 function numberTail(number) {
-  const digits = String(number == null ? '' : number).replace(/\D/g, '');
+  const digits = String(cleanNumber(number) || '').replace(/\D/g, '');
   return digits ? digits.slice(-4) : null;
 }
 
@@ -163,7 +170,7 @@ function buildZohoBankComparison({ reading, accounts, readStatus }) {
   const rows = [];
   const addRow = (screen, api, kind) => {
     const name = (screen && screen.accountName) || (api && api.accountName) || '';
-    const number = (screen && screen.accountNumber) || (api && api.accountNumber) || null;
+    const number = cleanNumber(screen && screen.accountNumber) || cleanNumber(api && api.accountNumber) || null;
     const row = {
       kind, accountName: name, accountNumber: number,
       accountId: (api && api.accountId) || (screen && screen.accountId) || null,

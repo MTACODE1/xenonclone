@@ -409,3 +409,17 @@ test('the card explains bank figures not read at the last sync, and figures from
   assert.match(two.text, /Read at different times/);
   assert.doesNotMatch(two.text, /the screen reading is newer|the API sync is newer/);
 });
+
+test('an account with a bank feed ("xxxx1234 | Updated on: 26 Nov 2026" on the screen) pairs with its API account by the real number', () => {
+  const { buildZohoBankComparison } = require('../src/services/zohoBankComparison');
+  const mapping = require('../src/services/ledgers/zoho/mapping');
+  const names = ['Made Up Co 1111', 'Made Up Co 2222'];
+  const accounts = mapping.mergeBankAccounts(names.map((n, i) => mapping.mapAccount({ account_id: 'b' + i, account_name: 'Made Up Co', account_type: 'bank', is_active: true })),
+    names.map((n, i) => ({ account_id: 'b' + i, account_name: 'Made Up Co', account_type: 'bank', account_number: 'xxxx' + n.slice(-4), currency_code: 'AED', balance: 100 * (i + 1), bcy_balance: 100 * (i + 1), bank_balance: 0, uncategorized_transactions: 0, is_active: true })));
+  const reading = { readAt: new Date().toISOString(), accounts: names.map((n, i) => ({ accountName: 'Made Up Co', accountNumber: 'xxxx' + n.slice(-4) + ' | Updated on: 26 Nov 2026', currency: 'AED', uncategorised: 0, amountInBank: 0, amountInBooks: 100 * (i + 1) })) };
+  const result = buildZohoBankComparison({ reading, accounts, readStatus: { readAt: new Date().toISOString(), permissions: { banking: true } } });
+  assert.equal(result.onlyScreenCount, 0);
+  assert.equal(result.onlyApiCount, 0);
+  assert.ok(result.rows.every(r => r.kind === 'matched' && r.agrees), JSON.stringify(result.rows.map(r => [r.kind, r.accountNumber])));
+  assert.equal(result.rows[0].accountNumber, 'xxxx1111');
+});
